@@ -35,7 +35,19 @@ export default function SHPProspectingAgent() {
   const [filterSegment, setFilterSegment] = useState('all');
   const [filterCounty, setFilterCounty] = useState('all');
   const [filterStatus, setFilterStatus] = useState('Ready');
+  const [filterOutreach, setFilterOutreach] = useState('Active'); // Active/Customer/Dead/PursueLater/all
   const [search, setSearch] = useState('');
+
+  // Per-prospect overrides — { [prospectId]: { outreachStatus, revisitDate, deletedAt } }
+  // Persisted to localStorage so status changes survive reloads
+  const [overrides, setOverrides] = useState({});
+
+  // Pursue Later modal state
+  const [pursueLaterFor, setPursueLaterFor] = useState(null); // prospect id
+  const [pursueLaterDate, setPursueLaterDate] = useState('');
+
+  // Delete confirmation modal
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // prospect object
 
   // Selected prospect / draft state
   const [selectedProspect, setSelectedProspect] = useState(null);
@@ -80,12 +92,90 @@ export default function SHPProspectingAgent() {
     if (saved) {
       try { setConfig(c => ({ ...c, ...JSON.parse(saved) })); } catch {}
     }
+    const savedOverrides = localStorage.getItem('shp_prospect_overrides_v3');
+    if (savedOverrides) {
+      try { setOverrides(JSON.parse(savedOverrides)); } catch {}
+    }
     autoConnect();
   }, []);
+
+  // Persist overrides whenever they change
+  useEffect(() => {
+    if (Object.keys(overrides).length > 0) {
+      localStorage.setItem('shp_prospect_overrides_v3', JSON.stringify(overrides));
+    }
+  }, [overrides]);
 
   const saveConfig = () => {
     localStorage.setItem('shp_config_v3', JSON.stringify(config));
     showToast('Settings saved');
+  };
+
+  // === Prospect status management ===
+  const setOutreachStatus = (prospectId, outreachStatus, extra = {}) => {
+    setOverrides(prev => {
+      const next = { ...prev, [prospectId]: { ...(prev[prospectId] || {}), outreachStatus, ...extra } };
+      localStorage.setItem('shp_prospect_overrides_v3', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const markCustomer = (prospectId) => {
+    setOutreachStatus(prospectId, 'Customer');
+    showToast('Marked as customer');
+  };
+
+  const markDead = (prospectId) => {
+    setOutreachStatus(prospectId, 'Dead');
+    showToast('Marked as dead lead');
+  };
+
+  const markActive = (prospectId) => {
+    setOutreachStatus(prospectId, 'Active', { revisitDate: null });
+    showToast('Restored to Active');
+  };
+
+  const openPursueLater = (prospect) => {
+    const existing = overrides[prospect.id]?.revisitDate;
+    if (existing) {
+      setPursueLaterDate(existing);
+    } else {
+      // Default: 90 days out
+      const d = new Date();
+      d.setDate(d.getDate() + 90);
+      setPursueLaterDate(d.toISOString().split('T')[0]);
+    }
+    setPursueLaterFor(prospect.id);
+  };
+
+  const savePursueLater = () => {
+    if (!pursueLaterFor || !pursueLaterDate) {
+      setPursueLaterFor(null);
+      return;
+    }
+    setOutreachStatus(pursueLaterFor, 'PursueLater', { revisitDate: pursueLaterDate });
+    showToast(`Pursue later — revisit ${pursueLaterDate}`);
+    setPursueLaterFor(null);
+    setPursueLaterDate('');
+  };
+
+  const confirmDelete = (prospect) => {
+    setDeleteConfirm(prospect);
+  };
+
+  const executeDelete = () => {
+    if (!deleteConfirm) return;
+    const id = deleteConfirm.id;
+    // Remove from prospects pool entirely
+    setProspects(prev => prev.filter(p => p.id !== id));
+    // Mark deletedAt in overrides so we know we explicitly deleted (audit/recovery if needed)
+    setOverrides(prev => {
+      const next = { ...prev, [id]: { ...(prev[id] || {}), deletedAt: new Date().toISOString() } };
+      localStorage.setItem('shp_prospect_overrides_v3', JSON.stringify(next));
+      return next;
+    });
+    showToast(`Deleted ${deleteConfirm.name || deleteConfirm.company} from pool`);
+    setDeleteConfirm(null);
   };
 
   // === Pipedrive proxy ===
@@ -261,6 +351,16 @@ If Apollo unavailable, return realistic example data for one of the three ICP se
 
   // === Research ===
   const researchProspect = async (prospect) => {
+    // Defensive guard — shouldn't be reachable from UI for Customer/Dead but protects bypassed entry points
+    const status = overrides[prospect.id]?.outreachStatus;
+    if (status === 'Customer') {
+      showToast('This is marked as a customer — no cold outreach', 'info');
+      return;
+    }
+    if (status === 'Dead') {
+      showToast('This prospect is marked Dead — restore to Active first', 'info');
+      return;
+    }
     setSelectedProspect(prospect);
     setIsResearching(true);
     setView('research');
@@ -462,9 +562,23 @@ Return ONLY a JSON object (no preamble, no markdown):
     showToast('Copied to clipboard');
   };
 
+  // === Layer overrides onto prospects (computed derived list) ===
+  // Each prospect gets an `outreachStatus` and `revisitDate` from overrides if present, else defaults
+  const prospectsWithOverrides = useMemo(() => {
+    return prospects.map(p => {
+      const o = overrides[p.id];
+      return {
+        ...p,
+        outreachStatus: o?.outreachStatus || 'Active',
+        revisitDate: o?.revisitDate || null,
+      };
+    });
+  }, [prospects, overrides]);
+
   // === Filtered prospect list (memoized) ===
   const filteredProspects = useMemo(() => {
-    return prospects.filter(p => {
+    return prospectsWithOverrides.filter(p => {
+      if (filterOutreach !== 'all' && p.outreachStatus !== filterOutreach) return false;
       if (filterStatus !== 'all' && p.status !== filterStatus) return false;
       if (filterSegment !== 'all' && p.segment !== filterSegment) return false;
       if (filterCounty !== 'all' && p.county !== filterCounty) return false;
@@ -474,19 +588,32 @@ Return ONLY a JSON object (no preamble, no markdown):
       }
       return true;
     }).sort((a, b) => (b.priority || 0) - (a.priority || 0));
-  }, [prospects, filterStatus, filterSegment, filterCounty, search]);
+  }, [prospectsWithOverrides, filterOutreach, filterStatus, filterSegment, filterCounty, search]);
 
-  const clusters = useMemo(() => buildClusters(prospects.filter(p => p.status === 'Ready')), [prospects]);
+  // Clusters: only Ready + Active (no Customers, Dead, or PursueLater in trip planning)
+  const clusters = useMemo(() => buildClusters(
+    prospectsWithOverrides.filter(p => p.status === 'Ready' && p.outreachStatus === 'Active')
+  ), [prospectsWithOverrides]);
+
+  // Pursue Later items whose revisit date has hit (today or earlier)
+  const pursueLaterDue = useMemo(() => {
+    const today = new Date().toISOString().split('T')[0];
+    return prospectsWithOverrides.filter(p =>
+      p.outreachStatus === 'PursueLater' && p.revisitDate && p.revisitDate <= today
+    );
+  }, [prospectsWithOverrides]);
 
   // === Stats ===
   const stats = useMemo(() => ({
-    total: prospects.length,
-    ready: prospects.filter(p => p.status === 'Ready').length,
-    review: prospects.filter(p => p.status === 'Review Needed').length,
+    total: prospectsWithOverrides.length,
+    ready: prospectsWithOverrides.filter(p => p.status === 'Ready' && p.outreachStatus === 'Active').length,
+    customers: prospectsWithOverrides.filter(p => p.outreachStatus === 'Customer').length,
+    pursueLater: prospectsWithOverrides.filter(p => p.outreachStatus === 'PursueLater').length,
     pushed: Object.keys(pdRecords).length,
     sent: Object.values(pdRecords).filter(r => r.sentAt).length,
     openDeals: Object.values(stageDeals).reduce((a, arr) => a + arr.length, 0),
-  }), [prospects, pdRecords, stageDeals]);
+    pursueLaterDueCount: pursueLaterDue.length,
+  }), [prospectsWithOverrides, pdRecords, stageDeals, pursueLaterDue]);
 
   // === STYLES ===
   const styles = makeStyles(pdConnected, pdMeta.stages.length);
@@ -502,9 +629,9 @@ Return ONLY a JSON object (no preamble, no markdown):
         userName={pdMeta.userName}
       />
       <div style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdMeta={pdMeta} setView={setView} clusters={clusters} fromName={config.fromName} />}
-        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} search={search} setSearch={setSearch} totalProspects={prospects.length} />}
-        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdMeta={pdMeta} setView={setView} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />}
+        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />}
+        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} pushToPipedrive={pushToPipedrive} sendViaGmail={sendViaGmail} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
@@ -512,6 +639,8 @@ Return ONLY a JSON object (no preamble, no markdown):
         {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} />}
       </div>
       {toast && <Toast styles={styles} toast={toast} />}
+      {pursueLaterFor && <PursueLaterModal styles={styles} date={pursueLaterDate} setDate={setPursueLaterDate} onSave={savePursueLater} onCancel={() => setPursueLaterFor(null)} />}
+      {deleteConfirm && <DeleteConfirmModal styles={styles} prospect={deleteConfirm} onConfirm={executeDelete} onCancel={() => setDeleteConfirm(null)} />}
       <GlobalStyles />
     </div>
   );
@@ -557,7 +686,7 @@ function Header({ styles, view, setView, pdConnected, isConnecting, userName }) 
 // =================================================================
 // === DASHBOARD ===
 // =================================================================
-function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, fromName }) {
+function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete }) {
   const topClusters = clusters.slice(0, 5);
   const firstName = (fromName || 'Anthony').split(' ')[0];
   return (
@@ -578,11 +707,28 @@ function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, 
       )}
 
       <div style={styles.statsGrid}>
-        <StatCard styles={styles} label="In Your Pool" value={stats.total} sub="Seed + manual + Apollo" />
-        <StatCard styles={styles} label="Ready" value={stats.ready} sub="In-ICP, in-territory" />
-        <StatCard styles={styles} label="Pushed to PD" value={stats.pushed} sub="This session" />
+        <StatCard styles={styles} label="Active Pool" value={stats.ready} sub="In-ICP, ready for outreach" />
+        <StatCard styles={styles} label="Customers" value={stats.customers} sub="Excluded from cold drafts" />
+        <StatCard styles={styles} label="Pushed to PD" value={stats.pushed} sub={stats.pursueLaterDueCount > 0 ? `${stats.pursueLaterDueCount} pursue-later due` : 'This session'} />
         <StatCard styles={styles} label="Open Deals" value={stats.openDeals} sub={pdConnected ? `In ${pdMeta.defaultPipelineName}` : 'Not connected'} />
       </div>
+
+      {pursueLaterDue.length > 0 && (
+        <div style={{ ...styles.card, borderColor: 'rgba(251, 191, 36, 0.3)', background: 'rgba(251, 191, 36, 0.05)' }}>
+          <div style={styles.sectionTitle}><RefreshCw size={14} /> Pursue Later — Revisit Time</div>
+          <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '12px' }}>
+            {pursueLaterDue.length} prospect{pursueLaterDue.length === 1 ? '' : 's'} {pursueLaterDue.length === 1 ? 'is' : 'are'} ready to revisit. Review and decide: re-activate, push the date, or mark dead.
+          </div>
+          {pursueLaterDue.slice(0, 5).map(p => (
+            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />
+          ))}
+          {pursueLaterDue.length > 5 && (
+            <button style={{ ...styles.secondaryBtn, marginTop: '8px' }} onClick={() => setView('find')}>
+              View all {pursueLaterDue.length} <ArrowRight size={13} />
+            </button>
+          )}
+        </div>
+      )}
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Sparkles size={14} /> Quick Actions</div>
@@ -650,7 +796,7 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
 // =================================================================
 // === FIND VIEW ===
 // =================================================================
-function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, search, setSearch, totalProspects }) {
+function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete }) {
   const [findTab, setFindTab] = useState('pool');
 
   return (
@@ -742,13 +888,23 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
       {findTab === 'pool' && (
         <>
           <div style={{ ...styles.card, padding: '16px' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '12px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '12px' }}>
               <div>
                 <label style={styles.label}>Search</label>
                 <input style={styles.input} value={search} onChange={e => setSearch(e.target.value)} placeholder="name, company, city…" />
               </div>
               <div>
-                <label style={styles.label}>Status</label>
+                <label style={styles.label}>Outreach</label>
+                <select style={styles.input} value={filterOutreach} onChange={e => setFilterOutreach(e.target.value)}>
+                  <option value="Active">Active</option>
+                  <option value="Customer">Customers</option>
+                  <option value="PursueLater">Pursue Later</option>
+                  <option value="Dead">Dead</option>
+                  <option value="all">All</option>
+                </select>
+              </div>
+              <div>
+                <label style={styles.label}>ICP Status</label>
                 <select style={styles.input} value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
                   <option value="all">All</option>
                   <option value="Ready">Ready</option>
@@ -778,7 +934,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
           <div style={styles.card}>
             <div style={styles.sectionTitle}><Users size={14} /> Prospects ({prospects.length})</div>
             {prospects.slice(0, 50).map(p => (
-              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} />
+              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />
             ))}
             {prospects.length > 50 && (
               <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: '#7a8aa3', fontStyle: 'italic' }}>
@@ -797,17 +953,35 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
   );
 }
 
-function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect }) {
+function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const research = researchData[prospect.id];
   const rec = pdRecords[prospect.id];
+  const status = prospect.outreachStatus || 'Active';
+
+  // Visual treatment based on outreach status
+  const isCustomer = status === 'Customer';
+  const isDead = status === 'Dead';
+  const isPursueLater = status === 'PursueLater';
+  const cardStyle = isDead
+    ? { ...styles.prospectCard, opacity: 0.5, borderStyle: 'dashed' }
+    : isCustomer
+    ? { ...styles.prospectCard, borderColor: 'rgba(34, 197, 94, 0.3)', background: 'rgba(34, 197, 94, 0.03)' }
+    : isPursueLater
+    ? { ...styles.prospectCard, borderColor: 'rgba(99, 130, 175, 0.3)' }
+    : styles.prospectCard;
+
   return (
-    <div style={styles.prospectCard}>
+    <div style={cardStyle}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '20px' }}>
         <div style={{ flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px', flexWrap: 'wrap' }}>
             <div style={{ fontSize: '14px', fontWeight: 600 }}>{prospect.name || <span style={{ color: '#7a8aa3', fontStyle: 'italic' }}>(no contact name)</span>}</div>
             <span style={styles.badge(segmentBadgeColor(prospect.segment))}>{prospect.segment}</span>
-            {research && <span style={styles.badge('green')}><CheckCircle2 size={10} /> Fit {research.fitScore}</span>}
+            {isCustomer && <span style={styles.badge('green')}><CheckCircle2 size={10} /> Customer</span>}
+            {isDead && <span style={styles.badge('gray')}>Dead</span>}
+            {isPursueLater && <span style={styles.badge('navy')}>Pursue {prospect.revisitDate}</span>}
+            {research && !isCustomer && !isDead && <span style={styles.badge('green')}><CheckCircle2 size={10} /> Fit {research.fitScore}</span>}
             {rec?.dealId && <span style={styles.badge('navy')}>PD #{rec.dealId}</span>}
             {rec?.sentAt && <span style={styles.badge('amber')}><Send size={10} /> Sent</span>}
           </div>
@@ -820,9 +994,51 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             <span style={{ color: '#5a6b85' }}>· source: {prospect.source}</span>
           </div>
         </div>
-        <button style={styles.primaryBtn} onClick={() => researchProspect(prospect)}>
-          {research ? 'Open' : 'Research'} <ArrowRight size={14} />
-        </button>
+        <div style={{ display: 'flex', gap: '6px', position: 'relative' }}>
+          {!isDead && !isCustomer && (
+            <button style={styles.primaryBtn} onClick={() => researchProspect(prospect)}>
+              {research ? 'Open' : 'Research'} <ArrowRight size={14} />
+            </button>
+          )}
+          <button
+            style={{ ...styles.secondaryBtn, padding: '8px 10px' }}
+            onClick={() => setMenuOpen(o => !o)}
+            title="Change status"
+          >
+            ⋯
+          </button>
+          {menuOpen && (
+            <>
+              <div onClick={() => setMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
+              <div style={styles.statusMenu} data-status-menu="true">
+                {status !== 'Active' && (
+                  <button style={styles.statusMenuItem} onClick={() => { markActive(prospect.id); setMenuOpen(false); }}>
+                    <RefreshCw size={12} /> Restore to Active
+                  </button>
+                )}
+                {status !== 'Customer' && (
+                  <button style={styles.statusMenuItem} onClick={() => { markCustomer(prospect.id); setMenuOpen(false); }}>
+                    <CheckCircle2 size={12} color="#4ade80" /> Mark as Customer
+                  </button>
+                )}
+                {status !== 'PursueLater' && (
+                  <button style={styles.statusMenuItem} onClick={() => { openPursueLater(prospect); setMenuOpen(false); }}>
+                    <RefreshCw size={12} color="#93b0d6" /> Pursue Later…
+                  </button>
+                )}
+                {status !== 'Dead' && (
+                  <button style={styles.statusMenuItem} onClick={() => { markDead(prospect.id); setMenuOpen(false); }}>
+                    <X size={12} color="#9ca3af" /> Mark as Dead
+                  </button>
+                )}
+                <div style={{ borderTop: '1px solid rgba(232, 236, 243, 0.08)', margin: '4px 0' }} />
+                <button style={{ ...styles.statusMenuItem, color: '#ff6b85' }} onClick={() => { confirmDelete(prospect); setMenuOpen(false); }}>
+                  <X size={12} /> Delete from pool
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -839,7 +1055,7 @@ function segmentBadgeColor(seg) {
 // =================================================================
 // === CLUSTERS VIEW ===
 // =================================================================
-function ClustersView({ styles, clusters, researchProspect, researchData, pdRecords }) {
+function ClustersView({ styles, clusters, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete }) {
   const [expanded, setExpanded] = useState({});
 
   return (
@@ -873,7 +1089,7 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
             {isOpen && (
               <div style={{ marginTop: '16px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', paddingTop: '16px' }}>
                 {cluster.prospects.slice(0, 20).map(p => (
-                  <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} />
+                  <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />
                 ))}
                 {cluster.prospects.length > 20 && (
                   <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: '#7a8aa3', fontStyle: 'italic' }}>
@@ -1273,6 +1489,49 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdMe
 // =================================================================
 // === TOAST + GLOBAL STYLES ===
 // =================================================================
+function PursueLaterModal({ styles, date, setDate, onSave, onCancel }) {
+  return (
+    <div style={styles.modalOverlay} onClick={onCancel}>
+      <div style={styles.modalCard} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: '18px', fontWeight: 700, marginBottom: '8px' }}>Pursue Later</div>
+        <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '20px' }}>
+          When should I remind you to revisit this prospect? They'll appear on your Dashboard on this date.
+        </div>
+        <label style={styles.label}>Revisit Date</label>
+        <input style={styles.input} type="date" value={date} onChange={e => setDate(e.target.value)} min={new Date().toISOString().split('T')[0]} />
+        <div style={{ display: 'flex', gap: '10px', marginTop: '24px', justifyContent: 'flex-end' }}>
+          <button style={styles.secondaryBtn} onClick={onCancel}>Cancel</button>
+          <button style={styles.primaryBtn} onClick={onSave} disabled={!date}>
+            <CheckCircle2 size={14} /> Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteConfirmModal({ styles, prospect, onConfirm, onCancel }) {
+  return (
+    <div style={styles.modalOverlay} onClick={onCancel}>
+      <div style={styles.modalCard} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: '18px', fontWeight: 700, marginBottom: '8px' }}>Delete from pool?</div>
+        <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '20px', lineHeight: '1.6' }}>
+          This will remove <strong style={{ color: '#e8ecf3' }}>{prospect.name || prospect.company}</strong> from your prospect pool entirely. Pipedrive records (if any) are <strong>not</strong> affected — manage those in Pipedrive directly.
+          <div style={{ marginTop: '10px', padding: '10px 12px', background: 'rgba(255, 107, 133, 0.08)', borderRadius: '6px', fontSize: '12px', color: '#ff6b85' }}>
+            This action can't be undone from the agent. Re-importing the seed list won't restore deletions.
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '10px', marginTop: '24px', justifyContent: 'flex-end' }}>
+          <button style={styles.secondaryBtn} onClick={onCancel}>Cancel</button>
+          <button style={{ ...styles.primaryBtn, background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)' }} onClick={onConfirm}>
+            <X size={14} /> Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Toast({ styles, toast }) {
   return (
     <div style={styles.toast}>
@@ -1292,6 +1551,8 @@ function GlobalStyles() {
       button:active:not(:disabled) { transform: translateY(0); }
       button:disabled { opacity: 0.5; cursor: not-allowed; }
       code { font-family: 'SF Mono', Monaco, monospace; }
+      /* Override the global hover lift for items inside the status dropdown */
+      [data-status-menu] button:hover { transform: none !important; background: rgba(232, 236, 243, 0.08) !important; }
     `}</style>
   );
 }
@@ -1354,5 +1615,9 @@ function makeStyles(pdConnected, stagesLen) {
     toast: { position: 'fixed', bottom: '24px', right: '24px', background: 'rgba(10, 22, 40, 0.95)', border: '1px solid rgba(232, 236, 243, 0.15)', borderRadius: '10px', padding: '12px 18px', fontSize: '13px', fontWeight: 500, backdropFilter: 'blur(12px)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', gap: '10px', zIndex: 100, maxWidth: '420px' },
     grid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' },
     grid3: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' },
+    statusMenu: { position: 'absolute', top: '100%', right: 0, marginTop: '4px', background: 'rgba(10, 22, 40, 0.98)', border: '1px solid rgba(232, 236, 243, 0.12)', borderRadius: '10px', padding: '6px', minWidth: '210px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)', zIndex: 100 },
+    statusMenuItem: { display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 12px', background: 'transparent', border: 'none', color: '#e8ecf3', fontSize: '13px', fontFamily: 'inherit', cursor: 'pointer', borderRadius: '6px', textAlign: 'left' },
+    modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200 },
+    modalCard: { background: 'linear-gradient(180deg, #0f1d35 0%, #0a1628 100%)', border: '1px solid rgba(232, 236, 243, 0.15)', borderRadius: '14px', padding: '28px', maxWidth: '460px', width: '90%', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' },
   };
 }
