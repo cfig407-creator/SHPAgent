@@ -550,15 +550,17 @@ Return ONLY a JSON object (no preamble, no markdown):
       showToast('No email address — add one first', 'error');
       return;
     }
-    // Outlook web URL scheme — pre-fills a new compose window in Outlook on the web (M365)
-    const params = new URLSearchParams({
-      to: selectedProspect.email,
-      subject: draftEmail.subject,
-      body: draftEmail.body,
-    });
-    // Optional Smart BCC for users who want belt-and-suspenders logging (M365 sync usually handles it)
-    if (config.smartBcc) params.append('bcc', config.smartBcc);
-    const url = `https://outlook.office.com/mail/deeplink/compose?${params.toString()}`;
+    // IMPORTANT: build the URL manually with encodeURIComponent so spaces become %20.
+    // URLSearchParams encodes spaces as '+', which the Outlook deeplink does NOT decode back to spaces
+    // (it displays them literally as '+' signs in the email body and subject).
+    const enc = encodeURIComponent;
+    const parts = [
+      `to=${enc(selectedProspect.email)}`,
+      `subject=${enc(draftEmail.subject)}`,
+      `body=${enc(draftEmail.body)}`,
+    ];
+    if (config.smartBcc) parts.push(`bcc=${enc(config.smartBcc)}`);
+    const url = `https://outlook.office.com/mail/deeplink/compose?${parts.join('&')}`;
     window.open(url, '_blank', 'noopener,noreferrer');
     setPdRecords(prev => ({
       ...prev,
