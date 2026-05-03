@@ -3,9 +3,12 @@
 
 export const SHP_IDENTITY = {
   rep: 'Anthony Koscielecki',
+  title: 'Regional Sales Consultant',
   company: 'Superior Hardware Products',
-  phone: '407-725-8744',
+  directPhone: '407-725-8744',
+  officePhone: '407-339-6800',
   email: 'anthony@superiorhardwareproducts.com',
+  contactCardUrl: 'https://dot.cards/anthonyshp',
   founded: 1986,
   hq: 'Longwood, FL',
   pillars: [
@@ -22,6 +25,155 @@ export const SHP_IDENTITY = {
     'Code & Compliance Support',
   ],
 };
+
+// Default email signature — multi-line, used in every cold email
+export const DEFAULT_SIGNATURE = `Anthony Koscielecki
+Regional Sales Consultant
+
+Direct: 407-725-8744
+Office: 407-339-6800
+Email: anthony@superiorhardwareproducts.com
+
+Save my contact card: https://dot.cards/anthonyshp`;
+
+// === CUSTOMER PROOF POINTS ===
+// Curated from 2025 invoice data. named=true means OK to drop the name in cold email body.
+// named=false means count toward generic framing only (e.g., "we work with major contractors").
+// Cross-segment dropping is allowed — proximity (county) matters more than exact-segment match.
+export const CUSTOMERS = [
+  // Healthcare — Anthony confirmed OK to name
+  { name: 'AdventHealth Fish Memorial Hospital', segment: 'Healthcare', county: 'Volusia', revenue: 359922, named: true },
+  { name: 'AdventHealth Deland', segment: 'Healthcare', county: 'Volusia', revenue: 56880, named: true },
+  { name: 'AdventHealth', segment: 'Healthcare', county: 'Multi', revenue: 14294, named: true },
+  { name: 'Davita Lab', segment: 'Healthcare', county: 'Volusia', revenue: 16645, named: true },
+  { name: 'Orlando Health - Health Central', segment: 'Healthcare', county: 'Orange', revenue: 9767, named: true },
+  { name: 'Hospice of Marion County', segment: 'Healthcare', county: 'Marion', revenue: 9332, named: true },
+  { name: "Nemours Children's Health", segment: 'Healthcare', county: 'Orange', revenue: 3938, named: true },
+  // Local Government — strong pillar
+  { name: 'City of Deland', segment: 'Local Government', county: 'Volusia', revenue: 43350, named: true },
+  { name: 'Sanford Airport Authority', segment: 'Local Government', county: 'Seminole', revenue: 39101, named: true },
+  { name: 'Seminole County', segment: 'Local Government', county: 'Seminole', revenue: 34341, named: true },
+  { name: 'City of Altamonte Springs', segment: 'Local Government', county: 'Seminole', revenue: 22746, named: true },
+  { name: 'City of Oviedo', segment: 'Local Government', county: 'Seminole', revenue: 13720, named: true },
+  { name: 'City of Tavares', segment: 'Local Government', county: 'Lake', revenue: 9834, named: true },
+  { name: 'FAA Daytona / Sanford', segment: 'Local Government', county: 'Volusia', revenue: 7736, named: true },
+  { name: 'City of South Daytona', segment: 'Local Government', county: 'Volusia', revenue: 5826, named: true },
+  { name: 'City of Deltona', segment: 'Local Government', county: 'Volusia', revenue: 4612, named: true },
+  { name: 'Jacksonville Job Corps', segment: 'Local Government', county: 'Duval', revenue: 3130, named: true },
+  { name: 'Seminole Electric Cooperative', segment: 'Local Government', county: 'Multi', revenue: 2612, named: true },
+  { name: 'City of DeBary Public Works', segment: 'Local Government', county: 'Volusia', revenue: 362, named: true },
+  // Higher Education — small pillar but recognizable names
+  { name: 'Stetson University', segment: 'Higher Education', county: 'Volusia', revenue: 65865, named: true },
+  { name: 'Lake-Sumter State College', segment: 'Higher Education', county: 'Sumter', revenue: 19123, named: true },
+  { name: 'Florida State College Jacksonville-South', segment: 'Higher Education', county: 'Duval', revenue: 5154, named: true },
+  { name: 'Seminole State College', segment: 'Higher Education', county: 'Seminole', revenue: 4399, named: true },
+  { name: 'University of Florida', segment: 'Higher Education', county: 'Alachua', revenue: 3817, named: true },
+  // K-12 Education — thin pillar but two great names
+  { name: "The Master's Academy", segment: 'K-12 Education', county: 'Seminole', revenue: 34747, named: true },
+  { name: 'Volusia County School Board', segment: 'K-12 Education', county: 'Volusia', revenue: 21809, named: true },
+];
+
+// Pick proof points for an email. Logic: prefer same-county or same-segment, take 2-3 names total.
+// Falls back to top revenue when no segment/county match.
+export function pickProofPoints(prospect, max = 3) {
+  if (!prospect) return [];
+  const eligible = CUSTOMERS.filter(c => c.named);
+  // Score by relevance to this prospect
+  const scored = eligible.map(c => {
+    let score = 0;
+    if (prospect.county && c.county === prospect.county) score += 100;
+    if (prospect.segment && c.segment === prospect.segment) score += 50;
+    // Also good: same broad type (Local Gov + K-12 are both public-sector)
+    if ((prospect.segment === 'Local Government' || prospect.segment === 'K-12 Education' || prospect.segment === 'Higher Education')
+        && (c.segment === 'Local Government' || c.segment === 'K-12 Education' || c.segment === 'Higher Education')) {
+      score += 20;
+    }
+    score += Math.log10(c.revenue + 10); // small revenue weighting
+    return { ...c, score };
+  });
+  return scored.sort((a, b) => b.score - a.score).slice(0, max);
+}
+
+// === VOICE EXAMPLES ===
+// Anthony's actual cold email templates. Used as few-shot examples in the prompt
+// so AI drafts match his real voice (humble + "arrow in quiver" + peer tone).
+export const VOICE_EXAMPLES = [
+  {
+    context: 'Cold-cold, no research hook, "found you on website" framing',
+    body: `I got your name while wandering the [their website], hoping to get the right person some information about Superior Hardware Products.
+
+Because I know how important doors are, I know you likely have someone for what we do, but I wanted to get you some information in case you need another arrow in your quiver.
+
+In short, we can handle everything related to your door openings — from mechanical to electrified to automatics. SHP can provide, service, and install anything related to doors or hardware. I included our one-pager for easy reference.
+
+Let me know if the timing is right for a conversation, or if there's another person I should reach out to.
+
+I'm often in the area with a few customers, so I can stop by for an in-person intro if you'd prefer.`,
+  },
+  {
+    context: 'New-rep introduction to existing customer (warm-ish, but useful pattern)',
+    body: `I am new to the SHP team and wanted to reach out for a quick introduction.
+
+I am now responsible for what we call N. Central Florida, which you are a part of.
+
+My list shows you as an active customer, so I want to ensure I have a good understanding of your needs so that I can best support your team/facility(s).
+
+Ideally, we would find some time to meet in person, but we can set up a call or video meeting if you would prefer.
+
+If you need to become more familiar with SHP, I have attached a snapshot of our capabilities.`,
+  },
+  {
+    context: 'Email-OK soft opener with peer credibility',
+    body: `I hope email is OK. I did not want to interrupt your day with a phone call, so I wanted to send a quick note introducing Superior Hardware Products.
+
+Our team provides service and installation for everything in your doorways across your facilities.
+
+We are proud to work with multiple [match-segment-or-region peers] across Central Florida, bridging the gap between their access control provider and locksmith. Our successful partnerships speak to our capabilities, and we can bring your team the same level of service.
+
+If you think there is an opportunity to support your team, I would appreciate the chance to discuss our capabilities.`,
+  },
+];
+
+// === VOICE GUIDE — what makes Anthony's voice his ===
+export const VOICE_GUIDE = `
+ANTHONY'S VOICE — characteristics the draft must hit:
+
+1. HUMBLE-CONFIDENT FRAMING. Acknowledge they probably have a vendor before pitching. Phrases like:
+   - "I know you likely have someone for what we do, but..."
+   - "I am sure you already have a resource, but..."
+   - "Wanted to ask if it was worth the time for an intro to have another arrow in the quiver"
+
+2. RESOURCE-FRAMED, NOT MEETING-DEMANDING. Don't ask for a meeting outright. Position SHP as a resource they can lean on:
+   - "Wanted to be a name you recognize when something comes up"
+   - "If anything's active, happy to walk it with you"
+   - "Let me know if the timing is right for a conversation"
+
+3. PEER TONE. Conversational, not corporate. Allowed:
+   - "I hope email is OK"
+   - "I did not want to interrupt your day with a phone call"
+   - "I'm often in the area with a few customers, so I can stop by for an in-person intro if you'd prefer"
+   - "another arrow in your quiver" / "another quiver in your arsenal"
+
+4. PROOF DROPS, WHEN APPROPRIATE. When naming customers, keep it natural:
+   - "We're proud to work with multiple [public sector / educational] partners across Central Florida, including [Customer A] and [Customer B]"
+   - "Our team supports [Customer C] in [their county] and operates throughout the area"
+   NEVER: "We are pleased to announce our work with..." (corporate-sounding)
+   NEVER: list 5+ customers in a row (overkill)
+
+5. NO. EXCLAMATION. POINTS. Anthony's templates don't use them. Period.
+
+6. NO CORPORATE FILLER. Forbidden:
+   - "I hope this finds you well"
+   - "I wanted to reach out"
+   - "circle back" / "leverage" / "synergy" / "value-add"
+   - "best-in-class" / "industry-leading"
+
+7. SIGN OFF SIMPLE. Just a polite close, then signature. No "warm regards" or "sincerely yours."
+   - "Best Regards"
+   - "Look forward to connecting"
+   - "Have a great week"
+`;
+
 
 export const TERRITORY = {
   name: 'CFL North End User',
@@ -357,9 +509,9 @@ export const REVERSING_RESPONSES = {
   },
 };
 
-// === COLD EMAIL TEMPLATE (v2 tone — resource-framed, not Sandler-pattern-interrupt) ===
+// === COLD EMAIL TEMPLATE (Anthony's voice + proof points + resource framing) ===
 // This is the prompt the agent uses to draft cold emails.
-export function buildColdEmailPrompt(prospect, research, segment) {
+export function buildColdEmailPrompt(prospect, research, segment, signature) {
   const seg = segment || 'default';
   const cta = RESOURCE_CTAS[
     seg === 'K-12 Education' ? 'K12' :
@@ -367,31 +519,68 @@ export function buildColdEmailPrompt(prospect, research, segment) {
     seg === 'Local Government' ? 'LocalGov' : 'default'
   ];
 
-  return `Cold outreach email from ${SHP_IDENTITY.rep} at ${SHP_IDENTITY.company} (${SHP_IDENTITY.hq}, est. ${SHP_IDENTITY.founded}) to ${prospect.name}, ${prospect.title} at ${prospect.company}.
+  // Pick top 2-3 contextually-relevant proof points
+  const proofs = pickProofPoints(prospect, 3);
+  const proofText = proofs.length > 0
+    ? proofs.map(p => `- ${p.name} (${p.segment}, ${p.county} County)`).join('\n')
+    : 'No specific proof points — use generic framing only';
 
-PROSPECT SEGMENT: ${segment}
-PROSPECT LOCATION: ${prospect.city}, ${prospect.county || ''} County
-RESEARCH HOOK: ${research?.openingHook || `${prospect.company} operates in ${segment}`}
-PAIN SIGNALS RESEARCH SURFACED: ${research?.painSignals?.join('; ') || 'general facilities pain'}
+  // Voice examples block
+  const voiceExamples = VOICE_EXAMPLES.map((e, i) => `EXAMPLE ${i + 1} — ${e.context}:\n${e.body}`).join('\n\n---\n\n');
 
-VOICE & TONE — STRICT REQUIREMENTS:
-- Conversational peer-to-peer, not salesy
-- Resource-framed: we're letting them know we exist, NOT asking for a meeting
-- Soft acknowledgment that this is a cold email, but no Sandler-style pattern interrupts
-- No corporate filler ("I hope this finds you well", "I wanted to reach out")
-- No exclamation points
-- 80-110 words MAX in the body
-- One soft CTA: ${cta}
-- Sign as: ${SHP_IDENTITY.rep} / ${SHP_IDENTITY.company} / ${SHP_IDENTITY.phone}
+  return `You are drafting a cold email FROM ${SHP_IDENTITY.rep} (${SHP_IDENTITY.title} at ${SHP_IDENTITY.company}, ${SHP_IDENTITY.hq}, est. ${SHP_IDENTITY.founded}) TO ${prospect.name}, ${prospect.title} at ${prospect.company}.
 
-STRUCTURE:
-1. Opening — reference something specific about their company, segment, or research (1 sentence)
-2. SHP intro — one sentence, who we are, ${SHP_IDENTITY.hq}, what we do for ${segment}
-3. Resource framing — see CTA above (1-2 sentences)
-4. Sign-off
+═════ PROSPECT CONTEXT ═════
+Name: ${prospect.name}
+Title: ${prospect.title}
+Company: ${prospect.company}
+Segment: ${segment}
+Location: ${prospect.city}, ${prospect.county || ''} County
 
-Return ONLY this JSON, no preamble or markdown:
-{"subject":"5-8 word subject, lower-case-friendly, no clickbait","body":"full body with \\n line breaks"}`;
+═════ RESEARCH ═════
+Opening hook: ${research?.openingHook || `${prospect.company} operates in ${segment}`}
+Pain signals: ${research?.painSignals?.join('; ') || 'general facilities pain'}
+Company snapshot: ${research?.companySnapshot || ''}
+
+═════ AVAILABLE PROOF POINTS (real SHP customers, ranked by relevance to this prospect) ═════
+${proofText}
+
+USE 1-2 OF THE ABOVE if (and only if) it fits naturally. Don't force a name drop. Never list more than 2. Never use names that aren't on the above list. If none fit naturally, use generic framing like "we work with multiple ${segment.toLowerCase()} partners across Central Florida."
+
+═════ VOICE GUIDE — FOLLOW THIS EXACTLY ═════
+${VOICE_GUIDE}
+
+═════ ANTHONY'S REAL EMAIL EXAMPLES — match this voice ═════
+${voiceExamples}
+
+═════ STRUCTURE FOR YOUR DRAFT ═════
+1. Soft opener — disarming, not salesy. Examples Anthony actually uses:
+   - "I got your name while wandering [their site/area]..."
+   - "I hope email is OK. I did not want to interrupt your day with a phone call..."
+   - "I am reaching out for a quick introduction..."
+   Pick whichever fits the situation.
+2. Humble framing — acknowledge they likely have a vendor: "I know you likely have someone for what we do, but..." OR if research surfaced something specific, lead with that and skip this beat.
+3. SHP intro + capability summary — one sentence about who SHP is and what we cover. Keep it tight.
+4. Optional proof drop — if a proof point fits naturally (1-2 names max).
+5. Soft CTA — borrow from: ${cta}
+6. Optional in-person offer — "I'm often in the area with a few customers" — only if prospect is in CFL North.
+7. Sign-off and signature.
+
+═════ HARD RULES ═════
+- 110-160 words in the body (Anthony's real emails run longer than the previous tight 80-110)
+- NO exclamation points
+- NO corporate filler ("hope this finds you well", "wanted to reach out", "circle back", "leverage", "synergy")
+- Use sentence case in subject line
+- Subject line should sound human, not marketing-y. Examples that work: "quick intro from SHP", "hardware partner for [their company]", "a name to know for door work"
+
+═════ SIGNATURE ═════
+End the body with this exact signature block:
+
+${signature || DEFAULT_SIGNATURE}
+
+═════ OUTPUT ═════
+Return ONLY this JSON, no preamble, no markdown:
+{"subject":"...","body":"full body with \\n line breaks, including the signature"}`;
 }
 
 // === FOLLOW-UP CADENCE ===

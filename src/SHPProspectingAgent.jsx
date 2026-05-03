@@ -7,8 +7,8 @@ import {
   ChevronRight, ChevronDown,
 } from 'lucide-react';
 import {
-  SHP_IDENTITY, TERRITORY, classifyCounty, isInTerritory,
-  classifyICP, classifyTitle, PAIN_LIBRARY, RESOURCE_CTAS,
+  SHP_IDENTITY, DEFAULT_SIGNATURE, TERRITORY, classifyCounty, isInTerritory,
+  classifyICP, classifyTitle, PAIN_LIBRARY, RESOURCE_CTAS, CUSTOMERS, pickProofPoints,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
   buildColdEmailPrompt, buildDealTitle, buildClusters, FOLLOW_UP_DAYS,
 } from './strategy.js';
@@ -24,10 +24,15 @@ export default function SHPProspectingAgent() {
 
   // Settings (browser-saved)
   const [config, setConfig] = useState({
-    smartBcc: '',
+    smartBcc: '', // Optional — M365 sync handles auto-logging, but keep field for users who want it
     fromName: SHP_IDENTITY.rep,
-    fromPhone: SHP_IDENTITY.phone,
+    fromTitle: SHP_IDENTITY.title,
+    fromDirectPhone: SHP_IDENTITY.directPhone,
+    fromOfficePhone: SHP_IDENTITY.officePhone,
     fromEmail: SHP_IDENTITY.email,
+    contactCardUrl: SHP_IDENTITY.contactCardUrl,
+    signature: DEFAULT_SIGNATURE,
+    sendMode: 'pipedrive', // 'pipedrive' (direct send via M365) | 'gmail' (legacy fallback)
   });
 
   // Prospect pool — seed data + manually added + Apollo-found
@@ -418,7 +423,7 @@ Return ONLY a JSON object (no preamble, no markdown):
     setIsDrafting(true);
     setView('compose');
 
-    const prompt = buildColdEmailPrompt(selectedProspect, research, selectedProspect.segment);
+    const prompt = buildColdEmailPrompt(selectedProspect, research, selectedProspect.segment, config.signature);
 
     try {
       const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -426,7 +431,7 @@ Return ONLY a JSON object (no preamble, no markdown):
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
-          max_tokens: 800,
+          max_tokens: 1200,
           messages: [{ role: 'user', content: prompt }],
         }),
       });
@@ -436,21 +441,21 @@ Return ONLY a JSON object (no preamble, no markdown):
       const match = cleaned.match(/\{[\s\S]*\}/);
       const parsed = match ? JSON.parse(match[0]) : null;
       if (parsed) {
-        // Replace placeholder phone/name with actual config values
-        let body = parsed.body
-          .replace(/\{phone\}/g, config.fromPhone)
-          .replace(/\{name\}/g, config.fromName);
-        setDraftEmail({ subject: parsed.subject, body });
+        setDraftEmail({ subject: parsed.subject, body: parsed.body });
       } else throw new Error('parse fail');
     } catch (err) {
-      // Fallback hand-crafted email
-      const firstName = selectedProspect.name.split(' ')[0];
+      // Fallback hand-crafted email — Anthony's voice, with proof points
+      const firstName = (selectedProspect.name || '').split(' ')[0] || 'there';
       const ctaKey = selectedProspect.segment === 'K-12 Education' ? 'K12'
                    : selectedProspect.segment === 'Higher Education' ? 'HigherEd'
                    : selectedProspect.segment === 'Local Government' ? 'LocalGov' : 'default';
+      const proofs = pickProofPoints(selectedProspect, 2);
+      const proofLine = proofs.length > 0
+        ? `We currently support ${proofs.map(p => p.name).join(' and ')} in the area, among others. `
+        : '';
       setDraftEmail({
-        subject: `Quick intro from SHP — ${selectedProspect.company}`,
-        body: `Hi ${firstName},\n\n${research.openingHook}\n\nWe're Superior Hardware Products — a 40-year family shop in ${SHP_IDENTITY.hq} that supports ${selectedProspect.segment.toLowerCase()} facilities across CFL North with door, lock, and opening solutions.\n\n${RESOURCE_CTAS[ctaKey]}\n\n${config.fromName}\n${SHP_IDENTITY.company}\n${config.fromPhone}`,
+        subject: `quick intro from SHP — ${selectedProspect.company}`,
+        body: `Hi ${firstName},\n\nI got your name while looking around for the right person at ${selectedProspect.company} to share some information with about Superior Hardware Products.\n\nI know you likely have someone for what we do, but I wanted to get you some information in case you need another arrow in your quiver. In short, we can handle everything related to your door openings — from mechanical to electrified to automatics. SHP can provide, service, and install anything related to doors or hardware. ${proofLine}\n\n${RESOURCE_CTAS[ctaKey]}\n\nLet me know if the timing is right for a conversation.\n\nBest Regards,\n\n${config.signature}`,
       });
     } finally {
       setIsDrafting(false);
@@ -537,25 +542,47 @@ Return ONLY a JSON object (no preamble, no markdown):
     }
   };
 
-  const sendViaGmail = () => {
+  // === Open Outlook web compose with email pre-filled ===
+  // Anthony is on M365 with two-way Pipedrive sync, so Outlook-sent emails auto-log to deals.
+  // No Smart BCC needed (sync handles it). One click: pre-fill → review → click Send in Outlook.
+  const sendViaOutlook = () => {
     if (!selectedProspect?.email) {
-      showToast('No email address', 'error');
+      showToast('No email address — add one first', 'error');
       return;
     }
+    // Outlook web URL scheme — pre-fills a new compose window in Outlook on the web (M365)
     const params = new URLSearchParams({
-      view: 'cm', fs: '1',
       to: selectedProspect.email,
-      su: draftEmail.subject,
+      subject: draftEmail.subject,
       body: draftEmail.body,
     });
+    // Optional Smart BCC for users who want belt-and-suspenders logging (M365 sync usually handles it)
     if (config.smartBcc) params.append('bcc', config.smartBcc);
-    window.open(`https://mail.google.com/mail/?${params.toString()}`, '_blank', 'noopener,noreferrer');
+    const url = `https://outlook.office.com/mail/deeplink/compose?${params.toString()}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
     setPdRecords(prev => ({
       ...prev,
       [selectedProspect.id]: { ...prev[selectedProspect.id], sentAt: new Date().toISOString() },
     }));
-    showToast('Opened in Gmail with Smart BCC pre-filled');
+    showToast('Opened in Outlook — review and click Send');
   };
+
+  // === Open the deal in Pipedrive's web UI to compose there ===
+  // Alt path: if user prefers Pipedrive's compose UI (which sends through M365 sync)
+  const openInPipedrive = () => {
+    if (!selectedProspect) return;
+    const rec = pdRecords[selectedProspect.id];
+    if (!rec?.dealId) {
+      showToast('Push to Pipedrive first', 'info');
+      return;
+    }
+    window.open(rec.dealUrl || `https://app.pipedrive.com/deal/${rec.dealId}`, '_blank', 'noopener,noreferrer');
+    showToast('Opened deal in Pipedrive — click Email in the deal panel');
+  };
+
+  // Backwards-compatible alias for any UI still calling sendViaGmail
+  const sendViaGmail = sendViaOutlook;
+
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
@@ -633,7 +660,7 @@ Return ONLY a JSON object (no preamble, no markdown):
         {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
-        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} pushToPipedrive={pushToPipedrive} sendViaGmail={sendViaGmail} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
+        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
         {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} />}
@@ -1173,11 +1200,11 @@ function SectionLabel({ children }) {
 // =================================================================
 // === COMPOSE VIEW ===
 // =================================================================
-function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, pushToPipedrive, sendViaGmail, pdRecords, pdConnected, isPushing, config, setView, followUpDays }) {
+function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, pushToPipedrive, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, config, setView, followUpDays }) {
   return (
     <>
       <button style={{ ...styles.secondaryBtn, marginBottom: '16px' }} onClick={() => setView('research')}>← Back</button>
-      <div style={styles.pageTitle}>Send Outreach</div>
+      <div style={styles.pageTitle}>Review & Send</div>
       <div style={styles.pageSubtitle}>To: {prospect.email || <span style={{ color: '#fbbf24' }}>no email — add manually</span>}</div>
 
       {isDrafting ? (
@@ -1197,23 +1224,32 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
               <input style={styles.input} value={draftEmail.subject} onChange={e => setDraftEmail({ ...draftEmail, subject: e.target.value })} />
             </div>
             <div style={{ marginBottom: '20px' }}>
-              <label style={styles.label}>Body</label>
-              <textarea style={{ ...styles.input, minHeight: '320px', fontFamily: 'inherit', lineHeight: '1.6', resize: 'vertical' }} value={draftEmail.body} onChange={e => setDraftEmail({ ...draftEmail, body: e.target.value })} />
+              <label style={styles.label}>Body (review and edit before sending)</label>
+              <textarea style={{ ...styles.input, minHeight: '380px', fontFamily: 'inherit', lineHeight: '1.6', resize: 'vertical' }} value={draftEmail.body} onChange={e => setDraftEmail({ ...draftEmail, body: e.target.value })} />
             </div>
             <button style={styles.secondaryBtn} onClick={draftOutreach}><Sparkles size={13} /> Regenerate</button>
           </div>
 
           <div style={styles.card}>
             <div style={styles.sectionTitle}><Briefcase size={14} /> Two-Step Send</div>
-            <SendStep styles={styles} num="1" title="Push to Pipedrive" sub={`Creates Person + Org + Deal + Day ${followUpDays} resource follow-up`} done={!!pdRecords[prospect.id]?.dealId} disabled={!pdConnected} loading={isPushing} onClick={pushToPipedrive} btnLabel={pdRecords[prospect.id]?.dealId ? 'View Deal' : 'Push to PD'} icon={Briefcase} />
-            <SendStep styles={styles} num="2" title="Send via Gmail" sub="Opens Gmail compose with Smart BCC pre-filled" done={!!pdRecords[prospect.id]?.sentAt} disabled={!prospect.email} loading={false} onClick={sendViaGmail} btnLabel="Send via Gmail" icon={Send} />
-            {!config.smartBcc && (
-              <div style={{ marginTop: '14px', padding: '10px 12px', background: 'rgba(245, 158, 11, 0.08)', borderRadius: '8px', fontSize: '12px', color: '#fbbf24', display: 'flex', gap: '8px' }}>
-                <AlertCircle size={13} style={{ flexShrink: 0, marginTop: '2px' }} />
-                No Smart BCC configured — email won't auto-log to Pipedrive.
-                <span onClick={() => setView('settings')} style={{ textDecoration: 'underline', cursor: 'pointer', marginLeft: '4px' }}>Add it in Settings</span>
+            <SendStep styles={styles} num="1" title="Push to Pipedrive" sub={`Creates Person + Org + Deal + Day ${followUpDays} resource follow-up activity`} done={!!pdRecords[prospect.id]?.dealId} disabled={!pdConnected} loading={isPushing} onClick={pushToPipedrive} btnLabel={pdRecords[prospect.id]?.dealId ? 'View Deal' : 'Push to PD'} icon={Briefcase} />
+            <SendStep styles={styles} num="2" title="Open in Outlook to send" sub="Pre-fills Outlook web compose with this draft. Review one more time, click Send. M365↔Pipedrive sync auto-logs the email to the deal." done={!!pdRecords[prospect.id]?.sentAt} disabled={!prospect.email} loading={false} onClick={sendViaOutlook} btnLabel="Open in Outlook" icon={Send} />
+
+            {pdRecords[prospect.id]?.dealId && (
+              <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(232, 236, 243, 0.06)' }}>
+                <div style={{ fontSize: '11px', color: '#7a8aa3', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Alternative</div>
+                <button style={{ ...styles.secondaryBtn, fontSize: '12px' }} onClick={openInPipedrive}>
+                  <ExternalLink size={12} /> Open deal in Pipedrive (compose there instead)
+                </button>
               </div>
             )}
+
+            <div style={{ marginTop: '14px', padding: '10px 12px', background: 'rgba(34, 197, 94, 0.06)', borderRadius: '8px', fontSize: '12px', color: '#4ade80', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+              <CheckCircle2 size={13} style={{ flexShrink: 0, marginTop: '2px' }} />
+              <div>
+                <strong>M365↔Pipedrive sync handles logging.</strong> Once you send from Outlook, the email auto-appears in the deal timeline. No Smart BCC required.
+              </div>
+            </div>
           </div>
         </>
       )}
@@ -1450,21 +1486,34 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdMe
         <div style={styles.sectionTitle}><Mail size={14} /> Sender Identity</div>
         <div style={styles.grid2}>
           <div>
-            <label style={styles.label}>From name (signature)</label>
+            <label style={styles.label}>Name</label>
             <input style={styles.input} value={config.fromName} onChange={e => setConfig({ ...config, fromName: e.target.value })} />
           </div>
           <div>
-            <label style={styles.label}>Phone (signature)</label>
-            <input style={styles.input} value={config.fromPhone} onChange={e => setConfig({ ...config, fromPhone: e.target.value })} />
+            <label style={styles.label}>Title</label>
+            <input style={styles.input} value={config.fromTitle || ''} onChange={e => setConfig({ ...config, fromTitle: e.target.value })} />
           </div>
           <div>
-            <label style={styles.label}>From email (display only)</label>
+            <label style={styles.label}>Direct phone</label>
+            <input style={styles.input} value={config.fromDirectPhone || ''} onChange={e => setConfig({ ...config, fromDirectPhone: e.target.value })} />
+          </div>
+          <div>
+            <label style={styles.label}>Office phone</label>
+            <input style={styles.input} value={config.fromOfficePhone || ''} onChange={e => setConfig({ ...config, fromOfficePhone: e.target.value })} />
+          </div>
+          <div>
+            <label style={styles.label}>From email</label>
             <input style={styles.input} value={config.fromEmail} onChange={e => setConfig({ ...config, fromEmail: e.target.value })} />
           </div>
           <div>
-            <label style={styles.label}>Smart BCC (Pipedrive)</label>
-            <input style={{ ...styles.input, fontFamily: 'monospace' }} placeholder="anthony+abc@pipedrivemail.com" value={config.smartBcc} onChange={e => setConfig({ ...config, smartBcc: e.target.value })} />
+            <label style={styles.label}>Contact card URL (dot.cards)</label>
+            <input style={styles.input} value={config.contactCardUrl || ''} onChange={e => setConfig({ ...config, contactCardUrl: e.target.value })} />
           </div>
+        </div>
+        <div style={{ marginTop: '16px' }}>
+          <label style={styles.label}>Email signature (used at the bottom of every cold draft)</label>
+          <textarea style={{ ...styles.input, minHeight: '180px', fontFamily: 'inherit', lineHeight: '1.5', resize: 'vertical' }} value={config.signature || ''} onChange={e => setConfig({ ...config, signature: e.target.value })} />
+          <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '6px' }}>This exact text gets pasted at the bottom of every cold email draft. Edit freely.</div>
         </div>
         <button style={{ ...styles.primaryBtn, marginTop: '16px' }} onClick={saveConfig}>
           <CheckCircle2 size={14} /> Save Settings
@@ -1472,14 +1521,30 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdMe
       </div>
 
       <div style={styles.card}>
+        <div style={styles.sectionTitle}><Send size={14} /> Send Configuration</div>
+        <div style={{ padding: '14px', background: 'rgba(34, 197, 94, 0.06)', border: '1px solid rgba(34, 197, 94, 0.15)', borderRadius: '10px', fontSize: '13px', marginBottom: '16px', color: '#a8b5c9', lineHeight: '1.6' }}>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '6px', color: '#4ade80', fontWeight: 600 }}>
+            <CheckCircle2 size={14} /> Microsoft 365 ↔ Pipedrive sync
+          </div>
+          When you click <strong>Open in Outlook</strong> on a draft, the email pre-fills in Outlook web. After you click Send in Outlook, your M365 ↔ Pipedrive sync auto-logs the email to the deal timeline. <strong>No Smart BCC required.</strong>
+        </div>
+        <div>
+          <label style={styles.label}>Smart BCC (optional — only if you want belt-and-suspenders logging)</label>
+          <input style={{ ...styles.input, fontFamily: 'monospace' }} placeholder="leave blank if M365 sync handles logging — or paste your Pipedrive Smart BCC address" value={config.smartBcc || ''} onChange={e => setConfig({ ...config, smartBcc: e.target.value })} />
+          <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '6px' }}>Find this in Pipedrive → Settings → Tools → BCC. Most users with M365 sync don't need it.</div>
+        </div>
+      </div>
+
+      <div style={styles.card}>
         <div style={styles.sectionTitle}><AlertCircle size={14} /> How it works</div>
         <div style={{ fontSize: '13px', color: '#c8d4e8', lineHeight: '1.7' }}>
           <div style={{ marginBottom: '10px' }}><strong>1. Find:</strong> Browse your seed pool (602 prospects), search Apollo for new ones, or add manually.</div>
-          <div style={{ marginBottom: '10px' }}><strong>2. Research:</strong> Click any prospect → Claude pulls company snapshot, facility profile, segment-specific pain signals, and an opening hook.</div>
-          <div style={{ marginBottom: '10px' }}><strong>3. Draft:</strong> Resource-framed cold email — short, peer-tone, no meeting ask. CTA: "be a name you recognize when something comes up."</div>
-          <div style={{ marginBottom: '10px' }}><strong>4. Push:</strong> Creates Person + Org + Deal + Day 14 follow-up activity in Pipedrive.</div>
-          <div style={{ marginBottom: '10px' }}><strong>5. Send:</strong> Opens Gmail with Smart BCC pre-filled. Replies auto-log to Pipedrive.</div>
-          <div><strong>6. After they reply:</strong> Switch to Coach view — Pain Funnel prep cards, UFC scripts for site walks, Reversing helpers for vague brush-offs.</div>
+          <div style={{ marginBottom: '10px' }}><strong>2. Research:</strong> Claude pulls company snapshot, facility profile, segment-specific pain signals, and an opening hook.</div>
+          <div style={{ marginBottom: '10px' }}><strong>3. Draft:</strong> Anthony's voice — humble, peer-tone, "arrow in the quiver" framing — with contextually-relevant SHP customer references when they fit.</div>
+          <div style={{ marginBottom: '10px' }}><strong>4. Review:</strong> Edit the draft in the agent. Regenerate if it's off.</div>
+          <div style={{ marginBottom: '10px' }}><strong>5. Push to Pipedrive:</strong> Creates Person + Org + Deal + Day 14 follow-up activity.</div>
+          <div style={{ marginBottom: '10px' }}><strong>6. Open in Outlook:</strong> Pre-fills Outlook compose. Click Send. M365↔Pipedrive sync logs it automatically.</div>
+          <div><strong>7. After they reply:</strong> Sandler Coach view — Pain Funnel prep, UFC scripts, Reversing helpers.</div>
         </div>
       </div>
     </>
