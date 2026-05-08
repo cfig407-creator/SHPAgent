@@ -370,46 +370,129 @@ If Apollo unavailable, return realistic example data for one of the three ICP se
     setIsResearching(true);
     setView('research');
 
+    // Diagnostic state — captured for visibility into what actually happened
+    const diagnostic = {
+      apiCallSucceeded: false,
+      webSearchInvoked: false,
+      webSearchCount: 0,
+      webSearchQueries: [],
+      sourceCount: 0,
+      sources: [],
+      errorMessage: null,
+      rawResponseBlocks: [],
+    };
+
     try {
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
-          max_tokens: 1200,
+          max_tokens: 2000,
           messages: [{
             role: 'user',
-            content: `Research ${prospect.name}, ${prospect.title} at ${prospect.company} in ${prospect.city}, ${prospect.county || 'Florida'}. They're in the ${prospect.segment} segment. Focus on commercial door, hardware, and facility-management signals relevant to a Florida door & hardware distributor.
+            content: `You are researching a sales prospect for Superior Hardware Products, a commercial door & hardware distributor in Central Florida. The prospect is:
 
-Return ONLY a JSON object (no preamble, no markdown):
-{"companySnapshot":"1-2 sentences about the org","facilityProfile":"1-2 sentences on likely facility footprint and door volume","painSignals":["3 specific facility-side pain points relevant to ${prospect.segment}"],"openingHook":"ONE specific conversational email opener referencing something concrete","fitScore":85,"fitReasoning":"1 sentence on SHP fit"}`
+Name: ${prospect.name || '(no contact name)'}
+Title: ${prospect.title || '(unknown)'}
+Organization: ${prospect.company}
+Location: ${prospect.city}, ${prospect.county || 'Florida'}
+ICP segment: ${prospect.segment}
+
+YOUR TASK: Use web_search to find SPECIFIC, CONCRETE information about THIS organization. Don't return generic segment-level pain points. Search for:
+1. Their facilities footprint — number of buildings, square footage, recent construction or renovation news
+2. Recent news, board meeting items, or budget discussions about facilities/maintenance/security
+3. Capital improvement plans, master plans, RFPs related to doors/hardware/access control
+4. Anything specific that suggests a current or upcoming facility need
+
+If you can't find specifics about the organization, search broader (the school district, the city's CIP, etc.). Try at least 2 different search queries before giving up.
+
+Return ONLY a JSON object (no preamble, no markdown). Be honest about specificity:
+{
+  "companySnapshot": "1-2 sentences about the org. Reference specific facts when found.",
+  "facilityProfile": "1-2 sentences on facility footprint. Use real numbers when found, otherwise say 'inferred from segment'.",
+  "painSignals": ["3 specific pain points. Mark with [SPECIFIC] if grounded in research, [INFERRED] if from segment defaults."],
+  "openingHook": "ONE conversational email opener. Reference a real specific fact from your research if possible.",
+  "fitScore": 85,
+  "fitReasoning": "1 sentence on SHP fit",
+  "specificityRating": "high | medium | low",
+  "specificityNote": "1 sentence explaining what you found vs. couldn't find"
+}`
           }],
           tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         }),
       });
-      const data = await response.json();
-      const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-      const cleaned = text.replace(/```json|```/g, '').trim();
-      const match = cleaned.match(/\{[\s\S]*\}/);
-      const parsed = match ? JSON.parse(match[0]) : null;
 
-      if (parsed) {
-        setResearchData(prev => ({ ...prev, [prospect.id]: parsed }));
-        showToast('Research complete');
-      } else throw new Error('parse fail');
+      diagnostic.apiCallSucceeded = response.ok;
+      if (!response.ok) {
+        diagnostic.errorMessage = `API returned ${response.status}`;
+        const errText = await response.text();
+        try { diagnostic.errorMessage = JSON.parse(errText)?.error?.message || diagnostic.errorMessage; } catch {}
+        throw new Error(diagnostic.errorMessage);
+      }
+
+      const data = await response.json();
+      const blocks = data.content || [];
+      diagnostic.rawResponseBlocks = blocks.map(b => b.type);
+
+      // Detect web search activity in the response — Claude returns server_tool_use blocks for web searches
+      const searchBlocks = blocks.filter(b =>
+        b.type === 'server_tool_use' || b.type === 'tool_use' || b.type === 'web_search_tool_result'
+      );
+      const searchInvocations = blocks.filter(b =>
+        (b.type === 'server_tool_use' || b.type === 'tool_use') && (b.name === 'web_search' || b.name?.startsWith('web_search'))
+      );
+      diagnostic.webSearchInvoked = searchInvocations.length > 0;
+      diagnostic.webSearchCount = searchInvocations.length;
+      diagnostic.webSearchQueries = searchInvocations.map(b => b.input?.query || b.input?.queries?.[0] || '(unknown query)').slice(0, 10);
+
+      // Count citations / sources in the text content
+      const textBlocks = blocks.filter(b => b.type === 'text');
+      const citationsAll = textBlocks.flatMap(b => b.citations || []);
+      diagnostic.sourceCount = citationsAll.length;
+      diagnostic.sources = citationsAll.slice(0, 10).map(c => ({
+        url: c.url || c.source?.url || '',
+        title: c.title || c.cited_text?.slice(0, 80) || '',
+      }));
+
+      // Parse the JSON output from Claude
+      const text = textBlocks.map(b => b.text).filter(Boolean).join('\n');
+      const cleaned = text.replace(/```json|```/g, '').trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        diagnostic.errorMessage = 'Claude returned no parseable JSON';
+        throw new Error(diagnostic.errorMessage);
+      }
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      // Attach diagnostic data to research object so it's visible in the UI
+      const enriched = { ...parsed, _diagnostic: diagnostic };
+      setResearchData(prev => ({ ...prev, [prospect.id]: enriched }));
+
+      // Surface result in toast — three distinct states
+      if (diagnostic.webSearchInvoked && diagnostic.sourceCount > 0) {
+        showToast(`Research complete · ${diagnostic.webSearchCount} searches, ${diagnostic.sourceCount} sources`);
+      } else if (diagnostic.webSearchInvoked) {
+        showToast(`Research complete · ${diagnostic.webSearchCount} searches but no clean citations`, 'info');
+      } else {
+        showToast(`Research complete · NO web search fired (Claude answered from training data)`, 'info');
+      }
     } catch (err) {
-      // Fallback using strategy module pain libraries
+      // Fallback: pain library only, with diagnostic still attached
       const segPains = PAIN_LIBRARY[prospect.segment]?.tactical || [];
       const fallback = {
-        companySnapshot: `${prospect.company} operates in ${prospect.county || 'CFL North'} county as a ${prospect.segment} organization.`,
-        facilityProfile: `Likely manages multiple buildings with the typical mix of high-traffic doors, mechanical hardware, and access control needs for the segment.`,
-        painSignals: segPains.slice(0, 3),
+        companySnapshot: `${prospect.company} operates in ${prospect.county || 'CFL North'} as a ${prospect.segment} organization.`,
+        facilityProfile: `Likely manages multiple buildings with typical high-traffic doors, mechanical hardware, and access control needs.`,
+        painSignals: segPains.slice(0, 3).map(p => `[INFERRED] ${p}`),
         openingHook: `Saw ${prospect.company} in the ${prospect.county || 'CFL North'} area and wanted to introduce SHP.`,
         fitScore: 75,
         fitReasoning: `${prospect.segment} multi-building operator is a fit for SHP's ICP.`,
+        specificityRating: 'low',
+        specificityNote: `Fallback used. ${diagnostic.errorMessage || 'Live research unavailable.'}`,
+        _diagnostic: { ...diagnostic, errorMessage: diagnostic.errorMessage || err.message },
       };
       setResearchData(prev => ({ ...prev, [prospect.id]: fallback }));
-      showToast('Research complete (offline mode)', 'info');
+      showToast(`Research FALLBACK — ${diagnostic.errorMessage || err.message || 'unknown error'}`, 'error');
     } finally {
       setIsResearching(false);
     }
@@ -1138,6 +1221,11 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
 // === RESEARCH VIEW ===
 // =================================================================
 function ResearchView({ styles, prospect, research, isResearching, setView, draftOutreach }) {
+  const [diagOpen, setDiagOpen] = useState(false);
+  const diag = research?._diagnostic;
+  const specificity = research?.specificityRating || 'unknown';
+  const specColor = specificity === 'high' ? '#4ade80' : specificity === 'medium' ? '#fbbf24' : '#ff6b85';
+
   return (
     <>
       <button style={{ ...styles.secondaryBtn, marginBottom: '16px' }} onClick={() => setView('find')}>← Back</button>
@@ -1148,9 +1236,81 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
         <div style={{ ...styles.card, textAlign: 'center', padding: '60px' }}>
           <Loader2 size={32} className="spin" style={{ color: '#ff6b85', marginBottom: '16px' }} />
           <div style={{ fontSize: '15px', fontWeight: 500 }}>Researching {prospect.company}…</div>
+          <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '8px' }}>Running multiple web searches…</div>
         </div>
       ) : research && (
         <>
+          {/* Diagnostic banner — shows whether real research happened */}
+          {diag && (
+            <div style={{ ...styles.card, marginBottom: '12px', padding: '14px 18px',
+              background: diag.webSearchInvoked && diag.sourceCount > 0 ? 'rgba(34, 197, 94, 0.06)'
+                : diag.webSearchInvoked ? 'rgba(251, 191, 36, 0.06)'
+                : 'rgba(255, 107, 133, 0.06)',
+              borderColor: diag.webSearchInvoked && diag.sourceCount > 0 ? 'rgba(34, 197, 94, 0.2)'
+                : diag.webSearchInvoked ? 'rgba(251, 191, 36, 0.2)'
+                : 'rgba(255, 107, 133, 0.2)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setDiagOpen(!diagOpen)}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  {diag.webSearchInvoked && diag.sourceCount > 0 ? (
+                    <CheckCircle2 size={16} color="#4ade80" />
+                  ) : diag.webSearchInvoked ? (
+                    <AlertCircle size={16} color="#fbbf24" />
+                  ) : (
+                    <AlertCircle size={16} color="#ff6b85" />
+                  )}
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 600 }}>
+                      {diag.webSearchInvoked && diag.sourceCount > 0
+                        ? `Live research · ${diag.webSearchCount} searches, ${diag.sourceCount} sources`
+                        : diag.webSearchInvoked
+                        ? `Searches ran · ${diag.webSearchCount}, but no sources cited`
+                        : diag.errorMessage
+                        ? `Research failed · ${diag.errorMessage}`
+                        : `No web search invoked · Claude answered from training data`}
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '2px' }}>
+                      Specificity: <span style={{ color: specColor, fontWeight: 600 }}>{specificity}</span>
+                      {research.specificityNote ? ` · ${research.specificityNote}` : ''}
+                    </div>
+                  </div>
+                </div>
+                <button style={{ ...styles.secondaryBtn, padding: '5px 10px', fontSize: '11px' }}>
+                  {diagOpen ? 'Hide' : 'Show'} details
+                </button>
+              </div>
+              {diagOpen && (
+                <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', fontSize: '12px', color: '#a8b5c9' }}>
+                  <div style={{ marginBottom: '8px' }}><strong>Searches performed ({diag.webSearchCount}):</strong></div>
+                  {diag.webSearchQueries.length > 0 ? (
+                    <ul style={{ margin: '0 0 12px 18px', padding: 0 }}>
+                      {diag.webSearchQueries.map((q, i) => (
+                        <li key={i} style={{ marginBottom: '3px', fontFamily: 'monospace', fontSize: '11px' }}>"{q}"</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div style={{ marginBottom: '12px', fontStyle: 'italic' }}>No searches were performed.</div>
+                  )}
+                  <div style={{ marginBottom: '8px' }}><strong>Sources cited ({diag.sourceCount}):</strong></div>
+                  {diag.sources.length > 0 ? (
+                    <ul style={{ margin: '0 0 12px 18px', padding: 0 }}>
+                      {diag.sources.map((s, i) => (
+                        <li key={i} style={{ marginBottom: '3px' }}>
+                          {s.url ? <a href={s.url} target="_blank" rel="noopener noreferrer" style={{ color: '#93b0d6' }}>{s.title || s.url}</a> : s.title || '(no title)'}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div style={{ marginBottom: '12px', fontStyle: 'italic' }}>No citations returned.</div>
+                  )}
+                  <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '10px' }}>
+                    API call: {diag.apiCallSucceeded ? '✓ succeeded' : '✗ failed'} · Response blocks: {diag.rawResponseBlocks.join(', ') || '(none)'}
+                    {diag.errorMessage ? ` · Error: ${diag.errorMessage}` : ''}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={styles.card}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
               <div style={styles.sectionTitle}><Sparkles size={14} /> AI Research</div>
