@@ -4,7 +4,7 @@ import {
   ExternalLink, Filter, ArrowRight, Send, Edit3, Zap, TrendingUp,
   MapPin, Users, AlertCircle, Briefcase, Hash, Settings, Key,
   RefreshCw, X, Plus, Compass, BookOpen, MessageCircle, Copy,
-  ChevronRight, ChevronDown,
+  ChevronRight, ChevronDown, Download,
 } from 'lucide-react';
 import {
   SHP_IDENTITY, DEFAULT_SIGNATURE, TERRITORY, classifyCounty, isInTerritory,
@@ -15,6 +15,10 @@ import {
   composeEmail,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
+import { apiFetch, postJson } from './api-client.js';
+
+// Anthropic model — promoted to a constant so we change it in one place
+const ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
 
 export default function SHPProspectingAgent() {
   const [view, setView] = useState('dashboard');
@@ -23,6 +27,14 @@ export default function SHPProspectingAgent() {
   const [pdConnected, setPdConnected] = useState(false);
   const [pdMeta, setPdMeta] = useState({ stages: [], pipelines: [], userId: null, defaultPipelineId: null });
   const [isConnecting, setIsConnecting] = useState(false);
+  // Last connection-attempt error — only surfaced when a connect actually failed.
+  // Prevents the "stale disconnected" banner from showing while a reconnect is in flight.
+  const [pdConnectError, setPdConnectError] = useState(null);
+  const [hasAttemptedConnect, setHasAttemptedConnect] = useState(false);
+
+  // Apollo quota — { creditsUsed, creditsTotal, creditsRemaining, planName }
+  const [apolloQuota, setApolloQuota] = useState(null);
+  const [apolloQuotaError, setApolloQuotaError] = useState(null);
 
   // Settings (browser-saved)
   const [config, setConfig] = useState({
@@ -103,17 +115,50 @@ export default function SHPProspectingAgent() {
     setTimeout(() => setToast(null), 3500);
   };
 
+  // Force a re-render at midnight + on tab focus so Pursue Later "due today"
+  // re-evaluates without requiring a manual refresh.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === 'visible') setNowTick(Date.now()); };
+    document.addEventListener('visibilitychange', onVisible);
+    // Re-tick every 30 minutes so a long-open tab still flips at midnight
+    const interval = setInterval(() => setNowTick(Date.now()), 30 * 60 * 1000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      clearInterval(interval);
+    };
+  }, []);
+
   // === Settings persistence ===
   useEffect(() => {
+    // 1. Hydrate from localStorage immediately (fast, offline-friendly)
     const saved = localStorage.getItem('shp_config_v3');
     if (saved) {
-      try { setConfig(c => ({ ...c, ...JSON.parse(saved) })); } catch {}
+      try { setConfig(c => ({ ...c, ...JSON.parse(saved) })); }
+      catch (e) { console.warn('[shp] failed to parse saved config:', e); }
     }
     const savedOverrides = localStorage.getItem('shp_prospect_overrides_v3');
     if (savedOverrides) {
-      try { setOverrides(JSON.parse(savedOverrides)); } catch {}
+      try { setOverrides(JSON.parse(savedOverrides)); }
+      catch (e) { console.warn('[shp] failed to parse saved overrides:', e); }
     }
+
+    // 2. If a server-side config exists (Vercel KV), let it override the
+    //    localStorage copy — the server is the source of truth across devices.
+    (async () => {
+      try {
+        const r = await apiFetch('/api/config', { method: 'GET' }, { retries: 1, timeoutMs: 5000 });
+        if (r?.config && typeof r.config === 'object') {
+          setConfig(c => ({ ...c, ...r.config }));
+        }
+      } catch (e) {
+        // Server config is optional — quietly continue with localStorage.
+        console.info('[shp] no server-side config (using localStorage):', e.message);
+      }
+    })();
+
     autoConnect();
+    fetchApolloQuota();
   }, []);
 
   // Persist overrides whenever they change
@@ -123,9 +168,38 @@ export default function SHPProspectingAgent() {
     }
   }, [overrides]);
 
-  const saveConfig = () => {
+  const saveConfig = async () => {
+    // Always save to localStorage first so the user never loses input
     localStorage.setItem('shp_config_v3', JSON.stringify(config));
-    showToast('Settings saved');
+    // Best-effort server persistence (survives browser clears / new devices)
+    try {
+      const r = await postJson('/api/config', { config }, { retries: 1, timeoutMs: 5000 });
+      if (r?.persisted) {
+        showToast('Settings saved (synced to server)');
+      } else {
+        showToast('Settings saved (browser only — server KV not configured)');
+      }
+    } catch (e) {
+      console.warn('[shp] server config save failed:', e.message);
+      showToast('Settings saved to browser (server save failed)', 'info');
+    }
+  };
+
+  // Fetch Apollo credit usage so we can warn before the user runs out.
+  const fetchApolloQuota = async () => {
+    try {
+      const r = await apiFetch('/api/apollo-quota', { method: 'GET' }, { retries: 1, timeoutMs: 5000 });
+      setApolloQuota({
+        used: r.creditsUsed,
+        total: r.creditsTotal,
+        remaining: r.creditsRemaining,
+        plan: r.planName,
+      });
+      setApolloQuotaError(null);
+    } catch (e) {
+      console.info('[shp] Apollo quota unavailable:', e.message);
+      setApolloQuotaError(e.message);
+    }
   };
 
   // === Prospect status management ===
@@ -197,38 +271,39 @@ export default function SHPProspectingAgent() {
 
   // === Pipedrive proxy ===
   const pdRequest = async (method, path, body) => {
-    const r = await fetch('/api/pipedrive', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ method, path, body }),
-    });
-    const json = await r.json();
-    if (!r.ok) throw new Error(json?.error || json?.message || `Pipedrive ${r.status}`);
-    return json;
+    return postJson('/api/pipedrive', { method, path, body }, { retries: 2, timeoutMs: 30_000 });
   };
 
   const autoConnect = async () => {
     setIsConnecting(true);
+    setHasAttemptedConnect(true);
     try {
       const me = await pdRequest('GET', '/users/me');
       const pipelines = await pdRequest('GET', '/pipelines');
       const stagesResp = await pdRequest('GET', '/stages');
 
-      const defaultPipeline = pipelines.data.find(p => p.selected) || pipelines.data[0];
-      const pipelineStages = stagesResp.data
+      // Defensive null-checks — Pipedrive responses occasionally return data: null
+      const pipelineList = Array.isArray(pipelines?.data) ? pipelines.data : [];
+      const stageList = Array.isArray(stagesResp?.data) ? stagesResp.data : [];
+      if (pipelineList.length === 0) {
+        throw new Error('Pipedrive returned no pipelines');
+      }
+      const defaultPipeline = pipelineList.find(p => p.selected) || pipelineList[0];
+      const pipelineStages = stageList
         .filter(s => s.pipeline_id === defaultPipeline.id)
         .sort((a, b) => a.order_nr - b.order_nr);
 
       setPdMeta({
-        userId: me.data.id,
-        userEmail: me.data.email,
-        userName: me.data.name,
-        pipelines: pipelines.data,
+        userId: me?.data?.id,
+        userEmail: me?.data?.email,
+        userName: me?.data?.name,
+        pipelines: pipelineList,
         defaultPipelineId: defaultPipeline.id,
         defaultPipelineName: defaultPipeline.name,
         stages: pipelineStages,
       });
       setPdConnected(true);
+      setPdConnectError(null); // <-- clear any prior error so the dashboard banner disappears
 
       const buckets = {};
       pipelineStages.forEach(s => { buckets[s.id] = []; });
@@ -237,6 +312,8 @@ export default function SHPProspectingAgent() {
       await syncPipelineWith(defaultPipeline.id, pipelineStages);
     } catch (err) {
       console.error('Auto-connect failed:', err);
+      setPdConnected(false);
+      setPdConnectError(err?.message || String(err));
     } finally {
       setIsConnecting(false);
     }
@@ -266,15 +343,12 @@ export default function SHPProspectingAgent() {
   const runApolloSearch = async () => {
     setIsApolloSearching(true);
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 2000,
-          messages: [{
-            role: 'user',
-            content: `Search Apollo.io for facilities decision-makers in CFL North Florida (these counties: ${TERRITORY.counties.join(', ')}).
+      const data = await postJson('/api/anthropic', {
+        model: ANTHROPIC_MODEL,
+        max_tokens: 2000,
+        messages: [{
+          role: 'user',
+          content: `Search Apollo.io for facilities decision-makers in CFL North Florida (these counties: ${TERRITORY.counties.join(', ')}).
 
 Titles to target: ${apolloCriteria.titles}
 Segments to target: ${apolloCriteria.segments}
@@ -285,12 +359,15 @@ Return ONLY a JSON array (no preamble, no markdown) of up to 8 in-ICP, in-territ
 [{"name":"Full Name","title":"Job Title","company":"Org Name","city":"City","email":"email or empty","phone":"phone or empty"}]
 
 If Apollo unavailable, return realistic example data for one of the three ICP segments in CFL North.`
-          }],
-          mcp_servers: [{ type: 'url', url: 'https://mcp.apollo.io/mcp', name: 'apollo-mcp' }],
-        }),
-      });
-      const data = await response.json();
-      const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+        }],
+        mcp_servers: [{ type: 'url', url: 'https://mcp.apollo.io/mcp', name: 'apollo-mcp' }],
+      }, { retries: 1, timeoutMs: 90_000 });
+
+      const blocks = Array.isArray(data?.content) ? data.content : [];
+      const text = blocks.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text).join('\n');
+      if (!text.trim()) {
+        throw new Error('Anthropic returned no text content');
+      }
       const cleaned = text.replace(/```json|```/g, '').trim();
       const match = cleaned.match(/\[[\s\S]*\]/);
       const parsed = match ? JSON.parse(match[0]) : [];
@@ -395,11 +472,10 @@ If Apollo unavailable, return realistic example data for one of the three ICP se
     };
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
+      let data;
+      try {
+        data = await postJson('/api/anthropic', {
+          model: ANTHROPIC_MODEL,
           max_tokens: 2000,
           messages: [{
             role: 'user',
@@ -432,39 +508,35 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
 }`
           }],
           tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        }),
-      });
-
-      diagnostic.apiCallSucceeded = response.ok;
-      if (!response.ok) {
-        diagnostic.errorMessage = `API returned ${response.status}`;
-        const errText = await response.text();
-        try { diagnostic.errorMessage = JSON.parse(errText)?.error?.message || diagnostic.errorMessage; } catch {}
-        throw new Error(diagnostic.errorMessage);
+        }, { retries: 1, timeoutMs: 90_000 });
+        diagnostic.apiCallSucceeded = true;
+      } catch (httpErr) {
+        diagnostic.apiCallSucceeded = false;
+        diagnostic.errorMessage = httpErr.message;
+        throw httpErr;
       }
 
-      const data = await response.json();
-      const blocks = data.content || [];
-      diagnostic.rawResponseBlocks = blocks.map(b => b.type);
+      const blocks = Array.isArray(data?.content) ? data.content : [];
+      diagnostic.rawResponseBlocks = blocks.map(b => b?.type).filter(Boolean);
 
       // Detect web search activity in the response — Claude returns server_tool_use blocks for web searches
-      const searchBlocks = blocks.filter(b =>
-        b.type === 'server_tool_use' || b.type === 'tool_use' || b.type === 'web_search_tool_result'
-      );
       const searchInvocations = blocks.filter(b =>
-        (b.type === 'server_tool_use' || b.type === 'tool_use') && (b.name === 'web_search' || b.name?.startsWith('web_search'))
+        b && (b.type === 'server_tool_use' || b.type === 'tool_use') &&
+        (b.name === 'web_search' || (typeof b.name === 'string' && b.name.startsWith('web_search')))
       );
       diagnostic.webSearchInvoked = searchInvocations.length > 0;
       diagnostic.webSearchCount = searchInvocations.length;
-      diagnostic.webSearchQueries = searchInvocations.map(b => b.input?.query || b.input?.queries?.[0] || '(unknown query)').slice(0, 10);
+      diagnostic.webSearchQueries = searchInvocations
+        .map(b => b?.input?.query || b?.input?.queries?.[0] || '(unknown query)')
+        .slice(0, 10);
 
       // Count citations / sources in the text content
-      const textBlocks = blocks.filter(b => b.type === 'text');
-      const citationsAll = textBlocks.flatMap(b => b.citations || []);
+      const textBlocks = blocks.filter(b => b?.type === 'text');
+      const citationsAll = textBlocks.flatMap(b => Array.isArray(b.citations) ? b.citations : []);
       diagnostic.sourceCount = citationsAll.length;
       diagnostic.sources = citationsAll.slice(0, 10).map(c => ({
-        url: c.url || c.source?.url || '',
-        title: c.title || c.cited_text?.slice(0, 80) || '',
+        url: c?.url || c?.source?.url || '',
+        title: c?.title || (typeof c?.cited_text === 'string' ? c.cited_text.slice(0, 80) : ''),
       }));
 
       // Parse the JSON output from Claude
@@ -475,7 +547,16 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         diagnostic.errorMessage = 'Claude returned no parseable JSON';
         throw new Error(diagnostic.errorMessage);
       }
-      const parsed = JSON.parse(jsonMatch[0]);
+      let parsed;
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch (parseErr) {
+        diagnostic.errorMessage = `JSON parse failed: ${parseErr.message}`;
+        throw new Error(diagnostic.errorMessage);
+      }
+      // Guarantee shape so downstream UI doesn't crash on a malformed response
+      parsed.painSignals = Array.isArray(parsed.painSignals) ? parsed.painSignals : [];
+      parsed.fitScore = Number.isFinite(parsed.fitScore) ? parsed.fitScore : 70;
 
       // Attach diagnostic data to research object so it's visible in the UI
       const enriched = { ...parsed, _diagnostic: diagnostic };
@@ -691,32 +772,35 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       const [firstName, ...rest] = (prospect.name || '').trim().split(/\s+/);
       const lastName = rest.join(' ');
 
-      const resp = await fetch('/api/apollo-enrich', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      let data;
+      try {
+        data = await postJson('/api/apollo-enrich', {
           firstName,
           lastName,
           name: prospect.name,
           organizationName: prospect.company,
-        }),
-      });
-      const data = await resp.json();
+        }, { retries: 2, timeoutMs: 30_000 });
+      } catch (e) {
+        showToast(`Apollo error: ${e.message}`, 'error');
+        return;
+      }
 
-      if (!resp.ok || data.error) {
-        showToast(`Apollo error: ${data.error || 'unknown'}`, 'error');
-        setIsEnriching(null);
+      if (!data || data.error) {
+        showToast(`Apollo error: ${data?.error || 'unknown'}`, 'error');
         return;
       }
 
       if (!data.matched) {
         showToast(`Apollo: no match for ${prospect.name} (0 credits used)`, 'info');
-        // Still record this so the UI can show "tried but missed" rather than offering Enrich again immediately
         setProposedEnrichment(prev => ({
           ...prev,
           [prospect.id]: { matched: false, message: data.message || 'No match found' },
         }));
-        setIsEnriching(null);
+        return;
+      }
+
+      if (!data.person) {
+        showToast('Apollo response missing person data', 'error');
         return;
       }
 
@@ -725,8 +809,11 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         ...prev,
         [prospect.id]: { matched: true, person: data.person },
       }));
-      showToast(`Apollo found ${data.person.name} — review and apply`);
+      showToast(`Apollo found ${data.person.name || prospect.name} — review and apply`);
+      // Refresh quota in the background so the warning ticker stays accurate
+      fetchApolloQuota();
     } catch (err) {
+      console.error('[shp] enrichProspect failed:', err);
       showToast(`Enrichment failed: ${err.message}`, 'error');
     } finally {
       setIsEnriching(null);
@@ -896,28 +983,40 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     )
   ), [prospectsWithOverrides]);
 
-  // Pursue Later items whose revisit date has hit (today or earlier)
+  // Pursue Later items whose revisit date has hit (today or earlier).
+  // Re-evaluates whenever `nowTick` changes — visibilitychange and the 30-min
+  // interval tick — so a tab left open past midnight surfaces newly-due items.
   const pursueLaterDue = useMemo(() => {
     const today = new Date().toISOString().split('T')[0];
     return prospectsWithOverrides.filter(p =>
       p.outreachStatus === 'PursueLater' && p.revisitDate && p.revisitDate <= today
     );
-  }, [prospectsWithOverrides]);
+  }, [prospectsWithOverrides, nowTick]);
 
   // === Stats ===
-  const stats = useMemo(() => ({
-    total: prospectsWithOverrides.length,
-    ready: prospectsWithOverrides.filter(p =>
-      p.status === 'Ready' && p.outreachStatus === 'Active' && !p.needsEnrichment
-    ).length,
-    customers: prospectsWithOverrides.filter(p => p.outreachStatus === 'Customer').length,
-    pursueLater: prospectsWithOverrides.filter(p => p.outreachStatus === 'PursueLater').length,
-    needsEnrichment: prospectsWithOverrides.filter(p => p.needsEnrichment && p.outreachStatus === 'Active').length,
-    pushed: Object.values(pdRecords).filter(r => r.leadId || r.dealId).length,
-    sent: Object.values(pdRecords).filter(r => r.sentAt).length,
-    openDeals: Object.values(stageDeals).reduce((a, arr) => a + arr.length, 0),
-    pursueLaterDueCount: pursueLaterDue.length,
-  }), [prospectsWithOverrides, pdRecords, stageDeals, pursueLaterDue]);
+  // pushedLeads / pushedDeals split so the dashboard can label honestly.
+  // Previous "Leads Pushed: 0" was misleading because it assumed pushes always
+  // landed in the Lead Inbox; some users convert immediately to Deals.
+  const stats = useMemo(() => {
+    const records = Object.values(pdRecords);
+    const pushedLeads = records.filter(r => r.leadId && !r.dealId).length;
+    const pushedDeals = records.filter(r => r.dealId).length;
+    return {
+      total: prospectsWithOverrides.length,
+      ready: prospectsWithOverrides.filter(p =>
+        p.status === 'Ready' && p.outreachStatus === 'Active' && !p.needsEnrichment
+      ).length,
+      customers: prospectsWithOverrides.filter(p => p.outreachStatus === 'Customer').length,
+      pursueLater: prospectsWithOverrides.filter(p => p.outreachStatus === 'PursueLater').length,
+      needsEnrichment: prospectsWithOverrides.filter(p => p.needsEnrichment && p.outreachStatus === 'Active').length,
+      pushed: pushedLeads + pushedDeals, // total touched in PD
+      pushedLeads,
+      pushedDeals,
+      sent: records.filter(r => r.sentAt).length,
+      openDeals: Object.values(stageDeals).reduce((a, arr) => a + arr.length, 0),
+      pursueLaterDueCount: pursueLaterDue.length,
+    };
+  }, [prospectsWithOverrides, pdRecords, stageDeals, pursueLaterDue]);
 
   // === STYLES ===
   const styles = makeStyles(pdConnected, pdMeta.stages.length);
@@ -933,14 +1032,14 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         userName={pdMeta.userName}
       />
       <div style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdMeta={pdMeta} setView={setView} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
-        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={apolloQuota} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
+        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={apolloQuota} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
-        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} />}
+        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={apolloQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} />}
       </div>
       {toast && <Toast styles={styles} toast={toast} />}
       {pursueLaterFor && <PursueLaterModal styles={styles} date={pursueLaterDate} setDate={setPursueLaterDate} onSave={savePursueLater} onCancel={() => setPursueLaterFor(null)} />}
@@ -966,7 +1065,9 @@ function Header({ styles, view, setView, pdConnected, isConnecting, userName }) 
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         <div style={styles.pdBadge(pdConnected)} onClick={() => setView('settings')}>
           <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: pdConnected ? '#4ade80' : isConnecting ? '#fbbf24' : '#ff6b85' }} />
-          {isConnecting ? 'Connecting…' : pdConnected ? `Pipedrive · ${userName || 'connected'}` : 'Pipedrive disconnected'}
+          {/* Order matters: "Connecting…" wins over the stale "disconnected" label
+              while a connection attempt is in flight, so the badge never lies. */}
+          {pdConnected ? `Pipedrive · ${userName || 'connected'}` : isConnecting ? 'Connecting…' : 'Pipedrive disconnected'}
         </div>
         <div style={styles.nav}>
           {[
@@ -990,21 +1091,64 @@ function Header({ styles, view, setView, pdConnected, isConnecting, userName }) 
 // =================================================================
 // === DASHBOARD ===
 // =================================================================
-function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
+function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
   const topClusters = clusters.slice(0, 5);
   const firstName = (fromName || 'Anthony').split(' ')[0];
+
+  // Only show the disconnected banner once we've actually tried to connect AND it failed.
+  // Prevents the stale "Pipedrive disconnected — check Vercel env vars" from flashing on
+  // every page load while the connect request is in flight.
+  const showDisconnectedBanner = hasAttemptedConnect && !pdConnected;
+
+  // Subtitle now reflects connection state honestly:
+  //   - connected → pipeline name + stage count
+  //   - attempted but failed → real error message
+  //   - still attempting → "Connecting…" so we don't flash a false "disconnected"
+  const subtitle = pdConnected
+    ? `Connected to ${pdMeta.defaultPipelineName} · ${pdMeta.stages.length} stages`
+    : hasAttemptedConnect
+      ? (pdConnectError ? `Pipedrive connection failed — ${pdConnectError}` : 'Pipedrive disconnected — check Vercel env vars')
+      : 'Connecting to Pipedrive…';
+
+  // Apollo low-credit warning thresholds. Below 20% remaining → soft warning.
+  const apolloLow = apolloQuota?.remaining != null && apolloQuota.total > 0 && (apolloQuota.remaining / apolloQuota.total) < 0.2;
+
+  // Click handler for the "Needs Enrichment" stat card → drops user into Find with the right filter applied.
+  const goToNeedsEnrichment = () => {
+    if (typeof setFilterOutreach === 'function') setFilterOutreach('NeedsEnrichment');
+    setView('find');
+  };
+
   return (
     <>
       <div style={styles.pageTitle}>Welcome back, {firstName}</div>
-      <div style={styles.pageSubtitle}>{pdConnected ? `Connected to ${pdMeta.defaultPipelineName} · ${pdMeta.stages.length} stages` : 'Pipedrive disconnected — check Vercel env vars'}</div>
+      <div style={styles.pageSubtitle}>{subtitle}</div>
 
-      {!pdConnected && (
+      {showDisconnectedBanner && (
         <div style={{ ...styles.card, borderColor: 'rgba(255, 107, 133, 0.3)', background: 'rgba(255, 107, 133, 0.05)' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
             <AlertCircle size={20} color="#ff6b85" style={{ flexShrink: 0, marginTop: '2px' }} />
             <div>
               <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '4px' }}>Pipedrive not connected</div>
-              <div style={{ fontSize: '13px', color: '#a8b5c9' }}>Set PIPEDRIVE_API_TOKEN in Vercel project settings, then redeploy.</div>
+              <div style={{ fontSize: '13px', color: '#a8b5c9' }}>
+                {pdConnectError
+                  ? <>Last error: <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: '4px' }}>{pdConnectError}</code>. Check <code>PIPEDRIVE_API_TOKEN</code> in Vercel and redeploy.</>
+                  : 'Set PIPEDRIVE_API_TOKEN in Vercel project settings, then redeploy.'}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {apolloLow && (
+        <div style={{ ...styles.card, borderColor: 'rgba(251, 191, 36, 0.3)', background: 'rgba(251, 191, 36, 0.05)' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+            <AlertCircle size={20} color="#fbbf24" style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div>
+              <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '4px' }}>Apollo credits running low</div>
+              <div style={{ fontSize: '13px', color: '#a8b5c9' }}>
+                {apolloQuota.remaining} of {apolloQuota.total} credits remaining{apolloQuota.plan ? ` on ${apolloQuota.plan}` : ''}. Each enrichment match costs 1 credit.
+              </div>
             </div>
           </div>
         </div>
@@ -1013,8 +1157,23 @@ function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, 
       <div style={styles.statsGrid}>
         <StatCard styles={styles} label="Active Pool" value={stats.ready} sub="Ready, in-ICP, clean data" />
         <StatCard styles={styles} label="Customers" value={stats.customers} sub="Auto-detected from invoice list" />
-        <StatCard styles={styles} label="Needs Enrichment" value={stats.needsEnrichment} sub={stats.needsEnrichment > 0 ? 'Filter \"Needs Enrichment\" in Find' : 'All clean'} />
-        <StatCard styles={styles} label="Leads Pushed" value={stats.pushed} sub={stats.pursueLaterDueCount > 0 ? `${stats.pursueLaterDueCount} pursue-later due` : 'In Pipedrive Lead Inbox'} />
+        <StatCard
+          styles={styles}
+          label="Needs Enrichment"
+          value={stats.needsEnrichment}
+          sub={stats.needsEnrichment > 0 ? 'Click to filter in Find →' : 'All clean'}
+          onClick={stats.needsEnrichment > 0 ? goToNeedsEnrichment : undefined}
+        />
+        <StatCard
+          styles={styles}
+          label="In Pipedrive"
+          value={stats.pushed}
+          sub={
+            stats.pursueLaterDueCount > 0
+              ? `${stats.pursueLaterDueCount} pursue-later due`
+              : `${stats.pushedLeads} lead${stats.pushedLeads === 1 ? '' : 's'} · ${stats.pushedDeals} deal${stats.pushedDeals === 1 ? '' : 's'}`
+          }
+        />
       </div>
 
       {pursueLaterDue.length > 0 && (
@@ -1063,26 +1222,60 @@ function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, 
         </div>
       )}
 
+      {/* Today-at-a-glance — replaces the static "Three Pillars" filler with
+          actionable numbers: outreach pushed, emails sent, open deals in PD,
+          and Apollo credits remaining. */}
       <div style={styles.card}>
-        <div style={styles.sectionTitle}><Hash size={14} /> SHP Three Pillars</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-          {SHP_IDENTITY.pillars.map(p => (
-            <div key={p} style={{ padding: '12px', background: 'rgba(200, 16, 46, 0.06)', borderLeft: '2px solid #C8102E', borderRadius: '6px', fontSize: '13px', fontWeight: 500 }}>
-              {p}
-            </div>
-          ))}
+        <div style={styles.sectionTitle}><Hash size={14} /> Today at a glance</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
+          <MiniStat label="Pushed to PD" value={stats.pushed} sub={`${stats.pushedLeads} lead${stats.pushedLeads === 1 ? '' : 's'} · ${stats.pushedDeals} deal${stats.pushedDeals === 1 ? '' : 's'}`} />
+          <MiniStat label="Emails sent" value={stats.sent} sub="Logged via M365 sync" />
+          <MiniStat label="Open deals (PD)" value={stats.openDeals} sub="Live from pipeline" />
+          <MiniStat
+            label="Apollo credits"
+            value={apolloQuota?.remaining ?? '—'}
+            sub={apolloQuota?.total ? `of ${apolloQuota.total}${apolloQuota.plan ? ` (${apolloQuota.plan})` : ''}` : 'unavailable'}
+            color={apolloLow ? '#fbbf24' : undefined}
+          />
         </div>
       </div>
     </>
   );
 }
 
-function StatCard({ styles, label, value, sub }) {
+function MiniStat({ label, value, sub, color }) {
   return (
-    <div style={styles.statCard}>
+    <div style={{ padding: '14px 16px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '8px' }}>
+      <div style={{ fontSize: '11px', color: '#7a8aa3', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 500 }}>{label}</div>
+      <div style={{ fontSize: '22px', fontWeight: 700, marginTop: '4px', color: color || '#e8ecf3' }}>{value}</div>
+      <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '2px' }}>{sub}</div>
+    </div>
+  );
+}
+
+function StatCard({ styles, label, value, sub, onClick }) {
+  // Clickable stat cards (e.g. "Needs Enrichment" → Find filter) get hover lift +
+  // a chevron in the corner so users know they can drill in.
+  const isClickable = typeof onClick === 'function';
+  return (
+    <div
+      style={{
+        ...styles.statCard,
+        cursor: isClickable ? 'pointer' : 'default',
+        position: 'relative',
+        transition: 'border-color 0.15s, transform 0.15s',
+      }}
+      onClick={onClick}
+      role={isClickable ? 'button' : undefined}
+      tabIndex={isClickable ? 0 : undefined}
+      onKeyDown={isClickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') onClick(); } : undefined}
+    >
       <div style={styles.statLabel}>{label}</div>
       <div style={styles.statValue}>{value}</div>
       <div style={styles.statSub}>{sub}</div>
+      {isClickable && (
+        <ArrowRight size={14} style={{ position: 'absolute', top: '20px', right: '16px', color: '#7a8aa3' }} />
+      )}
     </div>
   );
 }
@@ -1731,8 +1924,8 @@ function PipelineView({ styles, pdConnected, pdMeta, stageDeals, syncPipeline, i
           {pdMeta.stages.map(stage => (
             <div key={stage.id} style={styles.pipelineCol}>
               <div style={styles.pipelineHeader}>
-                <span>{stage.name}</span>
-                <span style={{ background: 'rgba(232, 236, 243, 0.08)', padding: '2px 8px', borderRadius: '10px', fontSize: '11px' }}>{(stageDeals[stage.id] || []).length}</span>
+                <span style={{ flex: 1, minWidth: 0, lineHeight: 1.3 }} title={stage.name}>{stage.name}</span>
+                <span style={{ background: 'rgba(232, 236, 243, 0.08)', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', flexShrink: 0 }}>{(stageDeals[stage.id] || []).length}</span>
               </div>
               {(stageDeals[stage.id] || []).map(deal => (
                 <div key={deal.id} style={styles.pipelineCard}>
@@ -1875,11 +2068,33 @@ function CoachView({ styles, coachTab, setCoachTab, coachSelectedSegment, setCoa
 // =================================================================
 // === SETTINGS VIEW ===
 // =================================================================
-function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing }) {
+function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdConnectError, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing, apolloQuota, fetchApolloQuota, prospects, overrides, pdRecords, researchData, showToast }) {
+  const exportAllData = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      version: 'shp-v3',
+      config,
+      prospects,
+      overrides,
+      pdRecords,
+      researchData,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `shp-export-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast('Export downloaded');
+  };
+
   return (
     <>
       <div style={styles.pageTitle}>Settings</div>
-      <div style={styles.pageSubtitle}>Pipedrive token is set on the server (Vercel env vars). Other settings save to your browser.</div>
+      <div style={styles.pageSubtitle}>Pipedrive token is set on the server (Vercel env vars). Other settings save to your browser and sync to Vercel KV when configured.</div>
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Key size={14} /> Pipedrive Connection</div>
@@ -1894,6 +2109,11 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdMe
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#ff6b85', fontWeight: 600 }}><AlertCircle size={14} /> Not connected</div>
               <div style={{ color: '#a8b5c9', fontSize: '12px' }}>Set <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px' }}>PIPEDRIVE_API_TOKEN</code> in Vercel project settings, then redeploy.</div>
+              {pdConnectError && (
+                <div style={{ color: '#ff6b85', fontSize: '12px', marginTop: '8px', fontFamily: 'monospace' }}>
+                  Last error: {pdConnectError}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -1978,6 +2198,44 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdMe
           <input style={{ ...styles.input, fontFamily: 'monospace' }} placeholder="leave blank if M365 sync handles logging — or paste your Pipedrive Smart BCC address" value={config.smartBcc || ''} onChange={e => setConfig({ ...config, smartBcc: e.target.value })} />
           <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '6px' }}>Find this in Pipedrive → Settings → Tools → BCC. Most users with M365 sync don't need it.</div>
         </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.sectionTitle}><Sparkles size={14} /> Apollo Credits</div>
+        {apolloQuota ? (
+          <div style={{ padding: '14px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '10px', fontSize: '13px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+                {apolloQuota.remaining ?? '—'} of {apolloQuota.total ?? '—'} remaining
+                {apolloQuota.plan && <span style={{ fontWeight: 400, color: '#7a8aa3', marginLeft: '8px' }}>({apolloQuota.plan})</span>}
+              </div>
+              <div style={{ fontSize: '12px', color: '#a8b5c9' }}>1 credit per Apollo person-match. Free tier = 50/mo.</div>
+            </div>
+            <button style={styles.secondaryBtn} onClick={fetchApolloQuota}>
+              <RefreshCw size={13} /> Refresh
+            </button>
+          </div>
+        ) : (
+          <div style={{ padding: '14px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '10px', fontSize: '13px', color: '#a8b5c9' }}>
+            Apollo quota unavailable — check that <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px' }}>APOLLO_API_KEY</code> is set in Vercel.
+            <button style={{ ...styles.secondaryBtn, marginLeft: '12px' }} onClick={fetchApolloQuota}>
+              <RefreshCw size={13} /> Retry
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.sectionTitle}><Download size={14} /> Data Export</div>
+        <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '14px', lineHeight: 1.6 }}>
+          Download a JSON snapshot of your config, prospect overrides, Pipedrive record IDs, and cached research. Useful for backups or migrating to a new browser.
+        </div>
+        <div style={{ fontSize: '12px', color: '#7a8aa3', marginBottom: '14px' }}>
+          Includes: {prospects.length} prospects · {Object.keys(overrides).length} status overrides · {Object.keys(pdRecords).length} Pipedrive links · {Object.keys(researchData).length} cached research entries
+        </div>
+        <button style={styles.primaryBtn} onClick={exportAllData}>
+          <Download size={14} /> Export all data (JSON)
+        </button>
       </div>
 
       <div style={styles.card}>
@@ -2118,9 +2376,12 @@ function makeStyles(pdConnected, stagesLen) {
       }[color] || { bg: 'rgba(99, 130, 175, 0.12)', text: '#93b0d6', border: 'rgba(99, 130, 175, 0.25)' };
       return { display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '3px 9px', borderRadius: '6px', fontSize: '11px', fontWeight: 600, background: colors.bg, color: colors.text, border: `1px solid ${colors.border}`, textTransform: 'uppercase', letterSpacing: '0.04em' };
     },
-    pipelineGrid: { display: 'grid', gridTemplateColumns: `repeat(${Math.max(stagesLen, 1)}, 1fr)`, gap: '12px' },
-    pipelineCol: { background: 'rgba(232, 236, 243, 0.03)', border: '1px solid rgba(232, 236, 243, 0.08)', borderRadius: '12px', padding: '14px', minHeight: '320px' },
-    pipelineHeader: { fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#a8b5c9', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
+    // Pipeline grid: enforce a minimum column width and overflow horizontally
+    // so long stage names ("NEED TO SOURCE - QUOTE WON") don't shrink to
+    // unreadable widths. Users can scroll the kanban left/right.
+    pipelineGrid: { display: 'grid', gridTemplateColumns: `repeat(${Math.max(stagesLen, 1)}, minmax(180px, 1fr))`, gap: '12px', overflowX: 'auto', paddingBottom: '8px' },
+    pipelineCol: { background: 'rgba(232, 236, 243, 0.03)', border: '1px solid rgba(232, 236, 243, 0.08)', borderRadius: '12px', padding: '14px', minHeight: '320px', minWidth: '180px' },
+    pipelineHeader: { fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#a8b5c9', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' },
     pipelineCard: { background: 'rgba(10, 22, 40, 0.6)', border: '1px solid rgba(232, 236, 243, 0.06)', borderRadius: '8px', padding: '10px 12px', marginBottom: '8px', fontSize: '12px' },
     toast: { position: 'fixed', bottom: '24px', right: '24px', background: 'rgba(10, 22, 40, 0.95)', border: '1px solid rgba(232, 236, 243, 0.15)', borderRadius: '10px', padding: '12px 18px', fontSize: '13px', fontWeight: 500, backdropFilter: 'blur(12px)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', gap: '10px', zIndex: 100, maxWidth: '420px' },
     grid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' },
