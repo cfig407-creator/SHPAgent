@@ -964,6 +964,11 @@ export function buildColdEmailPrompt(prospect, research, segment, signature) {
   // Voice examples block
   const voiceExamples = VOICE_EXAMPLES.map((e, i) => `EXAMPLE ${i + 1} — ${e.context}:\n${e.body}`).join('\n\n---\n\n');
 
+  // Pull the suggested opener out so we can require it loudly. When research is
+  // present, this opener is grounded in real web-searched facts and is the
+  // single most important thing the email should contain.
+  const hasRealHook = !!(research?.openingHook && research.specificityRating !== 'low');
+
   return `You are drafting a cold email FROM ${SHP_IDENTITY.rep} (${SHP_IDENTITY.title} at ${SHP_IDENTITY.company}, ${SHP_IDENTITY.hq}, est. ${SHP_IDENTITY.founded}) TO ${prospect.name}, ${prospect.title} at ${prospect.company}.
 
 ═════ PROSPECT CONTEXT ═════
@@ -974,9 +979,16 @@ Segment: ${segment}
 Location: ${prospect.city}, ${prospect.county || ''} County
 
 ═════ RESEARCH ═════
-Opening hook: ${research?.openingHook || `${prospect.company} operates in ${segment}`}
+${hasRealHook
+  ? `OPENING HOOK (use this — it's grounded in real research and is the single most important sentence in this email):
+"${research.openingHook}"
+
+Open the body with this hook (you may lightly adjust phrasing to match Anthony's voice, but keep the specific fact intact). DO NOT replace it with a generic "I got your name while wandering your website" opener — the whole point of researching this prospect was to surface this hook.`
+  : `Opening hook (generic — research found nothing specific, so frame humbly): ${research?.openingHook || `${prospect.company} operates in ${segment}`}`}
+
 Pain signals: ${research?.painSignals?.join('; ') || 'general facilities pain'}
 Company snapshot: ${research?.companySnapshot || ''}
+Specificity: ${research?.specificityRating || 'unknown'}${research?.specificityNote ? ` — ${research.specificityNote}` : ''}
 
 ═════ AVAILABLE PROOF POINTS (real SHP customers, ranked by relevance to this prospect) ═════
 ${proofText}
@@ -990,11 +1002,13 @@ ${VOICE_GUIDE}
 ${voiceExamples}
 
 ═════ STRUCTURE FOR YOUR DRAFT ═════
-1. Soft opener — disarming, not salesy. Examples Anthony actually uses:
+1. Opener — ${hasRealHook
+   ? `lead with the OPENING HOOK from the research above. That specific fact is what justifies this email being personalized rather than spray-and-pray. You may adjust the wording slightly to fit Anthony's voice (humble, peer-tone, no exclamation points), but the concrete fact MUST appear in the first 1-2 sentences.`
+   : `disarming, not salesy. Examples Anthony actually uses:
    - "I got your name while wandering [their site/area]..."
    - "I hope email is OK. I did not want to interrupt your day with a phone call..."
    - "I am reaching out for a quick introduction..."
-   Pick whichever fits the situation.
+   Pick whichever fits the situation.`}
 2. Humble framing — acknowledge they likely have a vendor: "I know you likely have someone for what we do, but..." OR if research surfaced something specific, lead with that and skip this beat.
 3. SHP intro + capability summary — one sentence about who SHP is and what we cover. Keep it tight.
 4. Optional proof drop — if a proof point fits naturally (1-2 names max).

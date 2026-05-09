@@ -593,43 +593,97 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     }
   };
 
-  // === Cold email draft — deterministic composer, no API call ===
-  // Picks pieces from the email library (strategy.js) based on prospect context.
-  // No research required. No API dependency. Variants rotate to avoid repetition.
-  const draftOutreach = () => {
+  // === Cold email draft — AI-generated in Anthony's voice, with deterministic fallback ===
+  // Sends the prospect, research (incl. openingHook), proof points, voice guide, and
+  // real email examples to Claude. Returns { subject, body }.
+  // Falls back to the deterministic composer if the API call fails for any reason.
+  const draftOutreach = async () => {
     if (!selectedProspect) return;
     setIsDrafting(true);
     setView('compose');
 
-    // Brief delay so the loading state is visible (composer is instant)
-    setTimeout(() => {
-      try {
-        const proofs = pickProofPoints(selectedProspect, 3);
+    const research = researchData[selectedProspect.id] || null;
+    const proofs = pickProofPoints(selectedProspect, 3);
 
-        const result = composeEmail({
-          prospect: selectedProspect,
-          signature: config.signature,
-          proofPoints: proofs,
-          avoid: recentVariants,
-        });
+    // Helper: deterministic fallback (the previous behavior — kept as a safety net
+    // so the user always gets *something* reviewable even when Claude is down).
+    const fallbackCompose = (reason) => {
+      const result = composeEmail({
+        prospect: selectedProspect,
+        signature: config.signature,
+        proofPoints: proofs,
+        avoid: recentVariants,
+      });
+      setDraftEmail({ subject: result.subject, body: result.body });
+      setDraftDiagnostic({ ...result.diagnostic, fallback: true, fallbackReason: reason });
+      setRecentVariants(prev => {
+        const next = [...prev, result.diagnostic.openerId, result.diagnostic.bodyId, result.diagnostic.ctaId];
+        return next.slice(-6);
+      });
+      showToast(`Draft composed (fallback) · ${reason}`, 'info');
+    };
 
-        setDraftEmail({ subject: result.subject, body: result.body });
-        setDraftDiagnostic(result.diagnostic);
+    try {
+      const prompt = buildColdEmailPrompt(
+        selectedProspect,
+        research,
+        selectedProspect.segment,
+        config.signature,
+      );
 
-        // Track which variants we used so the next draft picks different ones.
-        // Keep last 6 variants in memory — enough to rotate but not so much we run out.
-        setRecentVariants(prev => {
-          const next = [...prev, result.diagnostic.openerId, result.diagnostic.bodyId, result.diagnostic.ctaId];
-          return next.slice(-6);
-        });
+      const data = await postJson('/api/anthropic', {
+        model: ANTHROPIC_MODEL,
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }],
+      }, { retries: 1, timeoutMs: 60_000 });
 
-        showToast(`Draft composed · ${result.diagnostic.openerId} / ${result.diagnostic.bodyId} / ${result.diagnostic.ctaId}`);
-      } catch (err) {
-        showToast(`Compose failed: ${err.message}`, 'error');
-      } finally {
-        setIsDrafting(false);
+      const blocks = Array.isArray(data?.content) ? data.content : [];
+      const text = blocks
+        .filter(b => b?.type === 'text' && typeof b.text === 'string')
+        .map(b => b.text)
+        .join('\n')
+        .trim();
+
+      if (!text) {
+        return fallbackCompose('Anthropic returned no text');
       }
-    }, 200);
+
+      // The prompt asks for {"subject":"...","body":"..."} — extract robustly.
+      const cleaned = text.replace(/```json|```/g, '').trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        return fallbackCompose('No JSON in Claude response');
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch (e) {
+        return fallbackCompose(`JSON parse failed: ${e.message}`);
+      }
+      if (!parsed?.subject || !parsed?.body) {
+        return fallbackCompose('Claude response missing subject/body');
+      }
+
+      setDraftEmail({ subject: parsed.subject, body: parsed.body });
+      setDraftDiagnostic({
+        composer: 'ai',
+        model: ANTHROPIC_MODEL,
+        usedResearch: !!research,
+        usedOpeningHook: !!research?.openingHook,
+        proofPointsAvailable: proofs.map(p => p.name),
+        fallback: false,
+      });
+      showToast(
+        research?.openingHook
+          ? 'Draft composed in Anthony\'s voice — research opener woven in'
+          : 'Draft composed in Anthony\'s voice (no research found — generic frame)',
+      );
+    } catch (err) {
+      console.error('[shp] AI draft failed:', err);
+      fallbackCompose(err.message || 'API error');
+    } finally {
+      setIsDrafting(false);
+    }
   };
 
   // === Push to Pipedrive as a Lead ===
@@ -1038,7 +1092,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={apolloQuota} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
-        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
+        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
         {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={apolloQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} />}
@@ -1822,17 +1876,35 @@ function SectionLabel({ children }) {
 // =================================================================
 // === COMPOSE VIEW ===
 // =================================================================
-function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, pushToPipedrive, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, config, setView, followUpDays }) {
+function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, draftDiagnostic, pushToPipedrive, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, config, setView, followUpDays }) {
+  const isAiDraft = draftDiagnostic?.composer === 'ai' && !draftDiagnostic?.fallback;
+  const usedHook = draftDiagnostic?.usedOpeningHook;
   return (
     <>
       <button style={{ ...styles.secondaryBtn, marginBottom: '16px' }} onClick={() => setView('research')}>← Back</button>
       <div style={styles.pageTitle}>Review & Send</div>
       <div style={styles.pageSubtitle}>To: {prospect.email || <span style={{ color: '#fbbf24' }}>no email — add manually</span>}</div>
 
+      {!isDrafting && draftDiagnostic && (
+        <div style={{ ...styles.card, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: '10px',
+          background: isAiDraft ? 'rgba(34, 197, 94, 0.06)' : 'rgba(251, 191, 36, 0.06)',
+          borderColor: isAiDraft ? 'rgba(34, 197, 94, 0.2)' : 'rgba(251, 191, 36, 0.2)' }}>
+          {isAiDraft
+            ? <CheckCircle2 size={16} color="#4ade80" />
+            : <AlertCircle size={16} color="#fbbf24" />}
+          <div style={{ fontSize: '13px' }}>
+            {isAiDraft
+              ? <>Drafted by Claude in Anthony's voice {usedHook ? '· research opener woven in' : '· generic frame (no specific research hook)'}</>
+              : <>Fallback composer used {draftDiagnostic.fallbackReason ? `· ${draftDiagnostic.fallbackReason}` : ''} — review carefully and regenerate if needed</>}
+          </div>
+        </div>
+      )}
+
       {isDrafting ? (
         <div style={{ ...styles.card, textAlign: 'center', padding: '60px' }}>
           <Loader2 size={32} className="spin" style={{ color: '#ff6b85', marginBottom: '16px' }} />
-          <div style={{ fontSize: '15px', fontWeight: 500 }}>Writing personalized email…</div>
+          <div style={{ fontSize: '15px', fontWeight: 500 }}>Writing personalized email in Anthony's voice…</div>
+          <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '6px' }}>Weaving in research findings, voice guide, and proof points.</div>
         </div>
       ) : (
         <>
