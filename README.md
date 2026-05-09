@@ -43,6 +43,9 @@ git push -u origin main
 4. **Before clicking Deploy**, add Environment Variables:
    - `PIPEDRIVE_API_TOKEN` — your Pipedrive personal API token
    - `PIPEDRIVE_DOMAIN` (optional) — e.g. `superiorhardware.pipedrive.com`
+   - `ANTHROPIC_API_KEY` — required for prospect research + Apollo MCP search (calls now go through `/api/anthropic`, not directly from the browser)
+   - `APOLLO_API_KEY` — required for `/api/apollo-enrich` and `/api/apollo-quota`
+   - `KV_REST_API_URL` + `KV_REST_API_TOKEN` (optional) — enables server-side persistence of sender identity / settings via Vercel KV. Without these, settings still save to `localStorage` and the app keeps working.
 5. Deploy. ~60 seconds.
 
 ### 3. First load
@@ -70,6 +73,17 @@ Replace `src/seed-prospects.json` with a new export. Each record needs: `id`, `n
 
 ## Token security
 
-- `PIPEDRIVE_API_TOKEN` lives in Vercel env vars only — never in the frontend or browser
-- Smart BCC and sender identity are saved to browser `localStorage` (not sensitive)
-- If token compromised: rotate in Pipedrive (Settings → Personal preferences → API → Generate new), update Vercel env var, redeploy
+- All API tokens (`PIPEDRIVE_API_TOKEN`, `ANTHROPIC_API_KEY`, `APOLLO_API_KEY`) live in Vercel env vars only — never in the frontend or browser
+- Anthropic, Apollo, and Pipedrive calls all go through serverless proxies (`/api/anthropic`, `/api/apollo-enrich`, `/api/apollo-quota`, `/api/pipedrive`)
+- Smart BCC and sender identity sync to Vercel KV when configured (otherwise `localStorage`)
+- If a token is compromised: rotate in the originating system, update the Vercel env var, redeploy
+
+## Reliability
+
+- All external API calls (Pipedrive, Apollo, Anthropic) retry transient failures (5xx, 429, network errors) with exponential backoff (up to 2 retries by default — see `src/api-client.js`)
+- Each call is bounded by a timeout (30s for Pipedrive/Apollo, 90s for Anthropic web search) so the UI never hangs forever
+- The dashboard surfaces the *current* connection state — no stale "disconnected" banner once a connect succeeds
+
+## Data export
+
+Settings → "Data Export" downloads a JSON snapshot of your config, prospect overrides, Pipedrive record IDs, and cached research. Useful for backups or migrating to a new browser.
