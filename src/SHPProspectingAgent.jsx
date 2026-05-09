@@ -10,7 +10,7 @@ import {
   SHP_IDENTITY, DEFAULT_SIGNATURE, TERRITORY, classifyCounty, isInTerritory,
   classifyICP, classifyTitle, PAIN_LIBRARY, RESOURCE_CTAS, CUSTOMERS, pickProofPoints,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
-  buildColdEmailPrompt, buildDealTitle, buildClusters, FOLLOW_UP_DAYS,
+  buildColdEmailPrompt, buildDealTitle, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
   composeEmail,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
@@ -65,7 +65,8 @@ export default function SHPProspectingAgent() {
   // Track recently-used variant IDs so the composer rotates rather than repeats
   const [recentVariants, setRecentVariants] = useState([]);
 
-  // Pipedrive records — pdRecords[prospectId] = {dealId, personId, orgId, sentAt}
+  // Pipedrive records — pdRecords[prospectId] = {leadId, leadUrl, dealId, dealUrl, personId, orgId, sentAt}
+  // leadId is set when we push (default). dealId is set later if/when the lead is converted in Pipedrive.
   const [pdRecords, setPdRecords] = useState({});
   const [stageDeals, setStageDeals] = useState({});
   const [isPushing, setIsPushing] = useState(false);
@@ -541,7 +542,10 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     }, 200);
   };
 
-  // === Push to Pipedrive ===
+  // === Push to Pipedrive as a Lead ===
+  // Creates Person + Org + Lead (in Lead Inbox) + Day-14 follow-up activity attached to Lead.
+  // Lead → Deal conversion is done manually in Pipedrive web app when the prospect qualifies
+  // (defined as: site walk scheduled).
   const pushToPipedrive = async () => {
     if (!pdConnected) {
       showToast('Pipedrive not connected', 'error');
@@ -549,18 +553,20 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       return;
     }
     if (!selectedProspect) return;
-    if (pdRecords[selectedProspect.id]?.dealId) {
+    if (pdRecords[selectedProspect.id]?.leadId || pdRecords[selectedProspect.id]?.dealId) {
       showToast('Already in Pipedrive', 'info');
       return;
     }
     setIsPushing(true);
     try {
+      // 1. Create or reuse the Organization
       const orgResp = await pdRequest('POST', '/organizations', {
         name: selectedProspect.company,
         owner_id: pdMeta.userId,
       });
       const orgId = orgResp.data.id;
 
+      // 2. Create the Person (linked to org)
       const personBody = {
         name: selectedProspect.name,
         org_id: orgId,
@@ -575,26 +581,27 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       const personResp = await pdRequest('POST', '/persons', personBody);
       const personId = personResp.data.id;
 
-      const firstStage = pdMeta.stages[0];
-      const dealResp = await pdRequest('POST', '/deals', {
-        title: buildDealTitle(selectedProspect, selectedProspect.segment),
+      // 3. Create a Lead in the Lead Inbox (NOT a Deal)
+      // Pipedrive Leads docs: requires title + (person_id or org_id). Returns lead with `id` (UUID).
+      const leadResp = await pdRequest('POST', '/leads', {
+        title: buildLeadTitle(selectedProspect, selectedProspect.segment),
         person_id: personId,
-        org_id: orgId,
-        pipeline_id: pdMeta.defaultPipelineId,
-        stage_id: firstStage.id,
+        organization_id: orgId,
         owner_id: pdMeta.userId,
       });
-      const dealId = dealResp.data.id;
+      const leadId = leadResp.data.id; // Pipedrive lead IDs are UUIDs (strings), not integers
 
+      // 4. Attach research note to the Lead (if research exists)
       const research = researchData[selectedProspect.id];
       if (research) {
         const noteContent = `<b>AI Research — Fit ${research.fitScore}/100 · ${selectedProspect.segment}</b><br><br><b>Company:</b> ${research.companySnapshot}<br><br><b>Facility profile:</b> ${research.facilityProfile}<br><br><b>Pain signals:</b><ul>${research.painSignals.map(p => `<li>${p}</li>`).join('')}</ul><b>SHP fit:</b> ${research.fitReasoning}<br><br><b>County:</b> ${selectedProspect.county || 'unknown'} · <b>Source:</b> ${selectedProspect.source || 'manual'}`;
         await pdRequest('POST', '/notes', {
           content: noteContent,
-          deal_id: dealId, person_id: personId, org_id: orgId,
+          lead_id: leadId, person_id: personId, org_id: orgId,
         });
       }
 
+      // 5. Day-14 resource-framed follow-up activity, attached to Lead
       const followUp = new Date();
       followUp.setDate(followUp.getDate() + FOLLOW_UP_DAYS);
       const dueDate = followUp.toISOString().split('T')[0];
@@ -603,17 +610,21 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         type: 'email',
         due_date: dueDate,
         due_time: '09:00',
-        deal_id: dealId, person_id: personId, org_id: orgId,
+        lead_id: leadId, person_id: personId, org_id: orgId,
         user_id: pdMeta.userId,
-        note: `Resource-framed follow-up. If no reply by today, share something useful (fire door inspection guide, ADA upgrade checklist, segment-specific resource). Don't pitch — stay in resource frame.`,
+        note: `Resource-framed follow-up. If no reply by today, share something useful (fire door inspection guide, ADA upgrade checklist, segment-specific resource). Don't pitch — stay in resource frame. CONVERT THIS LEAD TO A DEAL only if a site walk is scheduled.`,
       });
+
+      // Pipedrive lead URL format: https://[domain].pipedrive.com/leads/inbox/[uuid]
+      // We use a generic format that works regardless of subdomain
+      const leadUrl = `https://app.pipedrive.com/leads/inbox/${leadId}`;
 
       setPdRecords(prev => ({
         ...prev,
-        [selectedProspect.id]: { orgId, personId, dealId, dealUrl: `https://app.pipedrive.com/deal/${dealId}` },
+        [selectedProspect.id]: { orgId, personId, leadId, leadUrl },
       }));
-      showToast(`Created Pipedrive deal #${dealId}`);
-      await syncPipeline();
+      showToast(`Created lead in Pipedrive — convert to deal when site walk scheduled`);
+      // Don't sync the deal pipeline since we didn't create a deal
     } catch (err) {
       showToast(`Pipedrive push failed: ${err.message}`, 'error');
     } finally {
@@ -648,17 +659,20 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     showToast('Opened in Outlook — review and click Send');
   };
 
-  // === Open the deal in Pipedrive's web UI to compose there ===
+  // === Open the lead/deal in Pipedrive's web UI to compose there ===
   // Alt path: if user prefers Pipedrive's compose UI (which sends through M365 sync)
   const openInPipedrive = () => {
     if (!selectedProspect) return;
     const rec = pdRecords[selectedProspect.id];
-    if (!rec?.dealId) {
+    if (!rec?.leadId && !rec?.dealId) {
       showToast('Push to Pipedrive first', 'info');
       return;
     }
-    window.open(rec.dealUrl || `https://app.pipedrive.com/deal/${rec.dealId}`, '_blank', 'noopener,noreferrer');
-    showToast('Opened deal in Pipedrive — click Email in the deal panel');
+    // Prefer lead URL if we created a lead; fall back to deal URL if it was converted
+    const url = rec.leadUrl || rec.dealUrl
+      || (rec.leadId ? `https://app.pipedrive.com/leads/inbox/${rec.leadId}` : `https://app.pipedrive.com/deal/${rec.dealId}`);
+    window.open(url, '_blank', 'noopener,noreferrer');
+    showToast('Opened in Pipedrive — click Email in the panel to compose');
   };
 
   // Backwards-compatible alias for any UI still calling sendViaGmail
@@ -717,7 +731,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     ready: prospectsWithOverrides.filter(p => p.status === 'Ready' && p.outreachStatus === 'Active').length,
     customers: prospectsWithOverrides.filter(p => p.outreachStatus === 'Customer').length,
     pursueLater: prospectsWithOverrides.filter(p => p.outreachStatus === 'PursueLater').length,
-    pushed: Object.keys(pdRecords).length,
+    pushed: Object.values(pdRecords).filter(r => r.leadId || r.dealId).length,
     sent: Object.values(pdRecords).filter(r => r.sentAt).length,
     openDeals: Object.values(stageDeals).reduce((a, arr) => a + arr.length, 0),
     pursueLaterDueCount: pursueLaterDue.length,
@@ -817,7 +831,7 @@ function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, 
       <div style={styles.statsGrid}>
         <StatCard styles={styles} label="Active Pool" value={stats.ready} sub="In-ICP, ready for outreach" />
         <StatCard styles={styles} label="Customers" value={stats.customers} sub="Excluded from cold drafts" />
-        <StatCard styles={styles} label="Pushed to PD" value={stats.pushed} sub={stats.pursueLaterDueCount > 0 ? `${stats.pursueLaterDueCount} pursue-later due` : 'This session'} />
+        <StatCard styles={styles} label="Leads Pushed" value={stats.pushed} sub={stats.pursueLaterDueCount > 0 ? `${stats.pursueLaterDueCount} pursue-later due` : 'In Pipedrive Lead Inbox'} />
         <StatCard styles={styles} label="Open Deals" value={stats.openDeals} sub={pdConnected ? `In ${pdMeta.defaultPipelineName}` : 'Not connected'} />
       </div>
 
@@ -1090,7 +1104,8 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             {isDead && <span style={styles.badge('gray')}>Dead</span>}
             {isPursueLater && <span style={styles.badge('navy')}>Pursue {prospect.revisitDate}</span>}
             {research && !isCustomer && !isDead && <span style={styles.badge('green')}><CheckCircle2 size={10} /> Fit {research.fitScore}</span>}
-            {rec?.dealId && <span style={styles.badge('navy')}>PD #{rec.dealId}</span>}
+            {rec?.leadId && !rec?.dealId && <span style={styles.badge('navy')}>Lead</span>}
+            {rec?.dealId && <span style={styles.badge('navy')}>Deal #{rec.dealId}</span>}
             {rec?.sentAt && <span style={styles.badge('amber')}><Send size={10} /> Sent</span>}
           </div>
           <div style={{ fontSize: '12px', color: '#a8b5c9', marginBottom: '4px' }}>
@@ -1390,14 +1405,14 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
 
           <div style={styles.card}>
             <div style={styles.sectionTitle}><Briefcase size={14} /> Two-Step Send</div>
-            <SendStep styles={styles} num="1" title="Push to Pipedrive" sub={`Creates Person + Org + Deal + Day ${followUpDays} resource follow-up activity`} done={!!pdRecords[prospect.id]?.dealId} disabled={!pdConnected} loading={isPushing} onClick={pushToPipedrive} btnLabel={pdRecords[prospect.id]?.dealId ? 'View Deal' : 'Push to PD'} icon={Briefcase} />
-            <SendStep styles={styles} num="2" title="Open in Outlook to send" sub="Pre-fills Outlook web compose with this draft. Review one more time, click Send. M365↔Pipedrive sync auto-logs the email to the deal." done={!!pdRecords[prospect.id]?.sentAt} disabled={!prospect.email} loading={false} onClick={sendViaOutlook} btnLabel="Open in Outlook" icon={Send} />
+            <SendStep styles={styles} num="1" title="Push to Pipedrive (as Lead)" sub={`Creates Person + Org + Lead in Lead Inbox + Day ${followUpDays} resource follow-up activity. Convert to Deal in Pipedrive when site walk is scheduled.`} done={!!pdRecords[prospect.id]?.leadId || !!pdRecords[prospect.id]?.dealId} disabled={!pdConnected} loading={isPushing} onClick={pushToPipedrive} btnLabel={pdRecords[prospect.id]?.leadId ? 'View Lead' : pdRecords[prospect.id]?.dealId ? 'View Deal' : 'Push to PD'} icon={Briefcase} />
+            <SendStep styles={styles} num="2" title="Open in Outlook to send" sub="Pre-fills Outlook web compose with this draft. Review one more time, click Send. M365↔Pipedrive sync auto-logs the email to the lead." done={!!pdRecords[prospect.id]?.sentAt} disabled={!prospect.email} loading={false} onClick={sendViaOutlook} btnLabel="Open in Outlook" icon={Send} />
 
-            {pdRecords[prospect.id]?.dealId && (
+            {(pdRecords[prospect.id]?.leadId || pdRecords[prospect.id]?.dealId) && (
               <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(232, 236, 243, 0.06)' }}>
                 <div style={{ fontSize: '11px', color: '#7a8aa3', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Alternative</div>
                 <button style={{ ...styles.secondaryBtn, fontSize: '12px' }} onClick={openInPipedrive}>
-                  <ExternalLink size={12} /> Open deal in Pipedrive (compose there instead)
+                  <ExternalLink size={12} /> Open {pdRecords[prospect.id]?.leadId ? 'lead' : 'deal'} in Pipedrive (compose there instead)
                 </button>
               </div>
             )}
@@ -1700,7 +1715,7 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdMe
           <div style={{ marginBottom: '10px' }}><strong>2. Research:</strong> Claude pulls company snapshot, facility profile, segment-specific pain signals, and an opening hook.</div>
           <div style={{ marginBottom: '10px' }}><strong>3. Draft:</strong> Anthony's voice — humble, peer-tone, "arrow in the quiver" framing — with contextually-relevant SHP customer references when they fit.</div>
           <div style={{ marginBottom: '10px' }}><strong>4. Review:</strong> Edit the draft in the agent. Regenerate if it's off.</div>
-          <div style={{ marginBottom: '10px' }}><strong>5. Push to Pipedrive:</strong> Creates Person + Org + Deal + Day 14 follow-up activity.</div>
+          <div style={{ marginBottom: '10px' }}><strong>5. Push to Pipedrive (as Lead):</strong> Creates Person + Org + Lead in the Lead Inbox + Day 14 follow-up. Cold prospects stay as Leads — they don't pollute your pipeline. Convert to Deal in Pipedrive when a site walk is scheduled.</div>
           <div style={{ marginBottom: '10px' }}><strong>6. Open in Outlook:</strong> Pre-fills Outlook compose. Click Send. M365↔Pipedrive sync logs it automatically.</div>
           <div><strong>7. After they reply:</strong> Sandler Coach view — Pain Funnel prep, UFC scripts, Reversing helpers.</div>
         </div>

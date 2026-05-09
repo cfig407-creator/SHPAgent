@@ -861,9 +861,14 @@ Return ONLY this JSON, no preamble, no markdown:
 // === FOLLOW-UP CADENCE ===
 export const FOLLOW_UP_DAYS = 14; // Day 14 = resource-framed long game
 
-// === PIPEDRIVE DEAL TITLE FORMAT ===
+// === PIPEDRIVE LEAD/DEAL TITLE FORMAT ===
 export function buildDealTitle(prospect, segment) {
   return `${prospect.company} — ${segment} — Outbound Resource Intro`;
+}
+
+// Lead title — same format as deal so when converted in Pipedrive, the title carries forward
+export function buildLeadTitle(prospect, segment) {
+  return `${prospect.company} — ${segment} — Outbound Lead`;
 }
 
 // === DENSITY CLUSTERING ===
