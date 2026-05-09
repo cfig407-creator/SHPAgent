@@ -175,6 +175,281 @@ ANTHONY'S VOICE — characteristics the draft must hit:
 `;
 
 
+// =====================================================================
+// === EMAIL LIBRARY ===================================================
+// =====================================================================
+// Deterministic email composition. Builds emails from structured pieces
+// rather than calling AI for every draft. Each piece is in Anthony's voice,
+// drawn from his real templates. Composer logic picks pieces based on
+// prospect context (segment, county, title altitude, proof points available).
+//
+// Three categories: opener / body / cta
+// Each variant has metadata (`when`) describing when the composer should pick it.
+// Variants use {placeholders} that the composer fills at runtime.
+//
+// To edit: add/remove/modify variants in any bank. The composer reads the
+// banks at runtime — no UI changes needed.
+
+// === OPENER BANK ===
+// Picks one based on context (geography match, title altitude, etc.)
+export const OPENER_BANK = [
+  {
+    id: 'A_workhorse',
+    when: 'default — works for any cold outreach',
+    text: `I got your name while looking around for the right person at {company} to share some information with about Superior Hardware Products.`,
+  },
+  {
+    id: 'C_geography',
+    when: 'fires when there\'s a same-county customer to anchor on',
+    text: `I came across {company} while working with a few customers in {county} County and wanted to make sure you knew about Superior Hardware Products.`,
+    requires: ['sameCountyCustomer'],
+  },
+  {
+    id: 'F_higher_altitude',
+    when: 'fires for Director / VP / Superintendent / decision-maker titles',
+    text: `I was looking for the right facilities contact at {company} and your name came up. Wanted to introduce SHP briefly.`,
+    requires: ['strategicTitle'],
+  },
+];
+
+// === BODY BANK ===
+// Each body has the humble-confident framing + capability + (optional) proof drop.
+// Composer picks based on segment, prospect type, and whether proof points are present.
+// {proof} placeholder gets replaced with a contextual customer reference, or removed cleanly.
+// `avoidWhen` flags let the composer skip variants in inappropriate contexts.
+export const BODY_BANK = [
+  {
+    id: 'B1_arrow_in_quiver_default',
+    when: 'default — humble framing + capability summary, with optional proof drop',
+    text: `I know you likely have someone for what we do, but I wanted to get you some information in case you need another arrow in your quiver.
+
+In short, we can handle everything related to your door openings — from mechanical to electrified to automatics. SHP can provide, service, and install anything related to doors or hardware.{proof}`,
+  },
+  {
+    id: 'B2_proud_to_support_partners',
+    when: 'fires when proof points exist for this prospect',
+    text: `Our team provides service and installation for everything in your doorways across your facilities.
+
+We're proud to work with {proofList} across Central Florida, bridging the gap between access control providers and locksmiths. Our successful partnerships speak to our capabilities, and we'd like the chance to bring your team the same level of service.`,
+    requires: ['hasProofPoints'],
+  },
+  {
+    id: 'B3_capability_focused',
+    when: 'fires when proof points are weak or absent — leads with capability',
+    text: `In short, we specialize in the supply and installation of commercial doors, frames, hardware, and access control packages.
+
+We cover all of Central Florida, working primarily with public school systems, county and city governments, hospitals, and colleges. Our facility is in Longwood, just outside of Orlando.{proof}`,
+  },
+  {
+    id: 'B4_full_capability_list',
+    when: 'fires when prospect appears to need broad capability awareness (multi-segment or unclear)',
+    text: `I wanted to take a moment to introduce myself and see how I might assist with your door or hardware needs.
+
+We specialize in a wide range of services including hollow metal and wood doors, automatics, access control, rekeying, and more. Best of all, we provide both installation and service for everything we offer.{proof}`,
+  },
+  {
+    id: 'B5_humble_resource',
+    when: 'soft-touch variant — leans heavily into resource framing, lighter capability',
+    text: `I know you may already have a vendor for door and hardware work, but wanted to put SHP on your radar in case anything's not getting the attention it deserves — or if you're just looking for a second option for next time.
+
+We're a 40-year family shop in Longwood that handles everything from a single broken closer to full master key system rebuilds across multi-building portfolios.{proof}`,
+  },
+  {
+    id: 'B6_existing_relationship',
+    when: 'fires when SHP already has a customer relationship with this organization (different contact)',
+    text: `We already work with your team on the door and hardware side, but I wanted to make sure I was connected with the right person on facilities decisions going forward.
+
+Happy to share what we currently support and where we might be able to help further.`,
+    requires: ['hasExistingRelationship'],
+  },
+  {
+    id: 'B7_short_intro',
+    when: 'shortest variant — when you want minimal email volume. Avoid for high-altitude titles.',
+    text: `Wanted to introduce Superior Hardware Products. We handle commercial doors, frames, hardware, automatics, and access control across Central Florida.{proof}`,
+    avoidWhen: ['strategicTitle'], // too thin for Directors/VPs
+  },
+];
+
+// === CTA BANK ===
+// Soft CTAs in Anthony's voice. Composer rotates based on context.
+export const CTA_BANK = [
+  {
+    id: 'CTA1_timing',
+    when: 'default — neutral, no pressure',
+    text: `Let me know if the timing is right for a conversation, or if there's another person I should reach out to.`,
+  },
+  {
+    id: 'CTA2_in_person',
+    when: 'fires when prospect is in CFL North (geographically reachable)',
+    text: `I'm often in the area with a few customers, so I can stop by for an in-person intro if you'd prefer.`,
+    requires: ['inProximity'],
+  },
+  {
+    id: 'CTA3_resource_framing',
+    when: 'fires when prospect is unlikely to have an immediate need',
+    text: `Just wanted to be a name you recognize when something comes up — propped door, broken closer, mid-year hardware failure. If anything's already on your radar, happy to walk it with you.`,
+  },
+  {
+    id: 'CTA4_low_pressure',
+    when: 'softest CTA — pure no-pressure',
+    text: `No need to act on anything today. Happy to chat or just be a name to keep in mind for when something comes up.`,
+  },
+  {
+    id: 'CTA5_direct_offer',
+    when: 'fires for higher-altitude titles where directness reads as respect',
+    text: `If you need a reliable door and hardware partner, I'd appreciate the chance to connect briefly to discuss our capabilities.`,
+    requires: ['strategicTitle'],
+  },
+];
+
+// === SUBJECT LINE BANK ===
+// 8-10 variants. Composer picks one. All sentence-case, no clickbait.
+export const SUBJECT_BANK = [
+  'quick intro from SHP — {company}',
+  'a name to know for door work — {company}',
+  'hardware partner for {company}',
+  'door + hardware support for {company}',
+  'another resource for {company}\'s facility team',
+  'wanted to introduce SHP to {company}',
+  'door & hardware coverage for {company}',
+  'introducing Superior Hardware Products',
+  '{firstName} — quick intro from SHP',
+  'SHP — door and hardware support in {county}',
+];
+
+// === COMPOSER ===
+// Picks pieces from each bank based on prospect context, fills placeholders,
+// returns a complete email. Pure JavaScript — no API calls.
+//
+// Tracks recently-picked variants in a session-level memory to avoid repeating
+// (the composer takes an `avoid` array of variant IDs).
+export function composeEmail({ prospect, signature, proofPoints = [], avoid = [] }) {
+  // === CONTEXT FLAGS ===
+  // What's true about this prospect that affects variant selection?
+  const ctx = {
+    sameCountyCustomer: proofPoints.some(p => p.county === prospect.county),
+    hasProofPoints: proofPoints.length > 0,
+    strategicTitle: ['director', 'vp', 'vice president', 'head of', 'chief',
+      'superintendent', 'cfo', 'coo', 'ceo', 'principal', 'business manager',
+      'city manager', 'county administrator'].some(k =>
+        (prospect.title || '').toLowerCase().includes(k)),
+    inProximity: !!prospect.county, // For now, all CFL North prospects qualify; future: distance-aware
+    hasExistingRelationship: false, // Future: lookup from Pipedrive
+  };
+
+  // === PICK OPENER ===
+  const opener = pickVariant(OPENER_BANK, ctx, avoid) || OPENER_BANK[0];
+
+  // === PICK BODY ===
+  const body = pickVariant(BODY_BANK, ctx, avoid) || BODY_BANK[0];
+
+  // === PICK CTA ===
+  const cta = pickVariant(CTA_BANK, ctx, avoid) || CTA_BANK[0];
+
+  // === PICK SUBJECT ===
+  const subjectTemplate = SUBJECT_BANK[Math.floor(Math.random() * SUBJECT_BANK.length)];
+
+  // === FILL PLACEHOLDERS ===
+  const firstName = (prospect.name || '').split(' ')[0] || 'there';
+  const greetingName = firstName !== 'there' ? firstName : 'there';
+
+  // Build proof drop sentence (used inside body when {proof} placeholder is present)
+  const proofDrop = buildProofDrop(proofPoints, prospect);
+
+  const fillVars = {
+    company: prospect.company || 'your team',
+    county: prospect.county || 'the area',
+    firstName: greetingName,
+    proof: proofDrop,
+    proofList: buildProofList(proofPoints),
+  };
+
+  const subject = fillTemplate(subjectTemplate, fillVars);
+  const openerText = fillTemplate(opener.text, fillVars);
+  const bodyText = fillTemplate(body.text, fillVars);
+  const ctaText = fillTemplate(cta.text, fillVars);
+
+  // === ASSEMBLE ===
+  const fullBody = `Hi ${greetingName},
+
+${openerText}
+
+${bodyText}
+
+${ctaText}
+
+Best Regards,
+
+${signature || DEFAULT_SIGNATURE}`;
+
+  return {
+    subject,
+    body: fullBody,
+    diagnostic: {
+      composer: 'deterministic',
+      openerId: opener.id,
+      bodyId: body.id,
+      ctaId: cta.id,
+      subjectTemplate,
+      proofPointsUsed: proofPoints.map(p => p.name),
+      contextFlags: ctx,
+    },
+  };
+}
+
+// Pick a variant whose `requires` (if any) match the context, excluding any in `avoid`.
+// Also respects `avoidWhen` flags — variants are skipped when any avoidWhen flag is true in context.
+function pickVariant(bank, ctx, avoid) {
+  const eligible = bank.filter(v => {
+    if (avoid.includes(v.id)) return false;
+    if (v.avoidWhen && v.avoidWhen.some(flag => ctx[flag])) return false;
+    if (!v.requires) return true;
+    return v.requires.every(req => ctx[req]);
+  });
+  if (eligible.length === 0) {
+    // Fall back to bank without requires & without avoidWhen flags hitting — the universal default
+    const fallback = bank.filter(v =>
+      !v.requires && !avoid.includes(v.id) && (!v.avoidWhen || !v.avoidWhen.some(flag => ctx[flag]))
+    );
+    if (fallback.length > 0) {
+      return fallback[Math.floor(Math.random() * fallback.length)];
+    }
+    // Last resort: anything not in avoid
+    const anyNonAvoided = bank.filter(v => !avoid.includes(v.id));
+    if (anyNonAvoided.length > 0) {
+      return anyNonAvoided[Math.floor(Math.random() * anyNonAvoided.length)];
+    }
+    return null;
+  }
+  return eligible[Math.floor(Math.random() * eligible.length)];
+}
+
+// Build a natural-sounding proof drop sentence: " We currently support X and Y in the area, among others."
+// Returns empty string when no proofs (so {proof} placeholder cleanly disappears).
+function buildProofDrop(proofPoints, prospect) {
+  if (!proofPoints || proofPoints.length === 0) return '';
+  const names = proofPoints.slice(0, 2).map(p => p.name);
+  if (names.length === 1) {
+    return ` We currently support ${names[0]} in the area, among others.`;
+  }
+  return ` We currently support ${names[0]} and ${names[1]} in the area, among others.`;
+}
+
+// Build proof list for {proofList} placeholder used in body B2: "X, Y, and Z"
+function buildProofList(proofPoints) {
+  if (!proofPoints || proofPoints.length === 0) return 'multiple partners';
+  const names = proofPoints.slice(0, 3).map(p => p.name);
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names[0]}, ${names[1]}, and ${names[2]}`;
+}
+
+// Replace {placeholder} tokens in a template string.
+function fillTemplate(template, vars) {
+  return template.replace(/\{(\w+)\}/g, (m, key) => vars[key] !== undefined ? vars[key] : m);
+}
+
+
 export const TERRITORY = {
   name: 'CFL North End User',
   counties: [

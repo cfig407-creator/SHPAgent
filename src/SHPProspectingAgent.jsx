@@ -11,6 +11,7 @@ import {
   classifyICP, classifyTitle, PAIN_LIBRARY, RESOURCE_CTAS, CUSTOMERS, pickProofPoints,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
   buildColdEmailPrompt, buildDealTitle, buildClusters, FOLLOW_UP_DAYS,
+  composeEmail,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
 
@@ -60,6 +61,9 @@ export default function SHPProspectingAgent() {
   const [isResearching, setIsResearching] = useState(false);
   const [draftEmail, setDraftEmail] = useState({ subject: '', body: '' });
   const [isDrafting, setIsDrafting] = useState(false);
+  const [draftDiagnostic, setDraftDiagnostic] = useState(null);
+  // Track recently-used variant IDs so the composer rotates rather than repeats
+  const [recentVariants, setRecentVariants] = useState([]);
 
   // Pipedrive records — pdRecords[prospectId] = {dealId, personId, orgId, sentAt}
   const [pdRecords, setPdRecords] = useState({});
@@ -498,51 +502,43 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     }
   };
 
-  // === Cold email draft (v2 tone, resource-framed, NOT Sandler-pattern) ===
-  const draftOutreach = async () => {
+  // === Cold email draft — deterministic composer, no API call ===
+  // Picks pieces from the email library (strategy.js) based on prospect context.
+  // No research required. No API dependency. Variants rotate to avoid repetition.
+  const draftOutreach = () => {
     if (!selectedProspect) return;
-    const research = researchData[selectedProspect.id];
-    if (!research) return;
     setIsDrafting(true);
     setView('compose');
 
-    const prompt = buildColdEmailPrompt(selectedProspect, research, selectedProspect.segment, config.signature);
+    // Brief delay so the loading state is visible (composer is instant)
+    setTimeout(() => {
+      try {
+        const proofs = pickProofPoints(selectedProspect, 3);
 
-    try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1200,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      });
-      const data = await response.json();
-      const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-      const cleaned = text.replace(/```json|```/g, '').trim();
-      const match = cleaned.match(/\{[\s\S]*\}/);
-      const parsed = match ? JSON.parse(match[0]) : null;
-      if (parsed) {
-        setDraftEmail({ subject: parsed.subject, body: parsed.body });
-      } else throw new Error('parse fail');
-    } catch (err) {
-      // Fallback hand-crafted email — Anthony's voice, with proof points
-      const firstName = (selectedProspect.name || '').split(' ')[0] || 'there';
-      const ctaKey = selectedProspect.segment === 'K-12 Education' ? 'K12'
-                   : selectedProspect.segment === 'Higher Education' ? 'HigherEd'
-                   : selectedProspect.segment === 'Local Government' ? 'LocalGov' : 'default';
-      const proofs = pickProofPoints(selectedProspect, 2);
-      const proofLine = proofs.length > 0
-        ? `We currently support ${proofs.map(p => p.name).join(' and ')} in the area, among others. `
-        : '';
-      setDraftEmail({
-        subject: `quick intro from SHP — ${selectedProspect.company}`,
-        body: `Hi ${firstName},\n\nI got your name while looking around for the right person at ${selectedProspect.company} to share some information with about Superior Hardware Products.\n\nI know you likely have someone for what we do, but I wanted to get you some information in case you need another arrow in your quiver. In short, we can handle everything related to your door openings — from mechanical to electrified to automatics. SHP can provide, service, and install anything related to doors or hardware. ${proofLine}\n\n${RESOURCE_CTAS[ctaKey]}\n\nLet me know if the timing is right for a conversation.\n\nBest Regards,\n\n${config.signature}`,
-      });
-    } finally {
-      setIsDrafting(false);
-    }
+        const result = composeEmail({
+          prospect: selectedProspect,
+          signature: config.signature,
+          proofPoints: proofs,
+          avoid: recentVariants,
+        });
+
+        setDraftEmail({ subject: result.subject, body: result.body });
+        setDraftDiagnostic(result.diagnostic);
+
+        // Track which variants we used so the next draft picks different ones.
+        // Keep last 6 variants in memory — enough to rotate but not so much we run out.
+        setRecentVariants(prev => {
+          const next = [...prev, result.diagnostic.openerId, result.diagnostic.bodyId, result.diagnostic.ctaId];
+          return next.slice(-6);
+        });
+
+        showToast(`Draft composed · ${result.diagnostic.openerId} / ${result.diagnostic.bodyId} / ${result.diagnostic.ctaId}`);
+      } catch (err) {
+        showToast(`Compose failed: ${err.message}`, 'error');
+      } finally {
+        setIsDrafting(false);
+      }
+    }, 200);
   };
 
   // === Push to Pipedrive ===
