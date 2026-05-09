@@ -34,6 +34,7 @@ export default function SHPProspectingAgent() {
     contactCardUrl: SHP_IDENTITY.contactCardUrl,
     signature: DEFAULT_SIGNATURE,
     sendMode: 'pipedrive', // 'pipedrive' (direct send via M365) | 'gmail' (legacy fallback)
+    followUpHour: 9, // 0-23, local hour of day for the Day-14 activity
   });
 
   // Prospect pool — seed data + manually added + Apollo-found
@@ -591,25 +592,52 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       });
       const leadId = leadResp.data.id; // Pipedrive lead IDs are UUIDs (strings), not integers
 
-      // 4. Attach research note to the Lead (if research exists)
-      const research = researchData[selectedProspect.id];
-      if (research) {
-        const noteContent = `<b>AI Research — Fit ${research.fitScore}/100 · ${selectedProspect.segment}</b><br><br><b>Company:</b> ${research.companySnapshot}<br><br><b>Facility profile:</b> ${research.facilityProfile}<br><br><b>Pain signals:</b><ul>${research.painSignals.map(p => `<li>${p}</li>`).join('')}</ul><b>SHP fit:</b> ${research.fitReasoning}<br><br><b>County:</b> ${selectedProspect.county || 'unknown'} · <b>Source:</b> ${selectedProspect.source || 'manual'}`;
-        await pdRequest('POST', '/notes', {
-          content: noteContent,
-          lead_id: leadId, person_id: personId, org_id: orgId,
-        });
-      }
+      // 4. Attach Lead Profile note — honest facts, no synthetic scoring.
+      // Includes proof points used in the cold draft so we have an audit trail.
+      const proofs = pickProofPoints(selectedProspect, 3);
+      const proofList = proofs.length > 0
+        ? proofs.map(p => `<li>${p.name} (${p.county})</li>`).join('')
+        : '<li><i>No matching customer references for this segment/area</i></li>';
 
-      // 5. Day-14 resource-framed follow-up activity, attached to Lead
+      const profileNote = [
+        `<b>Lead Profile — ${selectedProspect.segment}</b>`,
+        ``,
+        `<b>Organization:</b> ${selectedProspect.company}`,
+        `<b>Location:</b> ${selectedProspect.city || '(unknown)'}, ${selectedProspect.county || '(unknown)'} County`,
+        `<b>Contact:</b> ${selectedProspect.name || '(no name)'}`,
+        `<b>Title:</b> ${selectedProspect.title || '(unknown)'}`,
+        selectedProspect.email ? `<b>Email:</b> ${selectedProspect.email}` : '',
+        selectedProspect.phone ? `<b>Phone:</b> ${selectedProspect.phone}` : '',
+        ``,
+        `<b>Source:</b> ${selectedProspect.source || 'manual'}`,
+        selectedProspect.sourceNotes ? `<b>Source notes:</b> ${selectedProspect.sourceNotes}` : '',
+        selectedProspect.enrollmentOrPop ? `<b>Enrollment / Population:</b> ${selectedProspect.enrollmentOrPop}` : '',
+        ``,
+        `<b>Customer references used in the cold draft:</b>`,
+        `<ul>${proofList}</ul>`,
+      ].filter(Boolean).join('<br>');
+
+      await pdRequest('POST', '/notes', {
+        content: profileNote,
+        lead_id: leadId, person_id: personId, org_id: orgId,
+      });
+
+      // 5. Day-14 resource-framed follow-up activity, attached to Lead.
+      // Convert local follow-up hour → UTC for Pipedrive (their due_time field is UTC).
       const followUp = new Date();
       followUp.setDate(followUp.getDate() + FOLLOW_UP_DAYS);
+      const followUpHour = config.followUpHour ?? 9; // local hour
+      // Build a Date at the local hour, then read the UTC hour off it
+      followUp.setHours(followUpHour, 0, 0, 0);
+      const utcHour = followUp.getUTCHours();
+      const utcMinute = followUp.getUTCMinutes();
       const dueDate = followUp.toISOString().split('T')[0];
+      const dueTime = `${String(utcHour).padStart(2, '0')}:${String(utcMinute).padStart(2, '0')}`;
       await pdRequest('POST', '/activities', {
         subject: `Day ${FOLLOW_UP_DAYS} resource follow-up — ${selectedProspect.name}`,
         type: 'email',
         due_date: dueDate,
-        due_time: '09:00',
+        due_time: dueTime,
         lead_id: leadId, person_id: personId, org_id: orgId,
         user_id: pdMeta.userId,
         note: `Resource-framed follow-up. If no reply by today, share something useful (fire door inspection guide, ADA upgrade checklist, segment-specific resource). Don't pitch — stay in resource frame. CONVERT THIS LEAD TO A DEAL only if a site walk is scheduled.`,
@@ -1700,6 +1728,24 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdMe
             <CheckCircle2 size={14} /> Microsoft 365 ↔ Pipedrive sync
           </div>
           When you click <strong>Open in Outlook</strong> on a draft, the email pre-fills in Outlook web. After you click Send in Outlook, your M365 ↔ Pipedrive sync auto-logs the email to the deal timeline. <strong>No Smart BCC required.</strong>
+        </div>
+        <div style={{ marginBottom: '16px' }}>
+          <label style={styles.label}>Day-14 follow-up time (your local time)</label>
+          <select
+            style={styles.input}
+            value={config.followUpHour ?? 9}
+            onChange={e => setConfig({ ...config, followUpHour: parseInt(e.target.value, 10) })}
+          >
+            {[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18].map(h => (
+              <option key={h} value={h}>
+                {h === 12 ? '12:00 PM (noon)' : h < 12 ? `${h}:00 AM` : `${h - 12}:00 PM`}
+              </option>
+            ))}
+          </select>
+          <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '6px' }}>
+            What time the Day-14 resource follow-up activity should fire in your timezone ({Intl.DateTimeFormat().resolvedOptions().timeZone}).
+            Pipedrive stores activity times in UTC; the agent converts your local hour automatically.
+          </div>
         </div>
         <div>
           <label style={styles.label}>Smart BCC (optional — only if you want belt-and-suspenders logging)</label>
