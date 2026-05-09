@@ -17,8 +17,10 @@ import {
 import seedData from './seed-prospects.js';
 import { apiFetch, postJson } from './api-client.js';
 
-// Anthropic model — promoted to a constant so we change it in one place
-const ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
+// Anthropic model — promoted to a constant so we change it in one place.
+// Use a stable alias rather than a dated snapshot so we don't break when
+// Anthropic retires old snapshots.
+const ANTHROPIC_MODEL = 'claude-sonnet-4-5';
 
 export default function SHPProspectingAgent() {
   const [view, setView] = useState('dashboard');
