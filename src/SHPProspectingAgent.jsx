@@ -74,6 +74,11 @@ export default function SHPProspectingAgent() {
   const [isPushing, setIsPushing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
+  // Apollo enrichment — track which prospect is currently being enriched + the proposed result.
+  // proposedEnrichment[prospectId] = { person, email, phone, title, linkedinUrl, ... } awaiting user approval
+  const [isEnriching, setIsEnriching] = useState(null); // prospect id of currently-enriching prospect
+  const [proposedEnrichment, setProposedEnrichment] = useState({});
+
   // Apollo search
   const [apolloCriteria, setApolloCriteria] = useState({
     titles: 'Facilities Director, Director of Facilities, VP Facilities, Facilities Manager',
@@ -661,6 +666,118 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     }
   };
 
+  // === Apollo enrichment ===
+  // Calls the Vercel proxy /api/apollo-enrich which calls Apollo's people-match endpoint.
+  // Returns Apollo's verified work email + title + LinkedIn URL when found.
+  // Result lands in proposedEnrichment[prospectId] for human review before applying.
+  // Cost: 1 Apollo credit per match found, 0 if not found. Free tier = 50/month.
+  const enrichProspect = async (prospect) => {
+    if (!prospect) return;
+    if (isEnriching) {
+      showToast('Already enriching another prospect — wait for it to finish', 'info');
+      return;
+    }
+
+    // Confirm with user before spending a credit
+    const confirmed = window.confirm(
+      `Enrich ${prospect.name} at ${prospect.company} via Apollo?\n\n` +
+      `Cost: 1 credit if Apollo finds a match, 0 if not found.\n` +
+      `Apollo will look up their verified work email, phone, and LinkedIn URL.`
+    );
+    if (!confirmed) return;
+
+    setIsEnriching(prospect.id);
+    try {
+      const [firstName, ...rest] = (prospect.name || '').trim().split(/\s+/);
+      const lastName = rest.join(' ');
+
+      const resp = await fetch('/api/apollo-enrich', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          firstName,
+          lastName,
+          name: prospect.name,
+          organizationName: prospect.company,
+        }),
+      });
+      const data = await resp.json();
+
+      if (!resp.ok || data.error) {
+        showToast(`Apollo error: ${data.error || 'unknown'}`, 'error');
+        setIsEnriching(null);
+        return;
+      }
+
+      if (!data.matched) {
+        showToast(`Apollo: no match for ${prospect.name} (0 credits used)`, 'info');
+        // Still record this so the UI can show "tried but missed" rather than offering Enrich again immediately
+        setProposedEnrichment(prev => ({
+          ...prev,
+          [prospect.id]: { matched: false, message: data.message || 'No match found' },
+        }));
+        setIsEnriching(null);
+        return;
+      }
+
+      // Apollo found a match — store proposed enrichment for user to review
+      setProposedEnrichment(prev => ({
+        ...prev,
+        [prospect.id]: { matched: true, person: data.person },
+      }));
+      showToast(`Apollo found ${data.person.name} — review and apply`);
+    } catch (err) {
+      showToast(`Enrichment failed: ${err.message}`, 'error');
+    } finally {
+      setIsEnriching(null);
+    }
+  };
+
+  // Apply Apollo's findings to the prospect record (updates email, phone, title in-place)
+  const applyEnrichment = (prospectId) => {
+    const proposal = proposedEnrichment[prospectId];
+    if (!proposal?.matched || !proposal.person) return;
+    const apollo = proposal.person;
+
+    setProspects(prev => prev.map(p => {
+      if (p.id !== prospectId) return p;
+      // Update fields where Apollo has data — but never overwrite a non-empty existing value
+      // unless Apollo's email is "verified" and the existing one is personal
+      const update = { ...p };
+      if (apollo.email && apollo.emailStatus === 'verified') {
+        // Always prefer Apollo's verified email
+        update.email = apollo.email;
+      } else if (apollo.email && (!p.email || /(gmail|yahoo|hotmail|aol|comcast)/i.test(p.email))) {
+        // Use Apollo email if existing is personal/missing, even if not "verified"
+        update.email = apollo.email;
+      }
+      if (apollo.phone && !p.phone) update.phone = apollo.phone;
+      if (apollo.title && (!p.title || p.title.toLowerCase() === 'student')) update.title = apollo.title;
+      if (apollo.linkedinUrl) update.linkedinUrl = apollo.linkedinUrl;
+      update.enrichedAt = new Date().toISOString();
+      update.enrichedBy = 'apollo';
+      return update;
+    }));
+
+    // Clear the proposal
+    setProposedEnrichment(prev => {
+      const next = { ...prev };
+      delete next[prospectId];
+      return next;
+    });
+
+    showToast('Enrichment applied');
+  };
+
+  // Reject Apollo's findings — clears the proposal so the user can decide what to do
+  const dismissEnrichment = (prospectId) => {
+    setProposedEnrichment(prev => {
+      const next = { ...prev };
+      delete next[prospectId];
+      return next;
+    });
+  };
+
   // === Open Outlook web compose with email pre-filled ===
   // Anthony is on M365 with two-way Pipedrive sync, so Outlook-sent emails auto-log to deals.
   // No Smart BCC needed (sync handles it). One click: pre-fill → review → click Send in Outlook.
@@ -816,9 +933,9 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         userName={pdMeta.userName}
       />
       <div style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdMeta={pdMeta} setView={setView} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />}
-        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />}
-        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdMeta={pdMeta} setView={setView} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
+        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
+        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
@@ -873,7 +990,7 @@ function Header({ styles, view, setView, pdConnected, isConnecting, userName }) 
 // =================================================================
 // === DASHBOARD ===
 // =================================================================
-function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete }) {
+function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
   const topClusters = clusters.slice(0, 5);
   const firstName = (fromName || 'Anthony').split(' ')[0];
   return (
@@ -907,7 +1024,7 @@ function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, 
             {pursueLaterDue.length} prospect{pursueLaterDue.length === 1 ? '' : 's'} {pursueLaterDue.length === 1 ? 'is' : 'are'} ready to revisit. Review and decide: re-activate, push the date, or mark dead.
           </div>
           {pursueLaterDue.slice(0, 5).map(p => (
-            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />
+            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />
           ))}
           {pursueLaterDue.length > 5 && (
             <button style={{ ...styles.secondaryBtn, marginTop: '8px' }} onClick={() => setView('find')}>
@@ -983,7 +1100,7 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
 // =================================================================
 // === FIND VIEW ===
 // =================================================================
-function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete }) {
+function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
   const [findTab, setFindTab] = useState('pool');
 
   return (
@@ -1122,7 +1239,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
           <div style={styles.card}>
             <div style={styles.sectionTitle}><Users size={14} /> Prospects ({prospects.length})</div>
             {prospects.slice(0, 50).map(p => (
-              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />
+              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />
             ))}
             {prospects.length > 50 && (
               <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: '#7a8aa3', fontStyle: 'italic' }}>
@@ -1141,7 +1258,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
   );
 }
 
-function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete }) {
+function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const research = researchData[prospect.id];
   const rec = pdRecords[prospect.id];
@@ -1198,11 +1315,66 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
               ⚠ {prospect.enrichmentReasons.join(' · ')}
             </div>
           )}
+          {/* Apollo enrichment proposal — shown when Apollo returned data awaiting user approval */}
+          {proposedEnrichment?.[prospect.id]?.matched && (
+            <div style={{ marginTop: '12px', padding: '12px 14px', background: 'rgba(99, 130, 175, 0.1)', border: '1px solid rgba(99, 130, 175, 0.3)', borderRadius: '8px' }}>
+              <div style={{ fontSize: '11px', color: '#93b0d6', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600, marginBottom: '8px' }}>
+                Apollo found a match
+              </div>
+              <div style={{ fontSize: '12px', color: '#c8d4e8', display: 'grid', gap: '4px' }}>
+                <div><strong>Name:</strong> {proposedEnrichment[prospect.id].person.name}</div>
+                {proposedEnrichment[prospect.id].person.title && <div><strong>Title:</strong> {proposedEnrichment[prospect.id].person.title}</div>}
+                {proposedEnrichment[prospect.id].person.email && (
+                  <div>
+                    <strong>Email:</strong> {proposedEnrichment[prospect.id].person.email}
+                    {proposedEnrichment[prospect.id].person.emailStatus && (
+                      <span style={{ marginLeft: '8px', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: proposedEnrichment[prospect.id].person.emailStatus === 'verified' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(251, 191, 36, 0.2)', color: proposedEnrichment[prospect.id].person.emailStatus === 'verified' ? '#4ade80' : '#fbbf24' }}>
+                        {proposedEnrichment[prospect.id].person.emailStatus}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {proposedEnrichment[prospect.id].person.phone && <div><strong>Phone:</strong> {proposedEnrichment[prospect.id].person.phone}</div>}
+                {proposedEnrichment[prospect.id].person.linkedinUrl && (
+                  <div><strong>LinkedIn:</strong> <a href={proposedEnrichment[prospect.id].person.linkedinUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#93b0d6' }}>profile</a></div>
+                )}
+                {proposedEnrichment[prospect.id].person.organizationName && (
+                  <div style={{ fontSize: '11px', color: '#7a8aa3' }}>Apollo says they work at: {proposedEnrichment[prospect.id].person.organizationName}</div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                <button style={{ ...styles.primaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={() => applyEnrichment(prospect.id)}>
+                  <CheckCircle2 size={12} /> Apply enrichment
+                </button>
+                <button style={{ ...styles.secondaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={() => dismissEnrichment(prospect.id)}>
+                  Reject — wrong person
+                </button>
+              </div>
+            </div>
+          )}
+          {proposedEnrichment?.[prospect.id]?.matched === false && (
+            <div style={{ marginTop: '8px', fontSize: '11px', color: '#7a8aa3', fontStyle: 'italic' }}>
+              Apollo: no match found · {proposedEnrichment[prospect.id].message}
+              <button style={{ marginLeft: '8px', background: 'transparent', border: 'none', color: '#93b0d6', fontSize: '11px', cursor: 'pointer', textDecoration: 'underline' }} onClick={() => dismissEnrichment(prospect.id)}>
+                dismiss
+              </button>
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', gap: '6px', position: 'relative' }}>
           {!isDead && !isCustomer && !prospect.needsEnrichment && (
             <button style={styles.primaryBtn} onClick={() => researchProspect(prospect)}>
               {research ? 'Open' : 'Research'} <ArrowRight size={14} />
+            </button>
+          )}
+          {prospect.needsEnrichment && !isDead && !isCustomer && !proposedEnrichment?.[prospect.id] && (
+            <button
+              style={styles.primaryBtn}
+              onClick={() => enrichProspect(prospect)}
+              disabled={isEnriching === prospect.id || !!isEnriching}
+              title="Look up verified contact info via Apollo (1 credit if found)"
+            >
+              {isEnriching === prospect.id ? <><Loader2 size={13} className="spin" /> Enriching…</> : <><Sparkles size={13} /> Enrich</>}
             </button>
           )}
           <button
@@ -1260,7 +1432,7 @@ function segmentBadgeColor(seg) {
 // =================================================================
 // === CLUSTERS VIEW ===
 // =================================================================
-function ClustersView({ styles, clusters, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete }) {
+function ClustersView({ styles, clusters, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
   const [expanded, setExpanded] = useState({});
 
   return (
@@ -1294,7 +1466,7 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
             {isOpen && (
               <div style={{ marginTop: '16px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', paddingTop: '16px' }}>
                 {cluster.prospects.slice(0, 20).map(p => (
-                  <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} />
+                  <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />
                 ))}
                 {cluster.prospects.length > 20 && (
                   <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: '#7a8aa3', fontStyle: 'italic' }}>
