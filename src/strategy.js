@@ -94,6 +94,167 @@ export function pickProofPoints(prospect, max = 3) {
   return scored.sort((a, b) => b.score - a.score).slice(0, max);
 }
 
+// === CUSTOMER COLLISION CHECK ===
+// Detects when a prospect's organization matches an existing SHP customer, so we can
+// auto-tag them as 'Customer' status (preventing accidental cold emails to active accounts).
+//
+// Returns: 'match' (high confidence), 'likely-match' (probable but flag for review), or 'no-match'.
+// Match logic uses normalized org-name comparison — handles common variations like
+// "Stetson" vs "Stetson University", "City of Deland" vs "Deland", etc.
+export function customerCheck(prospect) {
+  if (!prospect?.company) return { result: 'no-match', matchedCustomer: null };
+  const prospectOrg = normalizeOrgName(prospect.company);
+  if (!prospectOrg) return { result: 'no-match', matchedCustomer: null };
+
+  // Score each customer for similarity against the prospect's org
+  let bestMatch = null;
+  let bestScore = 0;
+  for (const customer of CUSTOMERS) {
+    const customerOrg = normalizeOrgName(customer.name);
+    const score = orgNameSimilarity(prospectOrg, customerOrg);
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = customer;
+    }
+  }
+
+  // High threshold (>=0.85) = confident match
+  // Medium threshold (>=0.65) = likely match, flag for human review
+  // Below = no match
+  if (bestScore >= 0.85) return { result: 'match', matchedCustomer: bestMatch, score: bestScore };
+  if (bestScore >= 0.65) return { result: 'likely-match', matchedCustomer: bestMatch, score: bestScore };
+  return { result: 'no-match', matchedCustomer: null, score: bestScore };
+}
+
+// Normalize an organization name for comparison: lowercase, strip punctuation, drop common
+// noise words ("the", "inc", "llc", "corp", "company", "co"), collapse whitespace.
+function normalizeOrgName(name) {
+  if (!name) return '';
+  return name
+    .toLowerCase()
+    .replace(/[.,'"()&]/g, ' ')
+    .replace(/\b(the|inc|llc|corp|corporation|company|co|ltd|limited|pllc|pa)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Org similarity score (0-1) using token-set overlap with substring boost.
+// Accounts for: word reordering, missing words, plurals, common abbreviations.
+function orgNameSimilarity(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+
+  // Strip generic geographic/institutional words that cause false positives
+  // ("Florida", "State", "Public", "Schools", "County", "City", etc. are too common
+  // to be meaningful alone — they're place/category labels, not distinguishing identity)
+  const GENERIC_WORDS = /\b(florida|state|public|schools?|college|university|agricultural|mechanical|academy|institute|center|services|department|district|county|city|town|village|board|government|administration)\b/g;
+  const aDistinctive = a.replace(GENERIC_WORDS, ' ').replace(/\s+/g, ' ').trim();
+  const bDistinctive = b.replace(GENERIC_WORDS, ' ').replace(/\s+/g, ' ').trim();
+
+  // Substring match — only if the distinctive part is at least 2 words OR a long single word.
+  // Prevents short single-word matches like "daytona" matching across unrelated orgs.
+  const aHasMultipleWords = aDistinctive.split(' ').length >= 2 || aDistinctive.length >= 8;
+  const bHasMultipleWords = bDistinctive.split(' ').length >= 2 || bDistinctive.length >= 8;
+  if (aHasMultipleWords && aDistinctive.length >= 6 && b.includes(aDistinctive)) return 0.9;
+  if (bHasMultipleWords && bDistinctive.length >= 6 && a.includes(bDistinctive)) return 0.9;
+
+  // Token-set overlap on the DISTINCTIVE tokens only
+  const aTokens = new Set(aDistinctive.split(' ').filter(t => t.length >= 3));
+  const bTokens = new Set(bDistinctive.split(' ').filter(t => t.length >= 3));
+  if (aTokens.size === 0 || bTokens.size === 0) {
+    // Both orgs are entirely generic words — fall back to full-string token comparison
+    const aFullTokens = new Set(a.split(' ').filter(t => t.length >= 3));
+    const bFullTokens = new Set(b.split(' ').filter(t => t.length >= 3));
+    if (aFullTokens.size === 0 || bFullTokens.size === 0) return 0;
+    const fullIntersection = [...aFullTokens].filter(t => bFullTokens.has(t)).length;
+    const fullUnion = new Set([...aFullTokens, ...bFullTokens]).size;
+    return fullIntersection / fullUnion;
+  }
+
+  const intersection = [...aTokens].filter(t => bTokens.has(t)).length;
+  const union = new Set([...aTokens, ...bTokens]).size;
+  const jaccard = intersection / union;
+
+  // If all DISTINCTIVE tokens of the smaller set are present in the larger, boost score —
+  // BUT only when the smaller set has 2+ distinctive tokens. Single-token "matches" are too weak
+  // (e.g., UCF and Orlando Health both have "central" — that doesn't make them the same org).
+  const smaller = aTokens.size <= bTokens.size ? aTokens : bTokens;
+  const larger = aTokens.size <= bTokens.size ? bTokens : aTokens;
+  const allPresent = [...smaller].every(t => larger.has(t));
+  if (allPresent && smaller.size >= 2) return Math.max(jaccard, 0.85);
+
+  return jaccard;
+}
+
+// === ENRICHMENT DETECTION ===
+// Identifies prospects with data quality issues that block cold outreach.
+// Returns { needsEnrichment: bool, reasons: [string] } so the UI can surface what's wrong.
+//
+// Rules (each returns a reason string when triggered):
+// - Missing email entirely
+// - Personal email domain (gmail/yahoo/etc.) when org clearly has a domain
+// - Generic role inbox (registrar@, info@, admin@) when contact is a specific person
+// - Email name doesn't match contact name (different person's email attached to record)
+// - Title indicates non-buyer (student, intern, alumnus, retired)
+const PERSONAL_DOMAINS = /(gmail|yahoo|hotmail|outlook\.com|aol|icloud|live\.com|me\.com|comcast|att\.net|verizon|sbcglobal|earthlink)/i;
+const GENERIC_INBOXES = /^(info|admin|contact|office|registrar|hello|help|support|inquiries|main|reception|frontdesk|hr|noreply)@/i;
+const NON_BUYER_TITLES = /\b(student|intern|alumnus|alumna|retired|former|emeritus|volunteer)\b/i;
+
+export function detectEnrichmentNeeds(prospect) {
+  const reasons = [];
+  if (!prospect) return { needsEnrichment: false, reasons };
+
+  // 1. Missing email
+  if (!prospect.email || !prospect.email.includes('@')) {
+    reasons.push('Missing email');
+  } else {
+    // 2. Personal email when org has a likely domain
+    if (PERSONAL_DOMAINS.test(prospect.email)) {
+      // Only flag if org name suggests they should have a work domain
+      // (cities, schools, colleges, government bodies almost always do)
+      const orgLower = (prospect.company || '').toLowerCase();
+      const orgHasObviousDomain = /\b(city|county|college|university|school|district|government|board|public|department|state|federal|authority|district)\b/.test(orgLower);
+      if (orgHasObviousDomain) {
+        reasons.push('Personal email at org with public domain');
+      }
+    }
+
+    // 3. Generic role inbox attached to a specific person
+    if (GENERIC_INBOXES.test(prospect.email) && prospect.name && prospect.name.split(' ').length >= 2) {
+      reasons.push('Role inbox (not personal mailbox)');
+    }
+
+    // 4. Email name doesn't match contact name
+    // Heuristic: extract the local-part initials and compare to contact's initials
+    const emailLocal = prospect.email.split('@')[0].toLowerCase();
+    const contactName = (prospect.name || '').toLowerCase();
+    if (contactName && emailLocal && !PERSONAL_DOMAINS.test(prospect.email) && !GENERIC_INBOXES.test(prospect.email)) {
+      const contactTokens = contactName.split(/[\s.]+/).filter(t => t.length >= 2);
+      // Check if any contact name token appears in the email local-part
+      const anyTokenInEmail = contactTokens.some(t => emailLocal.includes(t));
+      // Reverse check: if email looks like firstname.lastname or flastname format
+      if (!anyTokenInEmail && contactTokens.length >= 2 && emailLocal.length >= 3) {
+        reasons.push('Email may belong to a different person');
+      }
+    }
+  }
+
+  // 5. Non-buyer title
+  if (prospect.title && NON_BUYER_TITLES.test(prospect.title)) {
+    reasons.push(`Non-buyer title (${prospect.title})`);
+  }
+
+  // 6. Missing name
+  if (!prospect.name || prospect.name.trim().length < 2) {
+    reasons.push('Missing contact name');
+  }
+
+  return {
+    needsEnrichment: reasons.length > 0,
+    reasons,
+  };
+}
+
 // === VOICE EXAMPLES ===
 // Anthony's actual cold email templates. Used as few-shot examples in the prompt
 // so AI drafts match his real voice (humble + "arrow in quiver" + peer tone).

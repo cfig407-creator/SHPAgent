@@ -9,6 +9,7 @@ import {
 import {
   SHP_IDENTITY, DEFAULT_SIGNATURE, TERRITORY, classifyCounty, isInTerritory,
   classifyICP, classifyTitle, PAIN_LIBRARY, RESOURCE_CTAS, CUSTOMERS, pickProofPoints,
+  customerCheck, detectEnrichmentNeeds,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
   buildColdEmailPrompt, buildDealTitle, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
   composeEmail,
@@ -712,23 +713,54 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     showToast('Copied to clipboard');
   };
 
-  // === Layer overrides onto prospects (computed derived list) ===
-  // Each prospect gets an `outreachStatus` and `revisitDate` from overrides if present, else defaults
+  // === Layer overrides + computed flags onto prospects ===
+  // Each prospect gets:
+  // - outreachStatus / revisitDate from overrides
+  // - customerMatch (computed from CUSTOMERS — auto-overrides Active to Customer if matched)
+  // - needsEnrichment + enrichmentReasons (computed from data quality rules)
   const prospectsWithOverrides = useMemo(() => {
     return prospects.map(p => {
       const o = overrides[p.id];
+      const explicitStatus = o?.outreachStatus;
+
+      // Check customer collision (only if user hasn't explicitly set status)
+      let customerMatch = null;
+      let computedStatus = explicitStatus || 'Active';
+      if (!explicitStatus) {
+        const check = customerCheck(p);
+        if (check.result === 'match') {
+          customerMatch = check.matchedCustomer;
+          computedStatus = 'Customer'; // auto-promote
+        }
+      }
+
+      // Detect enrichment needs (always computed — independent of status)
+      const enrichment = detectEnrichmentNeeds(p);
+
       return {
         ...p,
-        outreachStatus: o?.outreachStatus || 'Active',
+        outreachStatus: computedStatus,
         revisitDate: o?.revisitDate || null,
+        customerMatch, // present when org auto-matched a customer
+        needsEnrichment: enrichment.needsEnrichment,
+        enrichmentReasons: enrichment.reasons,
       };
     });
   }, [prospects, overrides]);
 
   // === Filtered prospect list (memoized) ===
+  // Default Active view excludes enrichment-needed prospects (they're broken data, not real prospects yet).
+  // The "Needs Enrichment" filter option surfaces them when you want to work through them.
   const filteredProspects = useMemo(() => {
     return prospectsWithOverrides.filter(p => {
-      if (filterOutreach !== 'all' && p.outreachStatus !== filterOutreach) return false;
+      // Outreach filter — special handling for 'NeedsEnrichment'
+      if (filterOutreach === 'NeedsEnrichment') {
+        if (!p.needsEnrichment) return false;
+      } else if (filterOutreach !== 'all') {
+        if (p.outreachStatus !== filterOutreach) return false;
+        // When viewing Active (default), hide enrichment-needed prospects (they need data work first)
+        if (filterOutreach === 'Active' && p.needsEnrichment) return false;
+      }
       if (filterStatus !== 'all' && p.status !== filterStatus) return false;
       if (filterSegment !== 'all' && p.segment !== filterSegment) return false;
       if (filterCounty !== 'all' && p.county !== filterCounty) return false;
@@ -740,9 +772,11 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     }).sort((a, b) => (b.priority || 0) - (a.priority || 0));
   }, [prospectsWithOverrides, filterOutreach, filterStatus, filterSegment, filterCounty, search]);
 
-  // Clusters: only Ready + Active (no Customers, Dead, or PursueLater in trip planning)
+  // Clusters: only Ready + Active + clean data (no Customers, Dead, PursueLater, or enrichment-needed)
   const clusters = useMemo(() => buildClusters(
-    prospectsWithOverrides.filter(p => p.status === 'Ready' && p.outreachStatus === 'Active')
+    prospectsWithOverrides.filter(p =>
+      p.status === 'Ready' && p.outreachStatus === 'Active' && !p.needsEnrichment
+    )
   ), [prospectsWithOverrides]);
 
   // Pursue Later items whose revisit date has hit (today or earlier)
@@ -756,9 +790,12 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
   // === Stats ===
   const stats = useMemo(() => ({
     total: prospectsWithOverrides.length,
-    ready: prospectsWithOverrides.filter(p => p.status === 'Ready' && p.outreachStatus === 'Active').length,
+    ready: prospectsWithOverrides.filter(p =>
+      p.status === 'Ready' && p.outreachStatus === 'Active' && !p.needsEnrichment
+    ).length,
     customers: prospectsWithOverrides.filter(p => p.outreachStatus === 'Customer').length,
     pursueLater: prospectsWithOverrides.filter(p => p.outreachStatus === 'PursueLater').length,
+    needsEnrichment: prospectsWithOverrides.filter(p => p.needsEnrichment && p.outreachStatus === 'Active').length,
     pushed: Object.values(pdRecords).filter(r => r.leadId || r.dealId).length,
     sent: Object.values(pdRecords).filter(r => r.sentAt).length,
     openDeals: Object.values(stageDeals).reduce((a, arr) => a + arr.length, 0),
@@ -857,10 +894,10 @@ function DashboardView({ styles, stats, pdConnected, pdMeta, setView, clusters, 
       )}
 
       <div style={styles.statsGrid}>
-        <StatCard styles={styles} label="Active Pool" value={stats.ready} sub="In-ICP, ready for outreach" />
-        <StatCard styles={styles} label="Customers" value={stats.customers} sub="Excluded from cold drafts" />
+        <StatCard styles={styles} label="Active Pool" value={stats.ready} sub="Ready, in-ICP, clean data" />
+        <StatCard styles={styles} label="Customers" value={stats.customers} sub="Auto-detected from invoice list" />
+        <StatCard styles={styles} label="Needs Enrichment" value={stats.needsEnrichment} sub={stats.needsEnrichment > 0 ? 'Filter \"Needs Enrichment\" in Find' : 'All clean'} />
         <StatCard styles={styles} label="Leads Pushed" value={stats.pushed} sub={stats.pursueLaterDueCount > 0 ? `${stats.pursueLaterDueCount} pursue-later due` : 'In Pipedrive Lead Inbox'} />
-        <StatCard styles={styles} label="Open Deals" value={stats.openDeals} sub={pdConnected ? `In ${pdMeta.defaultPipelineName}` : 'Not connected'} />
       </div>
 
       {pursueLaterDue.length > 0 && (
@@ -1049,6 +1086,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
                   <option value="Active">Active</option>
                   <option value="Customer">Customers</option>
                   <option value="PursueLater">Pursue Later</option>
+                  <option value="NeedsEnrichment">Needs Enrichment</option>
                   <option value="Dead">Dead</option>
                   <option value="all">All</option>
                 </select>
@@ -1119,6 +1157,8 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
     ? { ...styles.prospectCard, borderColor: 'rgba(34, 197, 94, 0.3)', background: 'rgba(34, 197, 94, 0.03)' }
     : isPursueLater
     ? { ...styles.prospectCard, borderColor: 'rgba(99, 130, 175, 0.3)' }
+    : prospect.needsEnrichment
+    ? { ...styles.prospectCard, borderColor: 'rgba(251, 191, 36, 0.25)', background: 'rgba(251, 191, 36, 0.02)' }
     : styles.prospectCard;
 
   return (
@@ -1128,9 +1168,18 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px', flexWrap: 'wrap' }}>
             <div style={{ fontSize: '14px', fontWeight: 600 }}>{prospect.name || <span style={{ color: '#7a8aa3', fontStyle: 'italic' }}>(no contact name)</span>}</div>
             <span style={styles.badge(segmentBadgeColor(prospect.segment))}>{prospect.segment}</span>
-            {isCustomer && <span style={styles.badge('green')}><CheckCircle2 size={10} /> Customer</span>}
+            {isCustomer && (
+              <span style={styles.badge('green')} title={prospect.customerMatch ? `Auto-matched to existing customer: ${prospect.customerMatch.name}` : 'Manually marked as customer'}>
+                <CheckCircle2 size={10} /> Customer{prospect.customerMatch ? ' (auto)' : ''}
+              </span>
+            )}
             {isDead && <span style={styles.badge('gray')}>Dead</span>}
             {isPursueLater && <span style={styles.badge('navy')}>Pursue {prospect.revisitDate}</span>}
+            {prospect.needsEnrichment && !isDead && (
+              <span style={styles.badge('amber')} title={`Needs enrichment: ${(prospect.enrichmentReasons || []).join('; ')}`}>
+                <AlertCircle size={10} /> Needs enrichment
+              </span>
+            )}
             {research && !isCustomer && !isDead && <span style={styles.badge('green')}><CheckCircle2 size={10} /> Fit {research.fitScore}</span>}
             {rec?.leadId && !rec?.dealId && <span style={styles.badge('navy')}>Lead</span>}
             {rec?.dealId && <span style={styles.badge('navy')}>Deal #{rec.dealId}</span>}
@@ -1144,9 +1193,14 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             {prospect.email && <span><Mail size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {prospect.email}</span>}
             <span style={{ color: '#5a6b85' }}>· source: {prospect.source}</span>
           </div>
+          {prospect.needsEnrichment && (prospect.enrichmentReasons || []).length > 0 && (
+            <div style={{ fontSize: '11px', color: '#fbbf24', marginTop: '6px', fontStyle: 'italic' }}>
+              ⚠ {prospect.enrichmentReasons.join(' · ')}
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', gap: '6px', position: 'relative' }}>
-          {!isDead && !isCustomer && (
+          {!isDead && !isCustomer && !prospect.needsEnrichment && (
             <button style={styles.primaryBtn} onClick={() => researchProspect(prospect)}>
               {research ? 'Open' : 'Research'} <ArrowRight size={14} />
             </button>
