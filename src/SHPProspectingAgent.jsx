@@ -7,7 +7,8 @@ import {
   ChevronRight, ChevronDown, Download, UserPlus, Calendar,
 } from 'lucide-react';
 import {
-  SHP_IDENTITY, DEFAULT_SIGNATURE, TERRITORY, classifyCounty, isInTerritory,
+  SHP_IDENTITY, DEFAULT_SIGNATURE, DEFAULT_SOFT_OPT_OUT, DEFAULT_MAX_TOUCHES,
+  TERRITORY, classifyCounty, isInTerritory,
   classifyICP, classifyTitle, PAIN_LIBRARY, RESOURCE_CTAS, CUSTOMERS, pickProofPoints,
   customerCheck, detectEnrichmentNeeds,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
@@ -102,6 +103,11 @@ export default function SHPProspectingAgent() {
     fromEmail: SHP_IDENTITY.email,
     contactCardUrl: SHP_IDENTITY.contactCardUrl,
     signature: DEFAULT_SIGNATURE,
+    // Stage-1 hygiene: physical address (CAN-SPAM) + soft opt-out (deliverability)
+    // + touch cap (anti-harassment guard).
+    companyAddress: SHP_IDENTITY.companyAddress,
+    softOptOut: DEFAULT_SOFT_OPT_OUT,
+    maxTouches: DEFAULT_MAX_TOUCHES,
     sendMode: 'pipedrive', // 'pipedrive' (direct send via M365) | 'gmail' (legacy fallback)
     followUpHour: 9, // 0-23, local hour of day for the Day-14 activity
   });
@@ -135,7 +141,7 @@ export default function SHPProspectingAgent() {
   // Track recently-used variant IDs so the composer rotates rather than repeats
   const [recentVariants, setRecentVariants] = useState([]);
 
-  // Pipedrive records — pdRecords[prospectId] = {leadId, leadUrl, dealId, dealUrl, personId, orgId, sentAt}
+  // Pipedrive records — pdRecords[prospectId] = {leadId, leadUrl, dealId, dealUrl, personId, orgId, sentAt, sentHistory[], touchCount}
   // leadId is set when we push (default). dealId is set later if/when the lead is converted in Pipedrive.
   const [pdRecords, setPdRecords] = useState({});
   const [stageDeals, setStageDeals] = useState({});
@@ -198,6 +204,13 @@ export default function SHPProspectingAgent() {
       try { setOverrides(JSON.parse(savedOverrides)); }
       catch (e) { console.warn('[shp] failed to parse saved overrides:', e); }
     }
+    // Hydrate Pipedrive records (lead/deal IDs + sent history + touch counts)
+    // so touch caps and "already in PD" badges survive reloads.
+    const savedPdRecords = localStorage.getItem('shp_pd_records_v1');
+    if (savedPdRecords) {
+      try { setPdRecords(JSON.parse(savedPdRecords)); }
+      catch (e) { console.warn('[shp] failed to parse saved pd records:', e); }
+    }
 
     // 2. If a server-side config exists (Vercel KV), let it override the
     //    localStorage copy — the server is the source of truth across devices.
@@ -223,6 +236,13 @@ export default function SHPProspectingAgent() {
       localStorage.setItem('shp_prospect_overrides_v3', JSON.stringify(overrides));
     }
   }, [overrides]);
+
+  // Persist Pipedrive records (touch counts + lead/deal links)
+  useEffect(() => {
+    if (Object.keys(pdRecords).length > 0) {
+      localStorage.setItem('shp_pd_records_v1', JSON.stringify(pdRecords));
+    }
+  }, [pdRecords]);
 
   // Persist Apollo cycle on every update (including auto-rotate at month boundary)
   useEffect(() => { saveApolloCycle(apolloCycle); }, [apolloCycle]);
@@ -693,14 +713,21 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     const research = researchData[selectedProspect.id] || null;
     const proofs = pickProofPoints(selectedProspect, 3);
 
+    // Build the signature-with-address that goes into BOTH paths (AI + fallback).
+    // The user's signature already starts with their personal block; we ensure the
+    // physical postal address line is appended at the end if it isn't already
+    // there (CAN-SPAM compliance — the address must be in every commercial email).
+    const sigWithAddress = ensureAddressInSignature(config.signature, config.companyAddress);
+
     // Helper: deterministic fallback (the previous behavior — kept as a safety net
     // so the user always gets *something* reviewable even when Claude is down).
     const fallbackCompose = (reason) => {
       const result = composeEmail({
         prospect: selectedProspect,
-        signature: config.signature,
+        signature: sigWithAddress,
         proofPoints: proofs,
         avoid: recentVariants,
+        softOptOut: config.softOptOut,
       });
       setDraftEmail({ subject: result.subject, body: result.body });
       setDraftDiagnostic({ ...result.diagnostic, fallback: true, fallbackReason: reason });
@@ -716,7 +743,8 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         selectedProspect,
         research,
         selectedProspect.segment,
-        config.signature,
+        sigWithAddress,
+        config.softOptOut,
       );
 
       const data = await postJson('/api/anthropic', {
@@ -1156,11 +1184,34 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
   // === Open Outlook web compose with email pre-filled ===
   // Anthony is on M365 with two-way Pipedrive sync, so Outlook-sent emails auto-log to deals.
   // No Smart BCC needed (sync handles it). One click: pre-fill → review → click Send in Outlook.
+  // Now also tracks touch count per prospect — guards against accidentally
+  // emailing the same person past the maxTouches cap (default 3) which damages
+  // domain reputation via spam complaints.
   const sendViaOutlook = () => {
     if (!selectedProspect?.email) {
       showToast('No email address — add one first', 'error');
       return;
     }
+
+    // Pre-flight: warn if we're at or beyond the touch cap.
+    const prevRec = pdRecords[selectedProspect.id] || {};
+    const prevHistory = Array.isArray(prevRec.sentHistory) ? prevRec.sentHistory : (prevRec.sentAt ? [prevRec.sentAt] : []);
+    const currentCount = prevHistory.length;
+    const cap = Number.isFinite(config.maxTouches) ? config.maxTouches : DEFAULT_MAX_TOUCHES;
+    if (currentCount >= cap) {
+      const ok = window.confirm(
+        `This prospect has already received ${currentCount} email${currentCount === 1 ? '' : 's'} from you ` +
+        `(your cap is ${cap}).\n\n` +
+        `Continuing risks domain-reputation damage from spam complaints. ` +
+        `Consider marking them "Pursue Later" or "Dead" instead.\n\n` +
+        `Send anyway?`
+      );
+      if (!ok) {
+        showToast(`Held back — ${currentCount} prior touch${currentCount === 1 ? '' : 'es'} already`, 'info');
+        return;
+      }
+    }
+
     // IMPORTANT: build the URL manually with encodeURIComponent so spaces become %20.
     // URLSearchParams encodes spaces as '+', which the Outlook deeplink does NOT decode back to spaces
     // (it displays them literally as '+' signs in the email body and subject).
@@ -1173,11 +1224,19 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     if (config.smartBcc) parts.push(`bcc=${enc(config.smartBcc)}`);
     const url = `https://outlook.office.com/mail/deeplink/compose?${parts.join('&')}`;
     window.open(url, '_blank', 'noopener,noreferrer');
+
+    const now = new Date().toISOString();
+    const nextHistory = [...prevHistory, now];
     setPdRecords(prev => ({
       ...prev,
-      [selectedProspect.id]: { ...prev[selectedProspect.id], sentAt: new Date().toISOString() },
+      [selectedProspect.id]: {
+        ...prev[selectedProspect.id],
+        sentAt: now,                  // kept for backward compatibility
+        sentHistory: nextHistory,     // full timeline of touches
+        touchCount: nextHistory.length,
+      },
     }));
-    showToast('Opened in Outlook — review and click Send');
+    showToast(`Opened in Outlook · touch #${nextHistory.length} of ${cap}`);
   };
 
   // === Open the lead/deal in Pipedrive's web UI to compose there ===
@@ -1834,7 +1893,16 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             {research && !isCustomer && !isDead && <span style={styles.badge('green')}><CheckCircle2 size={10} /> Fit {research.fitScore}</span>}
             {rec?.leadId && !rec?.dealId && <span style={styles.badge('navy')}>Lead</span>}
             {rec?.dealId && <span style={styles.badge('navy')}>Deal #{rec.dealId}</span>}
-            {rec?.sentAt && <span style={styles.badge('amber')}><Send size={10} /> Sent</span>}
+            {rec?.sentAt && (() => {
+              // touchCount falls back to history length, then to a single-touch
+              // (legacy records that pre-date sentHistory[]).
+              const tc = rec.touchCount ?? (Array.isArray(rec.sentHistory) ? rec.sentHistory.length : 1);
+              return (
+                <span style={styles.badge('amber')} title={`Last sent ${new Date(rec.sentAt).toLocaleDateString()}`}>
+                  <Send size={10} /> {tc === 1 ? 'Sent' : `Sent ×${tc}`}
+                </span>
+              );
+            })()}
             {prospect.parentProspectId && <span style={styles.badge('navy')} title={`Multi-thread peer · added from ${prospect.source || 'a parent prospect'}`}><UserPlus size={10} /> peer</span>}
           </div>
           <div style={{ fontSize: '12px', color: 'var(--text-2)', marginBottom: '4px' }}>
@@ -2573,6 +2641,56 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
       </div>
 
       <div style={styles.card}>
+        <div style={styles.sectionTitle}><AlertCircle size={14} /> Email Hygiene</div>
+        <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-2)', marginBottom: 'var(--space-4)', lineHeight: 1.6 }}>
+          Three guards that protect your domain reputation and keep cold outreach legal under CAN-SPAM. All three apply to every email the agent drafts.
+        </div>
+
+        <div style={{ marginBottom: 'var(--space-4)' }}>
+          <label style={styles.label}>Company physical address (CAN-SPAM)</label>
+          <input
+            style={styles.input}
+            value={config.companyAddress || ''}
+            onChange={e => setConfig({ ...config, companyAddress: e.target.value })}
+            placeholder="Superior Hardware Products · 123 Main St, Longwood, FL 32750"
+          />
+          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginTop: '6px' }}>
+            Required by US 15 USC §7704: every commercial email must include a valid physical postal address. Auto-appended to your signature if it isn't already there.
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 'var(--space-4)' }}>
+          <label style={styles.label}>Soft opt-out line (deliverability)</label>
+          <textarea
+            style={{ ...styles.input, minHeight: '60px', fontFamily: 'inherit', lineHeight: '1.5', resize: 'vertical' }}
+            value={config.softOptOut || ''}
+            onChange={e => setConfig({ ...config, softOptOut: e.target.value })}
+          />
+          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginTop: '6px' }}>
+            Always included in every cold draft (AI and fallback composer). Gives recipients a friction-free way to decline so they don't mark you as spam.
+          </div>
+        </div>
+
+        <div>
+          <label style={styles.label}>Touch cap before warning</label>
+          <select
+            style={{ ...styles.input, maxWidth: '160px' }}
+            value={config.maxTouches ?? DEFAULT_MAX_TOUCHES}
+            onChange={e => setConfig({ ...config, maxTouches: parseInt(e.target.value, 10) })}
+          >
+            {[2, 3, 4, 5].map(n => <option key={n} value={n}>{n} emails</option>)}
+          </select>
+          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginTop: '6px' }}>
+            After this many sends without a reply, the agent warns before letting you send again. Protects against spam complaints from over-emailing the same prospect.
+          </div>
+        </div>
+
+        <button style={{ ...styles.primaryBtn, marginTop: 'var(--space-4)' }} onClick={saveConfig}>
+          <CheckCircle2 size={14} /> Save Hygiene Settings
+        </button>
+      </div>
+
+      <div style={styles.card}>
         <div style={styles.sectionTitle}><Send size={14} /> Send Configuration</div>
         <div style={{ padding: '14px', background: 'var(--ok-soft)', border: '1px solid rgba(34, 197, 94, 0.15)', borderRadius: '10px', fontSize: '13px', marginBottom: '16px', color: 'var(--text-2)', lineHeight: '1.6' }}>
           <div style={{ display: 'flex', gap: '8px', marginBottom: '6px', color: 'var(--ok)', fontWeight: 600 }}>
@@ -3100,6 +3218,20 @@ function GlobalStyles() {
 // =================================================================
 // === HELPERS ===
 // =================================================================
+// Guarantee the user's physical postal address appears in the signature
+// (CAN-SPAM compliance). If the signature already mentions the address text
+// somewhere, returns it untouched. Otherwise appends it on its own line.
+function ensureAddressInSignature(signature, address) {
+  const sig = (signature || '').trim();
+  const addr = (address || '').trim();
+  if (!addr) return sig;
+  // Loose check: if any meaningful chunk of the address is already present,
+  // assume the user has manually placed it and don't duplicate.
+  const probe = addr.split(/[·,|]/)[0].trim().toLowerCase();
+  if (probe && sig.toLowerCase().includes(probe)) return sig;
+  return sig + (sig.endsWith('\n') ? '' : '\n\n') + addr;
+}
+
 function normalizeSeed(seed) {
   return seed.map(s => ({
     ...s,

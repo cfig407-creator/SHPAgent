@@ -11,6 +11,11 @@ export const SHP_IDENTITY = {
   contactCardUrl: 'https://dot.cards/anthonyshp',
   founded: 1986,
   hq: 'Longwood, FL',
+  // Default physical address used in CAN-SPAM-compliant signatures.
+  // User can override via Settings → companyAddress.
+  // CAN-SPAM (15 U.S.C. 7704) requires a valid physical postal address
+  // in every commercial email. Update this to the actual SHP street address.
+  companyAddress: 'Superior Hardware Products · Longwood, FL',
   pillars: [
     'One Source for Door Openings',
     'Built for High-Traffic Environments',
@@ -26,7 +31,9 @@ export const SHP_IDENTITY = {
   ],
 };
 
-// Default email signature — multi-line, used in every cold email
+// Default email signature — multi-line, used in every cold email.
+// Includes the physical address per CAN-SPAM Act (US 15 USC §7704). Anyone
+// editing this MUST keep a physical postal address in the signature.
 export const DEFAULT_SIGNATURE = `Anthony Koscielecki
 Regional Sales Consultant
 
@@ -34,7 +41,20 @@ Direct: 407-725-8744
 Office: 407-339-6800
 Email: anthony@superiorhardwareproducts.com
 
-Save my contact card: https://dot.cards/anthonyshp`;
+Save my contact card: https://dot.cards/anthonyshp
+
+Superior Hardware Products · Longwood, FL`;
+
+// Default soft opt-out line — Anthony's voice, not corporate-CYA. Always
+// included in cold emails so recipients have a frictionless way to say "no thanks"
+// instead of marking the email as spam (which damages domain reputation).
+export const DEFAULT_SOFT_OPT_OUT =
+  `If door & hardware isn't on your radar, just let me know and I'll close the loop on my end.`;
+
+// Touch-cap defaults — guards against "harassment" complaints from
+// over-emailing the same prospect. After this many sends with no reply,
+// the agent surfaces a warning and asks the user to pause.
+export const DEFAULT_MAX_TOUCHES = 3;
 
 // === CUSTOMER PROOF POINTS ===
 // Curated from 2025 invoice data. named=true means OK to drop the name in cold email body.
@@ -484,7 +504,7 @@ export const SUBJECT_BANK = [
 //
 // Tracks recently-picked variants in a session-level memory to avoid repeating
 // (the composer takes an `avoid` array of variant IDs).
-export function composeEmail({ prospect, signature, proofPoints = [], avoid = [] }) {
+export function composeEmail({ prospect, signature, proofPoints = [], avoid = [], softOptOut = DEFAULT_SOFT_OPT_OUT }) {
   // === CONTEXT FLAGS ===
   // What's true about this prospect that affects variant selection?
   const ctx = {
@@ -531,13 +551,16 @@ export function composeEmail({ prospect, signature, proofPoints = [], avoid = []
   const ctaText = fillTemplate(cta.text, fillVars);
 
   // === ASSEMBLE ===
+  // Soft opt-out always appears as its own paragraph between the CTA and the
+  // sign-off so recipients can decline without filing a spam complaint.
+  const optOutLine = softOptOut ? `\n\n${softOptOut}` : '';
   const fullBody = `Hi ${greetingName},
 
 ${openerText}
 
 ${bodyText}
 
-${ctaText}
+${ctaText}${optOutLine}
 
 Best Regards,
 
@@ -1094,7 +1117,9 @@ export const REVERSING_RESPONSES = {
 
 // === COLD EMAIL TEMPLATE (Anthony's voice + proof points + resource framing) ===
 // This is the prompt the agent uses to draft cold emails.
-export function buildColdEmailPrompt(prospect, research, segment, signature) {
+// `softOptOut` defaults to DEFAULT_SOFT_OPT_OUT but accepts a user-override
+// via Settings — kept as a parameter so it stays cleanly testable.
+export function buildColdEmailPrompt(prospect, research, segment, signature, softOptOut = DEFAULT_SOFT_OPT_OUT) {
   const seg = segment || 'default';
   const cta = RESOURCE_CTAS[
     seg === 'K-12 Education' ? 'K12' :
@@ -1161,7 +1186,10 @@ ${voiceExamples}
 4. Optional proof drop — if a proof point fits naturally (1-2 names max).
 5. Soft CTA — borrow from: ${cta}
 6. Optional in-person offer — "I'm often in the area with a few customers" — only if prospect is in CFL North.
-7. Sign-off and signature.
+7. Soft opt-out — REQUIRED. Include this exact line (or a very close paraphrase that keeps the same meaning) on its own paragraph BEFORE the sign-off:
+   "${softOptOut}"
+   This protects domain reputation by giving recipients a friction-free way to decline instead of marking us as spam. Don't soften it past recognizability.
+8. Sign-off and signature.
 
 ═════ HARD RULES ═════
 - 110-160 words in the body (Anthony's real emails run longer than the previous tight 80-110)
@@ -1169,6 +1197,7 @@ ${voiceExamples}
 - NO corporate filler ("hope this finds you well", "wanted to reach out", "circle back", "leverage", "synergy")
 - Use sentence case in subject line
 - Subject line should sound human, not marketing-y. Examples that work: "quick intro from SHP", "hardware partner for [their company]", "a name to know for door work"
+- The signature MUST appear verbatim with the physical postal address — required by US CAN-SPAM Act.
 
 ═════ SIGNATURE ═════
 End the body with this exact signature block:
