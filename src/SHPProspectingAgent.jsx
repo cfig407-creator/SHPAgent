@@ -88,6 +88,15 @@ export default function SHPProspectingAgent() {
   const [findPeersResults, setFindPeersResults] = useState(null); // candidates returned by Apollo
   const [isFindingPeers, setIsFindingPeers] = useState(false);
 
+  // Bulk cross-thread (run free Apollo people-searches against every existing
+  // org in the pool to discover peers at scale). State shape:
+  //   bulkCrossThreadResults = [{ org, segment, county, parents:[Prospect], candidates:[Candidate], error? }]
+  const [bulkCrossThreadOpen, setBulkCrossThreadOpen] = useState(false);
+  const [bulkCrossThreadRunning, setBulkCrossThreadRunning] = useState(false);
+  const [bulkCrossThreadProgress, setBulkCrossThreadProgress] = useState({ done: 0, total: 0, currentOrg: '' });
+  const [bulkCrossThreadResults, setBulkCrossThreadResults] = useState([]);
+  const [bulkCrossThreadCancel, setBulkCrossThreadCancel] = useState(false);
+
   // Batch-enrich wizard state — "Spend remaining credits" end-of-month workflow
   const [batchEnrichOpen, setBatchEnrichOpen] = useState(false);
   const [batchEnrichRunning, setBatchEnrichRunning] = useState(false);
@@ -1078,6 +1087,182 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     setFindPeersResults(null);
   };
 
+  // === Bulk cross-thread the entire pool ===
+  // Iterates the unique orgs in your prospect pool, runs a free Apollo
+  // people-search on each, and aggregates the results. Apollo people-search
+  // costs zero credits — only enrichment (verified email) costs 1 credit each.
+  // Strategy:
+  //   - Score every unique org by cross-thread opportunity:
+  //       +5  has only 1 contact (highest leverage — net-new ladder coverage)
+  //       +3  has no Tier 4 (decision-maker) contact yet
+  //       +2  is in a high-trip-score county
+  //       +1  has been pushed to Pipedrive (active deal)
+  //   - Process the top N orgs (default 60) with a 220ms throttle so we
+  //     stay polite to Apollo's rate limits.
+  //   - Open a modal that streams progress and lets the user cancel.
+  //   - On completion, the modal pivots to a review screen with all candidates
+  //     across all orgs — bulk-select + bulk-add.
+  const crossThreadPool = async ({ maxOrgs = 60 } = {}) => {
+    if (bulkCrossThreadRunning) return;
+
+    // Group existing pool by normalized company name so we run one search per org.
+    const normalizeOrg = (s) => (s || '').toLowerCase().replace(/\b(inc|llc|corp|company|co|ltd|the)\b/g, '').replace(/[^a-z0-9]/g, '').trim();
+    const orgs = new Map(); // normalizedKey → { displayName, parents: [Prospect] }
+    for (const p of prospectsWithOverrides) {
+      if (!p.company) continue;
+      if (p.outreachStatus === 'Dead' || p.outreachStatus === 'Customer') continue; // don't waste searches
+      const key = normalizeOrg(p.company);
+      if (!key) continue;
+      if (!orgs.has(key)) orgs.set(key, { displayName: p.company, parents: [] });
+      orgs.get(key).parents.push(p);
+    }
+
+    if (orgs.size === 0) {
+      showToast('No orgs to cross-thread', 'info');
+      return;
+    }
+
+    // Compute trip-score-weighted county set for scoring.
+    const highTripCounties = new Set(clusters.slice(0, 5).map(c => c.county));
+
+    // Score and rank each org.
+    const scored = Array.from(orgs.entries()).map(([key, group]) => {
+      const parents = group.parents;
+      const tiers = new Set(parents.map(p => classifyTier(p.title)));
+      let score = 0;
+      if (parents.length === 1) score += 5;
+      if (!tiers.has(4)) score += 3;
+      if (parents.some(p => p.county && highTripCounties.has(p.county))) score += 2;
+      if (parents.some(p => pdRecords[p.id]?.leadId || pdRecords[p.id]?.dealId)) score += 1;
+      return { key, displayName: group.displayName, parents, score };
+    }).sort((a, b) => b.score - a.score).slice(0, maxOrgs);
+
+    // Reset state, open modal, kick off the run.
+    setBulkCrossThreadOpen(true);
+    setBulkCrossThreadRunning(true);
+    setBulkCrossThreadCancel(false);
+    setBulkCrossThreadProgress({ done: 0, total: scored.length, currentOrg: '' });
+    setBulkCrossThreadResults([]);
+
+    const results = [];
+    for (let i = 0; i < scored.length; i++) {
+      // Read latest cancel flag via a state-bypass closure trick — we can't
+      // read state directly in a loop, so use a local mutable ref via the setter.
+      // Cleanest: bail if the user closed the modal mid-run.
+      let cancelled = false;
+      setBulkCrossThreadCancel(c => { cancelled = c; return c; });
+      if (cancelled) break;
+
+      const item = scored[i];
+      setBulkCrossThreadProgress({ done: i, total: scored.length, currentOrg: item.displayName });
+
+      // Pick a representative parent (highest-tier existing contact) so the
+      // title-ladder logic biases toward the OTHER tiers we don't yet cover.
+      const representative = item.parents.slice().sort((a, b) =>
+        classifyTier(b.title) - classifyTier(a.title)
+      )[0];
+      const titles = getMultiThreadTitles(representative.title, representative.segment);
+
+      try {
+        const data = await postJson('/api/apollo-people-search', {
+          organizationName: item.displayName,
+          titles,
+          limit: 10,
+        }, { retries: 1, timeoutMs: 20_000 });
+
+        const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+
+        // Annotate with already-in-pool flag and a per-candidate priority score.
+        const normName = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const existingNames = new Set(prospects.map(p => normName(p.name)).filter(Boolean));
+
+        const annotated = candidates
+          .filter(c => c.name) // drop anything Apollo couldn't name
+          .map(c => {
+            const tier = classifyTier(c.title);
+            return {
+              ...c,
+              tier,
+              alreadyInPool: existingNames.has(normName(c.name)),
+              // Per-candidate score: tier-3/4 > others; bonus if org is small.
+              candScore: tier * 2 + (item.parents.length === 1 ? 2 : 0),
+            };
+          });
+
+        results.push({
+          orgKey: item.key,
+          orgName: item.displayName,
+          parents: item.parents,
+          county: representative.county,
+          segment: representative.segment,
+          candidates: annotated,
+        });
+      } catch (err) {
+        results.push({
+          orgKey: item.key,
+          orgName: item.displayName,
+          parents: item.parents,
+          candidates: [],
+          error: err.message || String(err),
+        });
+      }
+
+      // Throttle: 220ms between requests. Apollo's free-tier rate limit is
+      // permissive but it's polite to pace ourselves.
+      if (i < scored.length - 1) await new Promise(r => setTimeout(r, 220));
+    }
+
+    setBulkCrossThreadResults(results);
+    setBulkCrossThreadProgress({ done: scored.length, total: scored.length, currentOrg: '' });
+    setBulkCrossThreadRunning(false);
+
+    const totalCandidates = results.reduce((sum, r) => sum + (r.candidates?.length || 0), 0);
+    const errored = results.filter(r => r.error).length;
+    showToast(
+      `Searched ${results.length} orgs · found ${totalCandidates} candidates${errored > 0 ? ` · ${errored} errored` : ''}`,
+    );
+  };
+
+  // Bulk-add picked candidates from a cross-thread run. `picks` is an array of
+  // { result, candidate } pairs so we can attach each new prospect to its
+  // correct parent org.
+  const addCrossThreadPicks = (picks) => {
+    if (!picks || picks.length === 0) return;
+    const now = Date.now();
+    const newProspects = picks.map(({ result, candidate }, i) => {
+      // Use the first parent as the geographic anchor; the org is the same.
+      const parent = result.parents[0];
+      const icp = classifyICP(result.orgName, candidate.title);
+      const titleClass = classifyTitle(candidate.title);
+      return {
+        id: `peer_${now}_${i}`,
+        name: candidate.name,
+        title: candidate.title || '',
+        company: result.orgName,
+        email: '',
+        phone: '',
+        city: parent?.city || candidate.city || '',
+        county: parent?.county || result.county || '',
+        state: parent?.state || candidate.state || 'FL',
+        zip: '',
+        segment: parent?.segment || result.segment || icp.segment,
+        icpStatus: icp.status,
+        titleAltitude: titleClass.altitude,
+        status: 'Ready',
+        source: `Apollo (cross-thread of ${result.orgName})`,
+        priority: 85,
+        parentProspectId: parent?.id || null,
+        apolloId: candidate.apolloId,
+        linkedinUrl: candidate.linkedinUrl,
+        photoUrl: candidate.photoUrl,
+      };
+    });
+    setProspects(prev => [...newProspects, ...prev]);
+    showToast(`Added ${newProspects.length} cross-thread peer${newProspects.length === 1 ? '' : 's'} — enrich them with leftover credits`);
+    setBulkCrossThreadOpen(false);
+    setBulkCrossThreadResults([]);
+  };
+
   // === Batch enrich (end-of-month "Spend remaining credits" wizard) ===
   // Runs sequential Apollo enrichments on the user's chosen candidates with a
   // small delay between calls (rate-limit etiquette). Updates progress live.
@@ -1381,7 +1566,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         userName={pdMeta.userName}
       />
       <div className="shp-main" style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={apolloQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={apolloQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={apolloQuota} multiThreadAccount={multiThreadAccount} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
@@ -1415,6 +1600,21 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           progress={batchEnrichProgress}
           onConfirm={runBatchEnrich}
           onCancel={() => setBatchEnrichOpen(false)}
+        />
+      )}
+      {bulkCrossThreadOpen && (
+        <BulkCrossThreadModal
+          styles={styles}
+          isRunning={bulkCrossThreadRunning}
+          progress={bulkCrossThreadProgress}
+          results={bulkCrossThreadResults}
+          onAdd={addCrossThreadPicks}
+          onCancel={() => {
+            // If still running, the run loop will see cancel and exit cleanly.
+            setBulkCrossThreadCancel(true);
+            setBulkCrossThreadOpen(false);
+          }}
+          onCancelRun={() => setBulkCrossThreadCancel(true)}
         />
       )}
       {/* Mobile bottom tab bar — only visible on small screens (CSS-gated). */}
@@ -1590,7 +1790,7 @@ function MoreSheet({ styles, view, setView, onClose }) {
 // =================================================================
 // === DASHBOARD ===
 // =================================================================
-function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
+function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, crossThreadPool, bulkCrossThreadRunning, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
   const topClusters = clusters.slice(0, 5);
   const firstName = (fromName || 'Anthony').split(' ')[0];
 
@@ -1695,9 +1895,42 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Sparkles size={14} /> Quick Actions</div>
         <div className="shp-grid3" style={styles.grid3}>
-          <ActionTile styles={styles} icon={Target} color="#ff6b85" title="Find Prospects" sub="Apollo search · Manual add · Filter pool" onClick={() => setView('find')} />
-          <ActionTile styles={styles} icon={Compass} color="#fbbf24" title="View Clusters" sub={`${clusters.length} trip-worthy clusters`} onClick={() => setView('clusters')} />
-          <ActionTile styles={styles} icon={BookOpen} color="#93b0d6" title="Sandler Coach" sub="Pain Funnel · UFC · Reversing" onClick={() => setView('coach')} />
+          <ActionTile styles={styles} icon={Target} color="var(--shp-red)" title="Find Prospects" sub="Apollo search · Manual add · Filter pool" onClick={() => setView('find')} />
+          <ActionTile styles={styles} icon={Compass} color="var(--warn)" title="View Clusters" sub={`${clusters.length} trip-worthy clusters`} onClick={() => setView('clusters')} />
+          <ActionTile styles={styles} icon={BookOpen} color="var(--info)" title="Sandler Coach" sub="Pain Funnel · UFC · Reversing" onClick={() => setView('coach')} />
+        </div>
+      </div>
+
+      {/* Pool Expansion — bulk multi-thread the existing pool to discover
+          peers at every account, then enrich the best ones with leftover
+          Apollo credits. Free Apollo people-search runs first; enrichment
+          (1 credit/match) happens later via the Batch Enrich wizard. */}
+      <div style={{ ...styles.card, borderColor: 'color-mix(in oklch, var(--shp-red) 25%, transparent)' }}>
+        <div style={styles.sectionTitle}><UserPlus size={14} /> Pool Expansion</div>
+        <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-2)', marginBottom: 'var(--space-4)', lineHeight: 1.6 }}>
+          Cross-thread every org you already have a contact at — Apollo searches across the title ladder to find their managers, directors, and decision-makers.
+          Searches are <strong>free</strong>. Enrich the best matches afterward with the Batch Enrich wizard.
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-3)', alignItems: 'center' }}>
+          <button
+            style={{ ...styles.primaryBtn, fontSize: 'var(--fs-14)' }}
+            onClick={() => crossThreadPool({ maxOrgs: 60 })}
+            disabled={bulkCrossThreadRunning}
+          >
+            {bulkCrossThreadRunning ? <Loader2 size={14} className="spin" /> : <UserPlus size={14} />}
+            {bulkCrossThreadRunning ? 'Running…' : 'Cross-thread my top 60 orgs'}
+          </button>
+          <button
+            style={styles.secondaryBtn}
+            onClick={openBatchEnrich}
+          >
+            <Sparkles size={13} /> Then spend remaining credits
+          </button>
+          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginLeft: 'auto' }}>
+            {apolloQuota?.remaining != null
+              ? `${apolloQuota.remaining} credits left this cycle`
+              : 'Apollo quota loading…'}
+          </span>
         </div>
       </div>
 
@@ -3008,6 +3241,241 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// === BULK CROSS-THREAD MODAL ===
+// =================================================================
+// Two-state modal:
+//   1. Running: progress bar showing "Searching X of Y orgs · {currentOrg}"
+//      with a Cancel button.
+//   2. Complete: aggregated review screen with all candidates from all orgs.
+//      User filters / multi-selects / bulk-adds. Apollo searches were free —
+//      only enrichment costs credits, which happens later via Batch Enrich.
+function BulkCrossThreadModal({ styles, isRunning, progress, results, onAdd, onCancel, onCancelRun }) {
+  const [picks, setPicks] = useState(new Set()); // Set of "orgKey::name" identifiers
+  const [tierFilter, setTierFilter] = useState('all'); // 'all' | '34' (decision-makers) | '23' (managers)
+  const [hideAlreadyInPool, setHideAlreadyInPool] = useState(true);
+
+  // Flatten all candidates with their parent context so the review list is one
+  // sortable/selectable surface.
+  const allRows = useMemo(() => {
+    const rows = [];
+    for (const r of results) {
+      if (!r.candidates) continue;
+      for (const c of r.candidates) {
+        rows.push({ result: r, candidate: c, key: `${r.orgKey}::${(c.name || '').toLowerCase()}` });
+      }
+    }
+    // Sort: in-pool LAST, then by candidate score desc, then by tier desc.
+    rows.sort((a, b) => {
+      if (a.candidate.alreadyInPool !== b.candidate.alreadyInPool) {
+        return a.candidate.alreadyInPool ? 1 : -1;
+      }
+      const sa = a.candidate.candScore ?? 0;
+      const sb = b.candidate.candScore ?? 0;
+      if (sa !== sb) return sb - sa;
+      return (b.candidate.tier ?? 0) - (a.candidate.tier ?? 0);
+    });
+    return rows;
+  }, [results]);
+
+  const filteredRows = useMemo(() => {
+    return allRows.filter(row => {
+      if (hideAlreadyInPool && row.candidate.alreadyInPool) return false;
+      if (tierFilter === '34' && (row.candidate.tier ?? 0) < 3) return false;
+      if (tierFilter === '23' && ((row.candidate.tier ?? 0) < 2 || (row.candidate.tier ?? 0) > 3)) return false;
+      return true;
+    });
+  }, [allRows, tierFilter, hideAlreadyInPool]);
+
+  const togglePick = (key) => {
+    setPicks(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+  const selectAllVisible = () => {
+    setPicks(prev => {
+      const next = new Set(prev);
+      filteredRows.forEach(row => { if (!row.candidate.alreadyInPool) next.add(row.key); });
+      return next;
+    });
+  };
+  const clearSelection = () => setPicks(new Set());
+  const selectedCount = picks.size;
+
+  const orgsWithCandidates = results.filter(r => (r.candidates?.length || 0) > 0).length;
+  const orgsErrored = results.filter(r => r.error).length;
+
+  const onConfirmAdd = () => {
+    const pickedRows = allRows.filter(row => picks.has(row.key));
+    const payload = pickedRows.map(({ result, candidate }) => ({ result, candidate }));
+    onAdd(payload);
+  };
+
+  return (
+    <div className="shp-modal-overlay" style={styles.modalOverlay} onClick={isRunning ? undefined : onCancel}>
+      <div
+        className="shp-modal-card"
+        style={{ ...styles.modalCard, maxWidth: '900px', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div style={{ marginBottom: 'var(--space-4)' }}>
+          <div style={{ fontSize: 'var(--fs-22)', fontWeight: 700, marginBottom: '4px' }}>
+            Cross-thread your pool
+          </div>
+          <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-3)' }}>
+            {isRunning
+              ? 'Running free Apollo people-searches — no credits spent yet.'
+              : `${orgsWithCandidates} of ${results.length} orgs returned candidates${orgsErrored ? ` · ${orgsErrored} errors` : ''}`}
+          </div>
+        </div>
+
+        {/* Running state: progress bar + cancel */}
+        {isRunning && (
+          <div style={{ padding: 'var(--space-5)', background: 'var(--bg-sunk)', borderRadius: 'var(--r-md)', marginBottom: 'var(--space-4)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
+              <span style={{ fontSize: 'var(--fs-14)', fontWeight: 600 }}>
+                Searching {progress.done} of {progress.total} orgs…
+              </span>
+              <button style={{ ...styles.secondaryBtn, padding: '6px 14px', fontSize: 'var(--fs-12)' }} onClick={onCancelRun}>
+                Cancel
+              </button>
+            </div>
+            <div style={{ height: 6, background: 'var(--border)', borderRadius: 'var(--r-pill)', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                width: `${(progress.done / Math.max(progress.total, 1)) * 100}%`,
+                background: 'var(--shp-red)',
+                transition: 'width 0.2s var(--ease)',
+              }} />
+            </div>
+            {progress.currentOrg && (
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginTop: 'var(--space-2)', fontFamily: 'var(--font-mono)' }}>
+                {progress.currentOrg}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Complete state: filters + results list */}
+        {!isRunning && results.length > 0 && (
+          <>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-3)', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
+              <select
+                style={{ ...styles.input, width: 'auto', minWidth: 160 }}
+                value={tierFilter}
+                onChange={e => setTierFilter(e.target.value)}
+              >
+                <option value="all">All tiers</option>
+                <option value="34">Decision-makers (Tier 3-4)</option>
+                <option value="23">Mid-level (Tier 2-3)</option>
+              </select>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: 'var(--fs-13)', color: 'var(--text-2)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={hideAlreadyInPool} onChange={e => setHideAlreadyInPool(e.target.checked)} />
+                Hide already in pool
+              </label>
+              <span style={{ fontSize: 'var(--fs-13)', color: 'var(--text-3)', marginLeft: 'auto' }}>
+                {filteredRows.length} candidates · {selectedCount} selected
+              </span>
+              <button style={{ ...styles.secondaryBtn, fontSize: 'var(--fs-12)' }} onClick={selectAllVisible}>
+                Select all visible
+              </button>
+              {selectedCount > 0 && (
+                <button style={{ ...styles.secondaryBtn, fontSize: 'var(--fs-12)' }} onClick={clearSelection}>
+                  Clear
+                </button>
+              )}
+            </div>
+
+            <div style={{ overflowY: 'auto', flex: 1, border: '1px solid var(--border)', borderRadius: 'var(--r-md)' }}>
+              {filteredRows.length === 0 ? (
+                <div style={{ padding: 'var(--space-6)', textAlign: 'center', color: 'var(--text-3)' }}>
+                  No candidates match this filter.
+                </div>
+              ) : (
+                filteredRows.map(row => {
+                  const c = row.candidate;
+                  const checked = picks.has(row.key);
+                  const tierLabel = c.tier === 4 ? 'Strategic' : c.tier === 3 ? 'Manager' : c.tier === 2 ? 'Tactical' : c.tier === 1 ? 'Frontline' : '—';
+                  return (
+                    <label
+                      key={row.key}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '24px 1fr auto',
+                        alignItems: 'center',
+                        gap: 'var(--space-3)',
+                        padding: 'var(--space-3)',
+                        borderBottom: '1px solid var(--border-subtle)',
+                        cursor: c.alreadyInPool ? 'not-allowed' : 'pointer',
+                        opacity: c.alreadyInPool ? 0.5 : 1,
+                        background: checked ? 'var(--shp-red-soft)' : 'transparent',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={c.alreadyInPool}
+                        onChange={() => togglePick(row.key)}
+                      />
+                      <div>
+                        <div style={{ fontSize: 'var(--fs-14)', fontWeight: 600 }}>
+                          {c.name}
+                          {c.alreadyInPool && <span style={{ marginLeft: 'var(--space-2)', fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontWeight: 400 }}>(already in pool)</span>}
+                        </div>
+                        <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-2)' }}>
+                          {c.title || '(no title)'} · {row.result.orgName}
+                        </div>
+                      </div>
+                      <span style={styles.badge(
+                        c.tier === 4 ? 'red' :
+                        c.tier === 3 ? 'amber' :
+                        c.tier === 2 ? 'navy' :
+                        'gray'
+                      )}>
+                        {tierLabel}
+                      </span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 'var(--space-4)', gap: 'var(--space-3)' }}>
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
+                Adding {selectedCount} costs <strong>0 credits</strong> — they enter the pool flagged "Needs Enrichment".
+                Enrich them later via the Batch Enrich wizard to spend remaining credits.
+              </div>
+              <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                <button style={styles.secondaryBtn} onClick={onCancel}>Close</button>
+                <button
+                  style={{ ...styles.primaryBtn, opacity: selectedCount === 0 ? 0.5 : 1 }}
+                  disabled={selectedCount === 0}
+                  onClick={onConfirmAdd}
+                >
+                  <Plus size={14} /> Add {selectedCount} to pool
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Empty/post-run with no results */}
+        {!isRunning && results.length === 0 && (
+          <div style={{ padding: 'var(--space-6)', textAlign: 'center', color: 'var(--text-3)' }}>
+            No orgs to cross-thread. Add some prospects first.
+            <div style={{ marginTop: 'var(--space-4)' }}>
+              <button style={styles.secondaryBtn} onClick={onCancel}>Close</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
