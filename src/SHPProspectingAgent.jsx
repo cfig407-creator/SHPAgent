@@ -4,7 +4,7 @@ import {
   ExternalLink, Filter, ArrowRight, Send, Edit3, Zap, TrendingUp,
   MapPin, Users, AlertCircle, Briefcase, Hash, Settings, Key,
   RefreshCw, X, Plus, Compass, BookOpen, MessageCircle, Copy,
-  ChevronRight, ChevronDown, Download,
+  ChevronRight, ChevronDown, Download, UserPlus, Calendar,
 } from 'lucide-react';
 import {
   SHP_IDENTITY, DEFAULT_SIGNATURE, TERRITORY, classifyCounty, isInTerritory,
@@ -13,6 +13,7 @@ import {
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
   buildColdEmailPrompt, buildDealTitle, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
   composeEmail,
+  getMultiThreadTitles, classifyTier, scoreUnenrichedCandidate,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
 import { apiFetch, postJson } from './api-client.js';
@@ -21,6 +22,45 @@ import { apiFetch, postJson } from './api-client.js';
 // Use a stable alias rather than a dated snapshot so we don't break when
 // Anthropic retires old snapshots.
 const ANTHROPIC_MODEL = 'claude-sonnet-4-5';
+
+// === APOLLO CYCLE HELPERS ===
+// Tracks credit usage by calendar month so we can surface end-of-cycle nudges
+// ("you have 22 credits and 6 days left — spend them on multi-thread candidates").
+// Persisted to localStorage; auto-rotates on month change.
+const APOLLO_CYCLE_KEY = 'shp_apollo_cycle_v1';
+
+function getCurrentCycle() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function daysUntilMonthEnd() {
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0); // last day of current month
+  const diffMs = end.getTime() - now.getTime();
+  return Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+}
+
+function loadApolloCycle() {
+  try {
+    const raw = localStorage.getItem(APOLLO_CYCLE_KEY);
+    if (!raw) return { cycle: getCurrentCycle(), creditsUsedThisCycle: 0, lastUpdated: null };
+    const parsed = JSON.parse(raw);
+    // Auto-rotate if we crossed into a new month
+    if (parsed.cycle !== getCurrentCycle()) {
+      return { cycle: getCurrentCycle(), creditsUsedThisCycle: 0, lastUpdated: null, previousCycle: parsed };
+    }
+    return parsed;
+  } catch (e) {
+    console.warn('[shp] apollo cycle load failed:', e);
+    return { cycle: getCurrentCycle(), creditsUsedThisCycle: 0, lastUpdated: null };
+  }
+}
+
+function saveApolloCycle(cycle) {
+  try { localStorage.setItem(APOLLO_CYCLE_KEY, JSON.stringify(cycle)); }
+  catch (e) { console.warn('[shp] apollo cycle save failed:', e); }
+}
 
 export default function SHPProspectingAgent() {
   const [view, setView] = useState('dashboard');
@@ -37,6 +77,20 @@ export default function SHPProspectingAgent() {
   // Apollo quota — { creditsUsed, creditsTotal, creditsRemaining, planName }
   const [apolloQuota, setApolloQuota] = useState(null);
   const [apolloQuotaError, setApolloQuotaError] = useState(null);
+
+  // Apollo cycle — tracks enrich credit usage by month so we can show
+  // end-of-cycle nudges when there's leftover budget. Auto-rotates on month change.
+  const [apolloCycle, setApolloCycle] = useState(() => loadApolloCycle());
+
+  // Multi-thread state — modal for "Find peers at this org"
+  const [findPeersFor, setFindPeersFor] = useState(null); // prospect being multi-threaded
+  const [findPeersResults, setFindPeersResults] = useState(null); // candidates returned by Apollo
+  const [isFindingPeers, setIsFindingPeers] = useState(false);
+
+  // Batch-enrich wizard state — "Spend remaining credits" end-of-month workflow
+  const [batchEnrichOpen, setBatchEnrichOpen] = useState(false);
+  const [batchEnrichRunning, setBatchEnrichRunning] = useState(false);
+  const [batchEnrichProgress, setBatchEnrichProgress] = useState({ done: 0, total: 0 });
 
   // Settings (browser-saved)
   const [config, setConfig] = useState({
@@ -169,6 +223,40 @@ export default function SHPProspectingAgent() {
       localStorage.setItem('shp_prospect_overrides_v3', JSON.stringify(overrides));
     }
   }, [overrides]);
+
+  // Persist Apollo cycle on every update (including auto-rotate at month boundary)
+  useEffect(() => { saveApolloCycle(apolloCycle); }, [apolloCycle]);
+
+  // Re-check cycle every time the tab becomes visible — catches month rollovers on
+  // long-open tabs without requiring a full reload.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      const current = getCurrentCycle();
+      setApolloCycle(prev => prev.cycle === current ? prev
+        : { cycle: current, creditsUsedThisCycle: 0, lastUpdated: null, previousCycle: prev });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  // Bump the credit counter whenever Apollo's reported quota usage increases.
+  // This lets the dashboard widget show real per-cycle usage even if the user
+  // enriched prospects in a different browser session (Apollo is the source of truth).
+  useEffect(() => {
+    if (apolloQuota?.used == null) return;
+    setApolloCycle(prev => {
+      // Only update if Apollo's count exceeds what we last recorded
+      const baseline = prev.apolloUsedAtCycleStart;
+      if (baseline == null) {
+        // First time we see Apollo data this cycle — anchor to current usage
+        return { ...prev, apolloUsedAtCycleStart: apolloQuota.used, lastUpdated: new Date().toISOString() };
+      }
+      const usedThisCycle = Math.max(0, apolloQuota.used - baseline);
+      if (usedThisCycle === prev.creditsUsedThisCycle) return prev;
+      return { ...prev, creditsUsedThisCycle: usedThisCycle, lastUpdated: new Date().toISOString() };
+    });
+  }, [apolloQuota?.used]);
 
   const saveConfig = async () => {
     // Always save to localStorage first so the user never loses input
@@ -876,6 +964,150 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     }
   };
 
+  // === Multi-thread: find peers at the same org ===
+  // Free Apollo search (no credit cost). Returns candidates for user review.
+  // User then picks which to add to the pool (also free); enrichment happens
+  // separately when they want a verified email (1 credit each).
+  const multiThreadAccount = async (prospect) => {
+    if (!prospect?.company) {
+      showToast('No organization on this prospect', 'error');
+      return;
+    }
+    setFindPeersFor(prospect);
+    setFindPeersResults(null);
+    setIsFindingPeers(true);
+
+    const titles = getMultiThreadTitles(prospect.title, prospect.segment);
+
+    try {
+      const data = await postJson('/api/apollo-people-search', {
+        organizationName: prospect.company,
+        titles,
+        limit: 15,
+      }, { retries: 1, timeoutMs: 30_000 });
+
+      const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+
+      // Mark candidates that are already in the pool so the modal can disable them.
+      const normalize = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const existingNames = new Set(
+        prospects.map(p => normalize(p.name)).filter(Boolean)
+      );
+      const annotated = candidates.map(c => ({
+        ...c,
+        alreadyInPool: existingNames.has(normalize(c.name)),
+      }));
+
+      setFindPeersResults(annotated);
+
+      const newCount = annotated.filter(c => !c.alreadyInPool).length;
+      showToast(`Found ${annotated.length} peer${annotated.length === 1 ? '' : 's'} at ${prospect.company}${newCount < annotated.length ? ` (${annotated.length - newCount} already in pool)` : ''}`);
+    } catch (err) {
+      console.error('[shp] multiThreadAccount failed:', err);
+      showToast(`Peer search failed: ${err.message}`, 'error');
+      setFindPeersResults([]);
+    } finally {
+      setIsFindingPeers(false);
+    }
+  };
+
+  // Add selected peers to the pool. Each new prospect inherits geography from the
+  // parent and is flagged needsEnrichment (no email yet — enrich them later).
+  const addPeersToPool = (parent, picked) => {
+    if (!picked || picked.length === 0) return;
+    const now = Date.now();
+    const newProspects = picked.map((c, i) => {
+      const icp = classifyICP(parent.company, c.title);
+      const titleClass = classifyTitle(c.title);
+      return {
+        id: `peer_${now}_${i}`,
+        name: c.name,
+        title: c.title || '',
+        company: parent.company,
+        email: '', // Apollo search doesn't return verified emails — must enrich
+        phone: '',
+        city: parent.city || c.city || '',
+        county: parent.county || '',
+        state: parent.state || c.state || 'FL',
+        zip: '',
+        segment: parent.segment || icp.segment,
+        icpStatus: icp.status,
+        titleAltitude: titleClass.altitude,
+        status: 'Ready',
+        source: `Apollo (peer of ${parent.name || parent.company})`,
+        priority: 80,
+        parentProspectId: parent.id,
+        apolloId: c.apolloId,
+        linkedinUrl: c.linkedinUrl,
+        photoUrl: c.photoUrl,
+      };
+    });
+    setProspects(prev => [...newProspects, ...prev]);
+    showToast(`Added ${newProspects.length} peer${newProspects.length === 1 ? '' : 's'} to the pool — enrich them when you have credits`);
+    setFindPeersFor(null);
+    setFindPeersResults(null);
+  };
+
+  // === Batch enrich (end-of-month "Spend remaining credits" wizard) ===
+  // Runs sequential Apollo enrichments on the user's chosen candidates with a
+  // small delay between calls (rate-limit etiquette). Updates progress live.
+  const runBatchEnrich = async (prospectIds) => {
+    if (!prospectIds || prospectIds.length === 0) return;
+    setBatchEnrichRunning(true);
+    setBatchEnrichProgress({ done: 0, total: prospectIds.length });
+
+    let success = 0;
+    let misses = 0;
+    let errors = 0;
+
+    for (let i = 0; i < prospectIds.length; i++) {
+      const target = prospects.find(p => p.id === prospectIds[i]);
+      if (!target) { errors++; continue; }
+
+      try {
+        const [firstName, ...rest] = (target.name || '').trim().split(/\s+/);
+        const lastName = rest.join(' ');
+        const data = await postJson('/api/apollo-enrich', {
+          firstName,
+          lastName,
+          name: target.name,
+          organizationName: target.company,
+        }, { retries: 1, timeoutMs: 30_000 });
+
+        if (data?.matched && data.person) {
+          // Apply enrichment immediately (no review step in batch mode)
+          setProspects(prev => prev.map(p => {
+            if (p.id !== target.id) return p;
+            const update = { ...p };
+            const apollo = data.person;
+            if (apollo.email) update.email = apollo.email;
+            if (apollo.phone && !p.phone) update.phone = apollo.phone;
+            if (apollo.title && (!p.title || p.title.toLowerCase() === 'student')) update.title = apollo.title;
+            if (apollo.linkedinUrl) update.linkedinUrl = apollo.linkedinUrl;
+            update.enrichedAt = new Date().toISOString();
+            update.enrichedBy = 'apollo-batch';
+            return update;
+          }));
+          success++;
+        } else {
+          misses++;
+        }
+      } catch (e) {
+        console.warn('[shp] batch enrich error for', target.name, e.message);
+        errors++;
+      }
+
+      setBatchEnrichProgress({ done: i + 1, total: prospectIds.length });
+      // Light rate-limit pause between Apollo calls
+      await new Promise(r => setTimeout(r, 350));
+    }
+
+    fetchApolloQuota(); // refresh quota after the batch
+    setBatchEnrichRunning(false);
+    setBatchEnrichOpen(false);
+    showToast(`Batch enrich complete · ${success} matched · ${misses} no-match · ${errors} error${errors === 1 ? '' : 's'}`);
+  };
+
   // Apply Apollo's findings to the prospect record (updates email, phone, title in-place)
   const applyEnrichment = (prospectId) => {
     const proposal = proposedEnrichment[prospectId];
@@ -1088,9 +1320,9 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         userName={pdMeta.userName}
       />
       <div style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={apolloQuota} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
-        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={apolloQuota} />}
-        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={apolloQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
+        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={apolloQuota} multiThreadAccount={multiThreadAccount} />}
+        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
@@ -1100,6 +1332,30 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       {toast && <Toast styles={styles} toast={toast} />}
       {pursueLaterFor && <PursueLaterModal styles={styles} date={pursueLaterDate} setDate={setPursueLaterDate} onSave={savePursueLater} onCancel={() => setPursueLaterFor(null)} />}
       {deleteConfirm && <DeleteConfirmModal styles={styles} prospect={deleteConfirm} onConfirm={executeDelete} onCancel={() => setDeleteConfirm(null)} />}
+      {findPeersFor && (
+        <FindPeersModal
+          styles={styles}
+          parent={findPeersFor}
+          isLoading={isFindingPeers}
+          results={findPeersResults}
+          onAdd={(picked) => addPeersToPool(findPeersFor, picked)}
+          onCancel={() => { setFindPeersFor(null); setFindPeersResults(null); }}
+        />
+      )}
+      {batchEnrichOpen && (
+        <BatchEnrichModal
+          styles={styles}
+          prospects={prospectsWithOverrides}
+          clusters={clusters}
+          pdRecords={pdRecords}
+          apolloQuota={apolloQuota}
+          apolloCycle={apolloCycle}
+          isRunning={batchEnrichRunning}
+          progress={batchEnrichProgress}
+          onConfirm={runBatchEnrich}
+          onCancel={() => setBatchEnrichOpen(false)}
+        />
+      )}
       <GlobalStyles />
     </div>
   );
@@ -1147,7 +1403,7 @@ function Header({ styles, view, setView, pdConnected, isConnecting, userName }) 
 // =================================================================
 // === DASHBOARD ===
 // =================================================================
-function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
+function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
   const topClusters = clusters.slice(0, 5);
   const firstName = (fromName || 'Anthony').split(' ')[0];
 
@@ -1239,7 +1495,7 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
             {pursueLaterDue.length} prospect{pursueLaterDue.length === 1 ? '' : 's'} {pursueLaterDue.length === 1 ? 'is' : 'are'} ready to revisit. Review and decide: re-activate, push the date, or mark dead.
           </div>
           {pursueLaterDue.slice(0, 5).map(p => (
-            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />
+            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />
           ))}
           {pursueLaterDue.length > 5 && (
             <button style={{ ...styles.secondaryBtn, marginTop: '8px' }} onClick={() => setView('find')}>
@@ -1278,11 +1534,38 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
         </div>
       )}
 
+      {/* End-of-month nudge: when there are leftover credits and the cycle is
+          almost over, prompt the user to batch-enrich their highest-leverage
+          candidates. Threshold: 5 days left AND 10+ credits remaining. */}
+      {apolloQuota?.remaining != null && daysUntilMonthEnd() <= 5 && apolloQuota.remaining >= 10 && (
+        <div style={{ ...styles.card, borderColor: 'rgba(99, 130, 175, 0.3)', background: 'rgba(99, 130, 175, 0.05)' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+            <Calendar size={20} color="#93b0d6" style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '4px' }}>You have {apolloQuota.remaining} Apollo credits left this month</div>
+              <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '12px' }}>
+                Cycle resets in {daysUntilMonthEnd()} day{daysUntilMonthEnd() === 1 ? '' : 's'}. Spend them on your highest-leverage unenriched candidates — net-new accounts and multi-thread completions.
+              </div>
+              <button style={styles.primaryBtn} onClick={openBatchEnrich}>
+                <Sparkles size={14} /> Spend remaining credits →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Today-at-a-glance — replaces the static "Three Pillars" filler with
           actionable numbers: outreach pushed, emails sent, open deals in PD,
           and Apollo credits remaining. */}
       <div style={styles.card}>
-        <div style={styles.sectionTitle}><Hash size={14} /> Today at a glance</div>
+        <div style={styles.sectionTitle}>
+          <Hash size={14} /> Today at a glance
+          {apolloQuota?.remaining != null && (
+            <button style={{ ...styles.secondaryBtn, marginLeft: 'auto', padding: '5px 10px', fontSize: '11px' }} onClick={openBatchEnrich}>
+              <Sparkles size={11} /> Batch enrich
+            </button>
+          )}
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
           <MiniStat label="Pushed to PD" value={stats.pushed} sub={`${stats.pushedLeads} lead${stats.pushedLeads === 1 ? '' : 's'} · ${stats.pushedDeals} deal${stats.pushedDeals === 1 ? '' : 's'}`} />
           <MiniStat label="Emails sent" value={stats.sent} sub="Logged via M365 sync" />
@@ -1290,7 +1573,9 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
           <MiniStat
             label="Apollo credits"
             value={apolloQuota?.remaining ?? '—'}
-            sub={apolloQuota?.total ? `of ${apolloQuota.total}${apolloQuota.plan ? ` (${apolloQuota.plan})` : ''}` : 'unavailable'}
+            sub={apolloQuota?.total
+              ? `of ${apolloQuota.total} · resets in ${daysUntilMonthEnd()}d`
+              : 'unavailable'}
             color={apolloLow ? '#fbbf24' : undefined}
           />
         </div>
@@ -1349,7 +1634,7 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
 // =================================================================
 // === FIND VIEW ===
 // =================================================================
-function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
+function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount }) {
   const [findTab, setFindTab] = useState('pool');
 
   return (
@@ -1488,7 +1773,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
           <div style={styles.card}>
             <div style={styles.sectionTitle}><Users size={14} /> Prospects ({prospects.length})</div>
             {prospects.slice(0, 50).map(p => (
-              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />
+              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />
             ))}
             {prospects.length > 50 && (
               <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: '#7a8aa3', fontStyle: 'italic' }}>
@@ -1507,7 +1792,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
   );
 }
 
-function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
+function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const research = researchData[prospect.id];
   const rec = pdRecords[prospect.id];
@@ -1550,6 +1835,7 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             {rec?.leadId && !rec?.dealId && <span style={styles.badge('navy')}>Lead</span>}
             {rec?.dealId && <span style={styles.badge('navy')}>Deal #{rec.dealId}</span>}
             {rec?.sentAt && <span style={styles.badge('amber')}><Send size={10} /> Sent</span>}
+            {prospect.parentProspectId && <span style={styles.badge('navy')} title={`Multi-thread peer · added from ${prospect.source || 'a parent prospect'}`}><UserPlus size={10} /> peer</span>}
           </div>
           <div style={{ fontSize: '12px', color: '#a8b5c9', marginBottom: '4px' }}>
             {prospect.title || <span style={{ fontStyle: 'italic' }}>(no title)</span>} · {prospect.company}
@@ -1637,6 +1923,14 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             <>
               <div onClick={() => setMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
               <div style={styles.statusMenu} data-status-menu="true">
+                {multiThreadAccount && prospect.company && !isDead && (
+                  <>
+                    <button style={styles.statusMenuItem} onClick={() => { multiThreadAccount(prospect); setMenuOpen(false); }}>
+                      <UserPlus size={12} color="#93b0d6" /> Find peers at {prospect.company.length > 24 ? prospect.company.slice(0, 22) + '…' : prospect.company}
+                    </button>
+                    <div style={{ borderTop: '1px solid rgba(232, 236, 243, 0.08)', margin: '4px 0' }} />
+                  </>
+                )}
                 {status !== 'Active' && (
                   <button style={styles.statusMenuItem} onClick={() => { markActive(prospect.id); setMenuOpen(false); }}>
                     <RefreshCw size={12} /> Restore to Active
@@ -1681,7 +1975,7 @@ function segmentBadgeColor(seg) {
 // =================================================================
 // === CLUSTERS VIEW ===
 // =================================================================
-function ClustersView({ styles, clusters, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment }) {
+function ClustersView({ styles, clusters, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
   const [expanded, setExpanded] = useState({});
 
   return (
@@ -1715,7 +2009,7 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
             {isOpen && (
               <div style={{ marginTop: '16px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', paddingTop: '16px' }}>
                 {cluster.prospects.slice(0, 20).map(p => (
-                  <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} />
+                  <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />
                 ))}
                 {cluster.prospects.length > 20 && (
                   <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: '#7a8aa3', fontStyle: 'italic' }}>
@@ -2331,6 +2625,237 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 // =================================================================
 // === TOAST + GLOBAL STYLES ===
 // =================================================================
+// =================================================================
+// === FIND PEERS MODAL (multi-thread accounts) ===
+// =================================================================
+function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel }) {
+  const [picked, setPicked] = useState({});
+
+  const togglePick = (apolloId) => {
+    setPicked(prev => ({ ...prev, [apolloId]: !prev[apolloId] }));
+  };
+
+  const candidates = results || [];
+  const newOnes = candidates.filter(c => !c.alreadyInPool);
+  const pickedCount = newOnes.filter(c => picked[c.apolloId]).length;
+
+  const tierColor = (t) => t >= 4 ? '#4ade80' : t === 3 ? '#fbbf24' : t === 2 ? '#93b0d6' : '#7a8aa3';
+  const tierLabel = (t) => t === 4 ? 'Strategic' : t === 3 ? 'Mgmt' : t === 2 ? 'Tactical' : t === 1 ? 'Frontline' : 'Adjacent';
+
+  const handleAdd = () => {
+    const chosen = newOnes.filter(c => picked[c.apolloId]);
+    onAdd(chosen);
+  };
+
+  return (
+    <div style={styles.modalOverlay} onClick={onCancel}>
+      <div style={{ ...styles.modalCard, maxWidth: '720px', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+        <div style={{ marginBottom: '8px' }}>
+          <div style={{ fontSize: '18px', fontWeight: 700 }}>Find peers at {parent.company}</div>
+          <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '4px' }}>
+            Multi-threading from <strong>{parent.name || '(unnamed)'}</strong> ({parent.title || 'unknown title'}). Search is free — adding to the pool is free. Verified emails cost 1 Apollo credit each, applied later when you enrich.
+          </div>
+        </div>
+
+        {isLoading ? (
+          <div style={{ textAlign: 'center', padding: '60px 0' }}>
+            <Loader2 size={28} className="spin" style={{ color: '#ff6b85' }} />
+            <div style={{ fontSize: '14px', marginTop: '12px' }}>Searching Apollo for peers…</div>
+          </div>
+        ) : candidates.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '40px 0', color: '#7a8aa3' }}>
+            <AlertCircle size={20} style={{ marginBottom: '8px' }} />
+            <div style={{ fontSize: '13px' }}>No peers found at this org. Apollo may not index them — try Manual Add.</div>
+          </div>
+        ) : (
+          <div style={{ overflowY: 'auto', flex: 1, marginTop: '12px', borderTop: '1px solid rgba(232, 236, 243, 0.08)' }}>
+            {candidates.map(c => {
+              const tier = classifyTier(c.title);
+              const checked = !!picked[c.apolloId];
+              return (
+                <label
+                  key={c.apolloId}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '12px',
+                    padding: '12px 0', borderBottom: '1px solid rgba(232, 236, 243, 0.04)',
+                    opacity: c.alreadyInPool ? 0.5 : 1,
+                    cursor: c.alreadyInPool ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    disabled={c.alreadyInPool}
+                    checked={checked}
+                    onChange={() => togglePick(c.apolloId)}
+                    style={{ width: '16px', height: '16px', accentColor: '#ff6b85' }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                      <strong style={{ fontSize: '14px' }}>{c.name}</strong>
+                      {tier > 0 && (
+                        <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(232, 236, 243, 0.06)', color: tierColor(tier), fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                          {tierLabel(tier)}
+                        </span>
+                      )}
+                      {c.alreadyInPool && <span style={{ fontSize: '11px', color: '#7a8aa3' }}>· already in pool</span>}
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#a8b5c9' }}>{c.title || '(no title)'}</div>
+                    {c.linkedinUrl && (
+                      <a href={c.linkedinUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: '11px', color: '#93b0d6' }}>
+                        LinkedIn ↗
+                      </a>
+                    )}
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: '10px', marginTop: '20px', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontSize: '12px', color: '#7a8aa3' }}>
+            {newOnes.length > 0 && (
+              <>{pickedCount} of {newOnes.length} selected · 0 credits cost (enrich separately later)</>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button style={styles.secondaryBtn} onClick={onCancel}>Cancel</button>
+            <button style={styles.primaryBtn} onClick={handleAdd} disabled={pickedCount === 0}>
+              <Plus size={14} /> Add {pickedCount > 0 ? `${pickedCount} ` : ''}to pool
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// === BATCH ENRICH MODAL ("Spend remaining credits" wizard) ===
+// =================================================================
+function BatchEnrichModal({ styles, prospects, clusters, pdRecords, apolloQuota, apolloCycle, isRunning, progress, onConfirm, onCancel }) {
+  // Build the high-trip-county set so we can score on cluster relevance.
+  const highTripCounties = useMemo(() => {
+    const top = clusters.slice(0, 8).map(c => c.county);
+    return new Set(top);
+  }, [clusters]);
+
+  // Candidates = unenriched prospects (no email or personal email), in-territory, alive
+  const candidates = useMemo(() => {
+    return prospects
+      .filter(p =>
+        p.outreachStatus !== 'Dead' &&
+        p.outreachStatus !== 'Customer' &&
+        (!p.email || /(gmail|yahoo|hotmail|aol|comcast)/i.test(p.email)) &&
+        p.county
+      )
+      .map(p => ({
+        prospect: p,
+        score: scoreUnenrichedCandidate(p, { allProspects: prospects, pdRecords, highTripCounties }),
+      }))
+      .sort((a, b) => b.score - a.score);
+  }, [prospects, pdRecords, highTripCounties]);
+
+  const [picked, setPicked] = useState({});
+  const remaining = apolloQuota?.remaining ?? null;
+  const pickedIds = candidates.filter(c => picked[c.prospect.id]).map(c => c.prospect.id);
+  const pickedCount = pickedIds.length;
+  const overBudget = remaining != null && pickedCount > remaining;
+
+  // Auto-pick the top N up to remaining-credits when the modal first opens
+  useEffect(() => {
+    if (remaining == null) return;
+    const auto = {};
+    candidates.slice(0, Math.min(remaining, 20)).forEach(c => { auto[c.prospect.id] = true; });
+    setPicked(auto);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remaining]);
+
+  const togglePick = (id) => {
+    setPicked(prev => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const tierColor = (t) => t >= 4 ? '#4ade80' : t === 3 ? '#fbbf24' : t === 2 ? '#93b0d6' : '#7a8aa3';
+
+  return (
+    <div style={styles.modalOverlay} onClick={isRunning ? undefined : onCancel}>
+      <div style={{ ...styles.modalCard, maxWidth: '760px', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+        <div>
+          <div style={{ fontSize: '18px', fontWeight: 700 }}>Spend remaining Apollo credits</div>
+          <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '4px' }}>
+            Ranked by leverage: net-new accounts, multi-thread completion, cluster priority, decision-maker tier.
+          </div>
+        </div>
+
+        <div style={{ marginTop: '14px', padding: '12px 14px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '14px' }}>
+          <div style={{ fontSize: '13px' }}>
+            <div><strong>Apollo cycle:</strong> {apolloCycle.cycle} · {daysUntilMonthEnd()} day{daysUntilMonthEnd() === 1 ? '' : 's'} until reset</div>
+            {remaining != null && (
+              <div style={{ fontSize: '12px', color: '#a8b5c9', marginTop: '2px' }}>
+                {remaining} of {apolloQuota.total} credits remaining{apolloCycle.creditsUsedThisCycle > 0 ? ` · ${apolloCycle.creditsUsedThisCycle} used this cycle` : ''}
+              </div>
+            )}
+          </div>
+          <div style={{ fontSize: '13px', textAlign: 'right' }}>
+            <div style={{ fontWeight: 700, fontSize: '20px', color: overBudget ? '#ff6b85' : '#4ade80' }}>{pickedCount}</div>
+            <div style={{ fontSize: '11px', color: '#7a8aa3' }}>selected · {pickedCount} credit{pickedCount === 1 ? '' : 's'}</div>
+          </div>
+        </div>
+
+        {overBudget && (
+          <div style={{ marginTop: '10px', padding: '10px 12px', background: 'rgba(255, 107, 133, 0.08)', borderRadius: '8px', fontSize: '12px', color: '#ff6b85' }}>
+            Selection ({pickedCount}) exceeds remaining credits ({remaining}). Trim selection or proceed knowing some enrichments will fail.
+          </div>
+        )}
+
+        {isRunning ? (
+          <div style={{ textAlign: 'center', padding: '40px 0' }}>
+            <Loader2 size={32} className="spin" style={{ color: '#ff6b85', marginBottom: '12px' }} />
+            <div style={{ fontSize: '14px', fontWeight: 500 }}>Enriching {progress.done} of {progress.total}…</div>
+            <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '6px' }}>~350ms between calls (rate-limit etiquette).</div>
+            <div style={{ marginTop: '16px', height: '6px', background: 'rgba(232, 236, 243, 0.08)', borderRadius: '3px', overflow: 'hidden' }}>
+              <div style={{ width: `${progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%`, height: '100%', background: 'linear-gradient(90deg, #C8102E, #ff6b85)', transition: 'width 0.3s' }} />
+            </div>
+          </div>
+        ) : candidates.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '40px 0', color: '#7a8aa3' }}>
+            <CheckCircle2 size={20} color="#4ade80" style={{ marginBottom: '8px' }} />
+            <div style={{ fontSize: '13px' }}>No unenriched candidates. Your pool is clean.</div>
+          </div>
+        ) : (
+          <div style={{ overflowY: 'auto', flex: 1, marginTop: '14px', borderTop: '1px solid rgba(232, 236, 243, 0.08)' }}>
+            {candidates.slice(0, 50).map(({ prospect: p, score }) => {
+              const tier = classifyTier(p.title);
+              const checked = !!picked[p.id];
+              return (
+                <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 0', borderBottom: '1px solid rgba(232, 236, 243, 0.04)', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={checked} onChange={() => togglePick(p.id)} style={{ width: '16px', height: '16px', accentColor: '#ff6b85' }} />
+                  <div style={{ width: '32px', textAlign: 'center', fontSize: '14px', fontWeight: 700, color: score >= 12 ? '#4ade80' : score >= 8 ? '#fbbf24' : '#7a8aa3' }}>{score}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                      <strong style={{ fontSize: '13px' }}>{p.name || '(no name)'}</strong>
+                      {tier > 0 && <span style={{ fontSize: '10px', color: tierColor(tier), fontWeight: 600 }}>T{tier}</span>}
+                      {p.parentProspectId && <span style={{ fontSize: '10px', color: '#93b0d6' }}>peer</span>}
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#7a8aa3' }}>{p.title || '(no title)'} · {p.company} · {p.county}</div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: '10px', marginTop: '16px', justifyContent: 'flex-end' }}>
+          <button style={styles.secondaryBtn} onClick={onCancel} disabled={isRunning}>Close</button>
+          <button style={styles.primaryBtn} onClick={() => onConfirm(pickedIds)} disabled={isRunning || pickedCount === 0}>
+            <Sparkles size={14} /> Enrich {pickedCount > 0 ? `${pickedCount} ` : ''}now
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PursueLaterModal({ styles, date, setDate, onSave, onCancel }) {
   return (
     <div style={styles.modalOverlay} onClick={onCancel}>

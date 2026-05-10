@@ -776,6 +776,143 @@ export function classifyTitle(title) {
   };
 }
 
+// =====================================================================
+// === MULTI-THREAD TITLE LADDER ========================================
+// =====================================================================
+// Used by the "Find peers at this org" feature: given an existing prospect's
+// title, returns the set of titles to search for at the same organization
+// (going up AND down the ladder, plus adjacent functions when at C-suite).
+//
+// Tiers (lowest → highest):
+//   1 — Frontline   (Technician, Tradesperson, Maintenance Worker)
+//   2 — Tactical    (Coordinator, Supervisor, Lead, Specialist)
+//   3 — Management  (Manager, Senior Manager, Asst Director)
+//   4 — Strategic   (Director, VP, Superintendent, Chief / President)
+export const TITLE_LADDER = {
+  1: { name: 'Frontline', titles: [
+    'Maintenance Technician', 'Facilities Technician', 'Building Technician',
+    'Maintenance Worker', 'Tradesperson', 'Locksmith', 'Door Technician',
+  ]},
+  2: { name: 'Tactical', titles: [
+    'Facilities Coordinator', 'Maintenance Coordinator', 'Operations Coordinator',
+    'Facilities Supervisor', 'Maintenance Supervisor', 'Facilities Lead',
+    'Facilities Specialist', 'Maintenance Specialist',
+  ]},
+  3: { name: 'Management', titles: [
+    'Facilities Manager', 'Maintenance Manager', 'Operations Manager',
+    'Building Manager', 'Plant Manager', 'Senior Facilities Manager',
+    'Assistant Director of Facilities', 'Assistant Director of Operations',
+  ]},
+  4: { name: 'Strategic', titles: [
+    'Director of Facilities', 'Director of Maintenance', 'Director of Operations',
+    'Director of Plant Operations', 'Director of Buildings and Grounds',
+    'VP Facilities', 'VP Operations', 'Vice President of Facilities',
+    'Executive Director of Facilities', 'Chief Facilities Officer',
+    'Chief Operating Officer', 'Superintendent', 'Assistant Superintendent',
+  ]},
+};
+
+// Adjacent functions worth multi-threading to when you have a C-suite contact —
+// these touch door/hardware purchasing decisions even though they're not "facilities."
+export const ADJACENT_FUNCTIONS = [
+  'Director of Procurement', 'Procurement Manager', 'Purchasing Manager',
+  'Director of Safety', 'Safety Manager', 'Director of Security',
+  'Director of Capital Projects', 'Construction Manager', 'Project Manager Construction',
+  'Director of Risk Management',
+];
+
+// Classify a title into a tier (1-4). Returns 0 for unknown / non-facilities.
+export function classifyTier(title) {
+  if (!title) return 0;
+  const t = title.toLowerCase();
+  // Strategic markers (tier 4)
+  if (/\b(director|vp|vice president|chief|superintendent|president|ceo|coo|cfo|executive director)\b/.test(t)) return 4;
+  // Management markers (tier 3)
+  if (/\b(manager|asst director|assistant director|head of)\b/.test(t)) return 3;
+  // Tactical markers (tier 2)
+  if (/\b(coordinator|supervisor|lead|specialist|foreman)\b/.test(t)) return 2;
+  // Frontline markers (tier 1)
+  if (/\b(technician|tech|worker|tradesperson|locksmith|maintenance|janitor|custodian)\b/.test(t)) return 1;
+  return 0;
+}
+
+// Given a prospect's current title + segment, return the titles to search for at
+// the same org. Implements the "vice versa" rule: going up AND down the ladder
+// to maximize multi-threading coverage.
+//
+// Strategy:
+//   - If current is tier 1-2 (frontline/tactical) → search tier 3-4 (where the buying happens)
+//   - If current is tier 3 (management) → search tier 2 + tier 4 (peers + boss)
+//   - If current is tier 4 (strategic) → search tier 2-3 (the people who actually field calls) + adjacent functions
+//   - If current is unknown / non-facilities → search the full facilities ladder (start from scratch)
+export function getMultiThreadTitles(currentTitle, segment) {
+  const tier = classifyTier(currentTitle);
+  const result = new Set();
+
+  if (tier === 1 || tier === 2) {
+    TITLE_LADDER[3].titles.forEach(t => result.add(t));
+    TITLE_LADDER[4].titles.forEach(t => result.add(t));
+  } else if (tier === 3) {
+    TITLE_LADDER[2].titles.forEach(t => result.add(t));
+    TITLE_LADDER[4].titles.forEach(t => result.add(t));
+  } else if (tier === 4) {
+    TITLE_LADDER[2].titles.forEach(t => result.add(t));
+    TITLE_LADDER[3].titles.forEach(t => result.add(t));
+    ADJACENT_FUNCTIONS.forEach(t => result.add(t));
+  } else {
+    // Unknown / non-facilities — pull the full middle of the ladder
+    TITLE_LADDER[2].titles.forEach(t => result.add(t));
+    TITLE_LADDER[3].titles.forEach(t => result.add(t));
+    TITLE_LADDER[4].titles.forEach(t => result.add(t));
+  }
+
+  // Segment-specific tweaks: K-12 has Superintendent at the top regardless
+  if (segment === 'K-12 Education' && tier !== 4) {
+    result.add('Superintendent');
+    result.add('Assistant Superintendent');
+  }
+
+  return Array.from(result);
+}
+
+// Score an unenriched candidate for the "spend remaining credits" wizard.
+// Higher score = higher priority for end-of-month batch enrichment.
+//   +10 — org has 0 enriched contacts (new account → highest leverage)
+//   +5  — org has 1 enriched contact (multi-thread completion)
+//   +3  — county is in a high-trip-score cluster
+//   +2  — title is tier 3-4 (decision-maker)
+//   +1  — peer of a prospect already pushed to Pipedrive (active deal)
+export function scoreUnenrichedCandidate(candidate, context) {
+  const { allProspects = [], pdRecords = {}, highTripCounties = new Set() } = context;
+  let score = 0;
+
+  const sameOrg = allProspects.filter(p => normalizeOrg(p.company) === normalizeOrg(candidate.company));
+  const enrichedAtOrg = sameOrg.filter(p => p.email && !/(gmail|yahoo|hotmail|aol|comcast)/i.test(p.email));
+  if (enrichedAtOrg.length === 0) score += 10;
+  else if (enrichedAtOrg.length === 1) score += 5;
+
+  if (candidate.county && highTripCounties.has(candidate.county)) score += 3;
+
+  const tier = classifyTier(candidate.title);
+  if (tier >= 3) score += 2;
+
+  const parentId = candidate.parentProspectId;
+  if (parentId && pdRecords[parentId] && (pdRecords[parentId].leadId || pdRecords[parentId].dealId)) {
+    score += 1;
+  }
+
+  return score;
+}
+
+// Normalize an org name for fuzzy matching (strip whitespace, punctuation, common suffixes)
+function normalizeOrg(name) {
+  if (!name) return '';
+  return name.toLowerCase()
+    .replace(/\b(inc|llc|corp|corporation|company|co|ltd|the)\b/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
 // === PAIN LIBRARIES — From Anthony's three ICP infographics ===
 export const PAIN_LIBRARY = {
   'K-12 Education': {
