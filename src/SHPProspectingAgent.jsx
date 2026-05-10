@@ -1376,7 +1376,7 @@ function Header({ styles, view, setView, pdConnected, isConnecting, userName }) 
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         <div style={styles.pdBadge(pdConnected)} onClick={() => setView('settings')}>
-          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: pdConnected ? '#4ade80' : isConnecting ? '#fbbf24' : '#ff6b85' }} />
+          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: pdConnected ? 'var(--ok)' : isConnecting ? 'var(--warn)' : 'var(--danger)' }} />
           {/* Order matters: "Connecting…" wins over the stale "disconnected" label
               while a connection attempt is in flight, so the badge never lies. */}
           {pdConnected ? `Pipedrive · ${userName || 'connected'}` : isConnecting ? 'Connecting…' : 'Pipedrive disconnected'}
@@ -1437,14 +1437,14 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
       <div style={styles.pageSubtitle}>{subtitle}</div>
 
       {showDisconnectedBanner && (
-        <div style={{ ...styles.card, borderColor: 'rgba(255, 107, 133, 0.3)', background: 'rgba(255, 107, 133, 0.05)' }}>
+        <div style={{ ...styles.card, borderColor: 'color-mix(in oklch, var(--danger) 30%, transparent)', background: 'var(--danger-soft)' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
             <AlertCircle size={20} color="#ff6b85" style={{ flexShrink: 0, marginTop: '2px' }} />
             <div>
               <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '4px' }}>Pipedrive not connected</div>
-              <div style={{ fontSize: '13px', color: '#a8b5c9' }}>
+              <div style={{ fontSize: '13px', color: 'var(--text-2)' }}>
                 {pdConnectError
-                  ? <>Last error: <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: '4px' }}>{pdConnectError}</code>. Check <code>PIPEDRIVE_API_TOKEN</code> in Vercel and redeploy.</>
+                  ? <>Last error: <code style={{ background: 'var(--bg-sunk)', padding: '1px 6px', borderRadius: '4px' }}>{pdConnectError}</code>. Check <code>PIPEDRIVE_API_TOKEN</code> in Vercel and redeploy.</>
                   : 'Set PIPEDRIVE_API_TOKEN in Vercel project settings, then redeploy.'}
               </div>
             </div>
@@ -1453,12 +1453,12 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
       )}
 
       {apolloLow && (
-        <div style={{ ...styles.card, borderColor: 'rgba(251, 191, 36, 0.3)', background: 'rgba(251, 191, 36, 0.05)' }}>
+        <div style={{ ...styles.card, borderColor: 'color-mix(in oklch, var(--warn) 30%, transparent)', background: 'var(--warn-soft)' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
             <AlertCircle size={20} color="#fbbf24" style={{ flexShrink: 0, marginTop: '2px' }} />
             <div>
               <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '4px' }}>Apollo credits running low</div>
-              <div style={{ fontSize: '13px', color: '#a8b5c9' }}>
+              <div style={{ fontSize: '13px', color: 'var(--text-2)' }}>
                 {apolloQuota.remaining} of {apolloQuota.total} credits remaining{apolloQuota.plan ? ` on ${apolloQuota.plan}` : ''}. Each enrichment match costs 1 credit.
               </div>
             </div>
@@ -1489,9 +1489,9 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
       </div>
 
       {pursueLaterDue.length > 0 && (
-        <div style={{ ...styles.card, borderColor: 'rgba(251, 191, 36, 0.3)', background: 'rgba(251, 191, 36, 0.05)' }}>
+        <div style={{ ...styles.card, borderColor: 'color-mix(in oklch, var(--warn) 30%, transparent)', background: 'var(--warn-soft)' }}>
           <div style={styles.sectionTitle}><RefreshCw size={14} /> Pursue Later — Revisit Time</div>
-          <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '12px' }}>
+          <div style={{ fontSize: '13px', color: 'var(--text-2)', marginBottom: '12px' }}>
             {pursueLaterDue.length} prospect{pursueLaterDue.length === 1 ? '' : 's'} {pursueLaterDue.length === 1 ? 'is' : 'are'} ready to revisit. Review and decide: re-activate, push the date, or mark dead.
           </div>
           {pursueLaterDue.slice(0, 5).map(p => (
@@ -1521,11 +1521,11 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
             <div key={c.county} style={{ padding: '10px 12px', borderBottom: '1px solid rgba(232, 236, 243, 0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <div style={{ fontSize: '14px', fontWeight: 600 }}>{c.county} County</div>
-                <div style={{ fontSize: '12px', color: '#7a8aa3' }}>
+                <div style={{ fontSize: '12px', color: 'var(--text-3)' }}>
                   {c.size} prospects · {c.withEmail} with email · {Object.entries(c.bySegment).map(([s, n]) => `${n} ${s.replace(' Education', '').replace(' Government', ' Gov')}`).join(' · ')}
                 </div>
               </div>
-              <div style={{ fontSize: '20px', fontWeight: 700, color: '#fbbf24' }}>{c.tripScore}</div>
+              <div style={{ fontSize: '20px', fontWeight: 700, color: 'var(--warn)' }}>{c.tripScore}</div>
             </div>
           ))}
           <button style={{ ...styles.secondaryBtn, marginTop: '12px' }} onClick={() => setView('clusters')}>
@@ -1538,12 +1538,12 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
           almost over, prompt the user to batch-enrich their highest-leverage
           candidates. Threshold: 5 days left AND 10+ credits remaining. */}
       {apolloQuota?.remaining != null && daysUntilMonthEnd() <= 5 && apolloQuota.remaining >= 10 && (
-        <div style={{ ...styles.card, borderColor: 'rgba(99, 130, 175, 0.3)', background: 'rgba(99, 130, 175, 0.05)' }}>
+        <div style={{ ...styles.card, borderColor: 'color-mix(in oklch, var(--info) 30%, transparent)', background: 'var(--info-soft)' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
             <Calendar size={20} color="#93b0d6" style={{ flexShrink: 0, marginTop: '2px' }} />
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '4px' }}>You have {apolloQuota.remaining} Apollo credits left this month</div>
-              <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '12px' }}>
+              <div style={{ fontSize: '13px', color: 'var(--text-2)', marginBottom: '12px' }}>
                 Cycle resets in {daysUntilMonthEnd()} day{daysUntilMonthEnd() === 1 ? '' : 's'}. Spend them on your highest-leverage unenriched candidates — net-new accounts and multi-thread completions.
               </div>
               <button style={styles.primaryBtn} onClick={openBatchEnrich}>
@@ -1576,7 +1576,7 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
             sub={apolloQuota?.total
               ? `of ${apolloQuota.total} · resets in ${daysUntilMonthEnd()}d`
               : 'unavailable'}
-            color={apolloLow ? '#fbbf24' : undefined}
+            color={apolloLow ? 'var(--warn)' : undefined}
           />
         </div>
       </div>
@@ -1586,10 +1586,10 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
 
 function MiniStat({ label, value, sub, color }) {
   return (
-    <div style={{ padding: '14px 16px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '8px' }}>
-      <div style={{ fontSize: '11px', color: '#7a8aa3', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 500 }}>{label}</div>
-      <div style={{ fontSize: '22px', fontWeight: 700, marginTop: '4px', color: color || '#e8ecf3' }}>{value}</div>
-      <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '2px' }}>{sub}</div>
+    <div style={{ padding: '14px 16px', background: 'var(--bg-sunk)', borderRadius: '8px' }}>
+      <div style={{ fontSize: '11px', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 500 }}>{label}</div>
+      <div style={{ fontSize: '22px', fontWeight: 700, marginTop: '4px', color: color || 'var(--text)' }}>{value}</div>
+      <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '2px' }}>{sub}</div>
     </div>
   );
 }
@@ -1615,7 +1615,7 @@ function StatCard({ styles, label, value, sub, onClick }) {
       <div style={styles.statValue}>{value}</div>
       <div style={styles.statSub}>{sub}</div>
       {isClickable && (
-        <ArrowRight size={14} style={{ position: 'absolute', top: '20px', right: '16px', color: '#7a8aa3' }} />
+        <ArrowRight size={14} style={{ position: 'absolute', top: '20px', right: '16px', color: 'var(--text-3)' }} />
       )}
     </div>
   );
@@ -1626,7 +1626,7 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
     <button style={{ ...styles.secondaryBtn, justifyContent: 'flex-start', padding: '20px', flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }} onClick={onClick}>
       <Icon size={18} color={color} />
       <div style={{ fontWeight: 600, fontSize: '14px' }}>{title}</div>
-      <div style={{ fontSize: '12px', color: '#7a8aa3', textAlign: 'left' }}>{sub}</div>
+      <div style={{ fontSize: '12px', color: 'var(--text-3)', textAlign: 'left' }}>{sub}</div>
     </button>
   );
 }
@@ -1665,7 +1665,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
             <label style={styles.label}>Segments</label>
             <input style={styles.input} value={apolloCriteria.segments} onChange={e => setApolloCriteria({ ...apolloCriteria, segments: e.target.value })} />
           </div>
-          <div style={{ fontSize: '12px', color: '#7a8aa3', marginBottom: '14px', padding: '10px 12px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '6px' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-3)', marginBottom: '14px', padding: '10px 12px', background: 'var(--bg-sunk)', borderRadius: '6px' }}>
             Searches all 15 CFL North counties. Healthcare is the only auto-skip — everything else commercial is in-ICP.
           </div>
           <button style={styles.primaryBtn} onClick={runApolloSearch} disabled={isApolloSearching}>
@@ -1776,12 +1776,12 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
               <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />
             ))}
             {prospects.length > 50 && (
-              <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: '#7a8aa3', fontStyle: 'italic' }}>
+              <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic' }}>
                 Showing top 50 of {prospects.length}. Refine filters to narrow.
               </div>
             )}
             {prospects.length === 0 && (
-              <div style={{ textAlign: 'center', padding: '40px', color: '#7a8aa3', fontSize: '13px' }}>
+              <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-3)', fontSize: '13px' }}>
                 No prospects match your filters.
               </div>
             )}
@@ -1805,11 +1805,11 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
   const cardStyle = isDead
     ? { ...styles.prospectCard, opacity: 0.5, borderStyle: 'dashed' }
     : isCustomer
-    ? { ...styles.prospectCard, borderColor: 'rgba(34, 197, 94, 0.3)', background: 'rgba(34, 197, 94, 0.03)' }
+    ? { ...styles.prospectCard, borderColor: 'color-mix(in oklch, var(--ok) 30%, transparent)', background: 'var(--ok-soft)' }
     : isPursueLater
-    ? { ...styles.prospectCard, borderColor: 'rgba(99, 130, 175, 0.3)' }
+    ? { ...styles.prospectCard, borderColor: 'color-mix(in oklch, var(--info) 30%, transparent)' }
     : prospect.needsEnrichment
-    ? { ...styles.prospectCard, borderColor: 'rgba(251, 191, 36, 0.25)', background: 'rgba(251, 191, 36, 0.02)' }
+    ? { ...styles.prospectCard, borderColor: 'color-mix(in oklch, var(--warn) 30%, transparent)', background: 'var(--warn-soft)' }
     : styles.prospectCard;
 
   return (
@@ -1817,7 +1817,7 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '20px' }}>
         <div style={{ flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px', flexWrap: 'wrap' }}>
-            <div style={{ fontSize: '14px', fontWeight: 600 }}>{prospect.name || <span style={{ color: '#7a8aa3', fontStyle: 'italic' }}>(no contact name)</span>}</div>
+            <div style={{ fontSize: '14px', fontWeight: 600 }}>{prospect.name || <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>(no contact name)</span>}</div>
             <span style={styles.badge(segmentBadgeColor(prospect.segment))}>{prospect.segment}</span>
             {isCustomer && (
               <span style={styles.badge('green')} title={prospect.customerMatch ? `Auto-matched to existing customer: ${prospect.customerMatch.name}` : 'Manually marked as customer'}>
@@ -1837,33 +1837,33 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             {rec?.sentAt && <span style={styles.badge('amber')}><Send size={10} /> Sent</span>}
             {prospect.parentProspectId && <span style={styles.badge('navy')} title={`Multi-thread peer · added from ${prospect.source || 'a parent prospect'}`}><UserPlus size={10} /> peer</span>}
           </div>
-          <div style={{ fontSize: '12px', color: '#a8b5c9', marginBottom: '4px' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-2)', marginBottom: '4px' }}>
             {prospect.title || <span style={{ fontStyle: 'italic' }}>(no title)</span>} · {prospect.company}
           </div>
-          <div style={{ fontSize: '11px', color: '#7a8aa3', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+          <div style={{ fontSize: '11px', color: 'var(--text-3)', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
             <span><MapPin size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {prospect.city || '?'}, {prospect.county || '?'}</span>
             {prospect.email && <span><Mail size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {prospect.email}</span>}
-            <span style={{ color: '#5a6b85' }}>· source: {prospect.source}</span>
+            <span style={{ color: 'var(--text-3)' }}>· source: {prospect.source}</span>
           </div>
           {prospect.needsEnrichment && (prospect.enrichmentReasons || []).length > 0 && (
-            <div style={{ fontSize: '11px', color: '#fbbf24', marginTop: '6px', fontStyle: 'italic' }}>
+            <div style={{ fontSize: '11px', color: 'var(--warn)', marginTop: '6px', fontStyle: 'italic' }}>
               ⚠ {prospect.enrichmentReasons.join(' · ')}
             </div>
           )}
           {/* Apollo enrichment proposal — shown when Apollo returned data awaiting user approval */}
           {proposedEnrichment?.[prospect.id]?.matched && (
-            <div style={{ marginTop: '12px', padding: '12px 14px', background: 'rgba(99, 130, 175, 0.1)', border: '1px solid rgba(99, 130, 175, 0.3)', borderRadius: '8px' }}>
-              <div style={{ fontSize: '11px', color: '#93b0d6', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600, marginBottom: '8px' }}>
+            <div style={{ marginTop: '12px', padding: '12px 14px', background: 'color-mix(in oklch, var(--info) 30%, transparent)', border: '1px solid rgba(99, 130, 175, 0.3)', borderRadius: '8px' }}>
+              <div style={{ fontSize: '11px', color: 'var(--info)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600, marginBottom: '8px' }}>
                 Apollo found a match
               </div>
-              <div style={{ fontSize: '12px', color: '#c8d4e8', display: 'grid', gap: '4px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text)', display: 'grid', gap: '4px' }}>
                 <div><strong>Name:</strong> {proposedEnrichment[prospect.id].person.name}</div>
                 {proposedEnrichment[prospect.id].person.title && <div><strong>Title:</strong> {proposedEnrichment[prospect.id].person.title}</div>}
                 {proposedEnrichment[prospect.id].person.email && (
                   <div>
                     <strong>Email:</strong> {proposedEnrichment[prospect.id].person.email}
                     {proposedEnrichment[prospect.id].person.emailStatus && (
-                      <span style={{ marginLeft: '8px', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: proposedEnrichment[prospect.id].person.emailStatus === 'verified' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(251, 191, 36, 0.2)', color: proposedEnrichment[prospect.id].person.emailStatus === 'verified' ? '#4ade80' : '#fbbf24' }}>
+                      <span style={{ marginLeft: '8px', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: proposedEnrichment[prospect.id].person.emailStatus === 'verified' ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : 'color-mix(in oklch, var(--warn) 30%, transparent)', color: proposedEnrichment[prospect.id].person.emailStatus === 'verified' ? 'var(--ok)' : 'var(--warn)' }}>
                         {proposedEnrichment[prospect.id].person.emailStatus}
                       </span>
                     )}
@@ -1871,10 +1871,10 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
                 )}
                 {proposedEnrichment[prospect.id].person.phone && <div><strong>Phone:</strong> {proposedEnrichment[prospect.id].person.phone}</div>}
                 {proposedEnrichment[prospect.id].person.linkedinUrl && (
-                  <div><strong>LinkedIn:</strong> <a href={proposedEnrichment[prospect.id].person.linkedinUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#93b0d6' }}>profile</a></div>
+                  <div><strong>LinkedIn:</strong> <a href={proposedEnrichment[prospect.id].person.linkedinUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--info)' }}>profile</a></div>
                 )}
                 {proposedEnrichment[prospect.id].person.organizationName && (
-                  <div style={{ fontSize: '11px', color: '#7a8aa3' }}>Apollo says they work at: {proposedEnrichment[prospect.id].person.organizationName}</div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-3)' }}>Apollo says they work at: {proposedEnrichment[prospect.id].person.organizationName}</div>
                 )}
               </div>
               <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
@@ -1888,9 +1888,9 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             </div>
           )}
           {proposedEnrichment?.[prospect.id]?.matched === false && (
-            <div style={{ marginTop: '8px', fontSize: '11px', color: '#7a8aa3', fontStyle: 'italic' }}>
+            <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-3)', fontStyle: 'italic' }}>
               Apollo: no match found · {proposedEnrichment[prospect.id].message}
-              <button style={{ marginLeft: '8px', background: 'transparent', border: 'none', color: '#93b0d6', fontSize: '11px', cursor: 'pointer', textDecoration: 'underline' }} onClick={() => dismissEnrichment(prospect.id)}>
+              <button style={{ marginLeft: '8px', background: 'transparent', border: 'none', color: 'var(--info)', fontSize: '11px', cursor: 'pointer', textDecoration: 'underline' }} onClick={() => dismissEnrichment(prospect.id)}>
                 dismiss
               </button>
             </div>
@@ -1952,7 +1952,7 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
                   </button>
                 )}
                 <div style={{ borderTop: '1px solid rgba(232, 236, 243, 0.08)', margin: '4px 0' }} />
-                <button style={{ ...styles.statusMenuItem, color: '#ff6b85' }} onClick={() => { confirmDelete(prospect); setMenuOpen(false); }}>
+                <button style={{ ...styles.statusMenuItem, color: 'var(--danger)' }} onClick={() => { confirmDelete(prospect); setMenuOpen(false); }}>
                   <X size={12} /> Delete from pool
                 </button>
               </div>
@@ -1985,7 +1985,7 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
 
       {clusters.length === 0 ? (
         <div style={styles.card}>
-          <div style={{ textAlign: 'center', padding: '40px', color: '#7a8aa3' }}>
+          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-3)' }}>
             <Compass size={32} style={{ marginBottom: '12px' }} />
             <div style={{ fontSize: '14px' }}>No clusters yet. Add prospects via Find → Apollo or Manual Add.</div>
           </div>
@@ -2000,7 +2000,7 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
                   <div style={{ fontSize: '18px', fontWeight: 700 }}>{cluster.county} County</div>
                   <span style={styles.badge('amber')}>Trip Score: {cluster.tripScore}</span>
                 </div>
-                <div style={{ fontSize: '13px', color: '#a8b5c9', marginTop: '4px' }}>
+                <div style={{ fontSize: '13px', color: 'var(--text-2)', marginTop: '4px' }}>
                   {cluster.size} prospects · {cluster.withEmail} reachable by email · {Object.entries(cluster.bySegment).map(([s, n]) => `${n} ${s}`).join(' · ')}
                 </div>
               </div>
@@ -2012,7 +2012,7 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
                   <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />
                 ))}
                 {cluster.prospects.length > 20 && (
-                  <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: '#7a8aa3', fontStyle: 'italic' }}>
+                  <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic' }}>
                     +{cluster.prospects.length - 20} more in this cluster
                   </div>
                 )}
@@ -2032,7 +2032,7 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
   const [diagOpen, setDiagOpen] = useState(false);
   const diag = research?._diagnostic;
   const specificity = research?.specificityRating || 'unknown';
-  const specColor = specificity === 'high' ? '#4ade80' : specificity === 'medium' ? '#fbbf24' : '#ff6b85';
+  const specColor = specificity === 'high' ? 'var(--ok)' : specificity === 'medium' ? 'var(--warn)' : 'var(--danger)';
 
   return (
     <>
@@ -2042,21 +2042,21 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
 
       {isResearching ? (
         <div style={{ ...styles.card, textAlign: 'center', padding: '60px' }}>
-          <Loader2 size={32} className="spin" style={{ color: '#ff6b85', marginBottom: '16px' }} />
+          <Loader2 size={32} className="spin" style={{ color: 'var(--danger)', marginBottom: '16px' }} />
           <div style={{ fontSize: '15px', fontWeight: 500 }}>Researching {prospect.company}…</div>
-          <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '8px' }}>Running multiple web searches…</div>
+          <div style={{ fontSize: '12px', color: 'var(--text-3)', marginTop: '8px' }}>Running multiple web searches…</div>
         </div>
       ) : research && (
         <>
           {/* Diagnostic banner — shows whether real research happened */}
           {diag && (
             <div style={{ ...styles.card, marginBottom: '12px', padding: '14px 18px',
-              background: diag.webSearchInvoked && diag.sourceCount > 0 ? 'rgba(34, 197, 94, 0.06)'
-                : diag.webSearchInvoked ? 'rgba(251, 191, 36, 0.06)'
-                : 'rgba(255, 107, 133, 0.06)',
-              borderColor: diag.webSearchInvoked && diag.sourceCount > 0 ? 'rgba(34, 197, 94, 0.2)'
-                : diag.webSearchInvoked ? 'rgba(251, 191, 36, 0.2)'
-                : 'rgba(255, 107, 133, 0.2)' }}>
+              background: diag.webSearchInvoked && diag.sourceCount > 0 ? 'var(--ok-soft)'
+                : diag.webSearchInvoked ? 'var(--warn-soft)'
+                : 'var(--danger-soft)',
+              borderColor: diag.webSearchInvoked && diag.sourceCount > 0 ? 'color-mix(in oklch, var(--ok) 30%, transparent)'
+                : diag.webSearchInvoked ? 'color-mix(in oklch, var(--warn) 30%, transparent)'
+                : 'color-mix(in oklch, var(--danger) 30%, transparent)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setDiagOpen(!diagOpen)}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                   {diag.webSearchInvoked && diag.sourceCount > 0 ? (
@@ -2076,7 +2076,7 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
                         ? `Research failed · ${diag.errorMessage}`
                         : `No web search invoked · Claude answered from training data`}
                     </div>
-                    <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '2px' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '2px' }}>
                       Specificity: <span style={{ color: specColor, fontWeight: 600 }}>{specificity}</span>
                       {research.specificityNote ? ` · ${research.specificityNote}` : ''}
                     </div>
@@ -2087,7 +2087,7 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
                 </button>
               </div>
               {diagOpen && (
-                <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', fontSize: '12px', color: '#a8b5c9' }}>
+                <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', fontSize: '12px', color: 'var(--text-2)' }}>
                   <div style={{ marginBottom: '8px' }}><strong>Searches performed ({diag.webSearchCount}):</strong></div>
                   {diag.webSearchQueries.length > 0 ? (
                     <ul style={{ margin: '0 0 12px 18px', padding: 0 }}>
@@ -2103,14 +2103,14 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
                     <ul style={{ margin: '0 0 12px 18px', padding: 0 }}>
                       {diag.sources.map((s, i) => (
                         <li key={i} style={{ marginBottom: '3px' }}>
-                          {s.url ? <a href={s.url} target="_blank" rel="noopener noreferrer" style={{ color: '#93b0d6' }}>{s.title || s.url}</a> : s.title || '(no title)'}
+                          {s.url ? <a href={s.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--info)' }}>{s.title || s.url}</a> : s.title || '(no title)'}
                         </li>
                       ))}
                     </ul>
                   ) : (
                     <div style={{ marginBottom: '12px', fontStyle: 'italic' }}>No citations returned.</div>
                   )}
-                  <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '10px' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '10px' }}>
                     API call: {diag.apiCallSucceeded ? '✓ succeeded' : '✗ failed'} · Response blocks: {diag.rawResponseBlocks.join(', ') || '(none)'}
                     {diag.errorMessage ? ` · Error: ${diag.errorMessage}` : ''}
                   </div>
@@ -2123,8 +2123,8 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
               <div style={styles.sectionTitle}><Sparkles size={14} /> AI Research</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <div style={{ fontSize: '12px', color: '#7a8aa3' }}>Fit Score</div>
-                <div style={{ fontSize: '24px', fontWeight: 700, color: research.fitScore > 75 ? '#4ade80' : '#fbbf24' }}>{research.fitScore}</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-3)' }}>Fit Score</div>
+                <div style={{ fontSize: '24px', fontWeight: 700, color: research.fitScore > 75 ? 'var(--ok)' : 'var(--warn)' }}>{research.fitScore}</div>
               </div>
             </div>
 
@@ -2133,15 +2133,42 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
 
             <div style={{ marginBottom: '20px' }}>
               <SectionLabel>Pain Signals</SectionLabel>
-              {research.painSignals.map((p, i) => (
-                <div key={i} style={{ fontSize: '13px', lineHeight: '1.6', padding: '8px 12px', background: 'rgba(200, 16, 46, 0.06)', borderLeft: '2px solid #C8102E', borderRadius: '4px', marginBottom: '6px' }}>{p}</div>
-              ))}
+              <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 'var(--space-2)' }}>
+                {research.painSignals.map((p, i) => {
+                  // Detect [SPECIFIC] / [INFERRED] prefix and render as a tag
+                  const tagMatch = (p || '').match(/^\[(SPECIFIC|INFERRED)\]\s*/i);
+                  const tag = tagMatch ? tagMatch[1].toUpperCase() : null;
+                  const text = tag ? p.slice(tagMatch[0].length) : p;
+                  const isSpecific = tag === 'SPECIFIC';
+                  return (
+                    <li key={i} style={{ display: 'grid', gridTemplateColumns: '24px 1fr', gap: 'var(--space-3)', alignItems: 'baseline', padding: 'var(--space-2) 0' }}>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-12)', fontWeight: 600, color: 'var(--text-3)', textAlign: 'right' }}>{String(i + 1).padStart(2, '0')}</span>
+                      <div>
+                        {tag && (
+                          <span style={{
+                            display: 'inline-block',
+                            fontSize: '10px',
+                            fontWeight: 700,
+                            letterSpacing: '0.08em',
+                            padding: '1px 6px',
+                            borderRadius: 'var(--r-pill)',
+                            marginRight: 'var(--space-2)',
+                            background: isSpecific ? 'var(--ok-soft)' : 'var(--bg-sunk)',
+                            color: isSpecific ? 'var(--ok)' : 'var(--text-3)',
+                          }}>{tag}</span>
+                        )}
+                        <span style={{ fontSize: 'var(--fs-14)', lineHeight: 1.55, color: 'var(--text)' }}>{text}</span>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
             </div>
 
             <Section label="Why This Fits SHP">{research.fitReasoning}</Section>
 
-            <div style={{ padding: '16px', background: 'rgba(34, 197, 94, 0.06)', border: '1px solid rgba(34, 197, 94, 0.15)', borderRadius: '10px' }}>
-              <div style={{ fontSize: '11px', color: '#4ade80', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px', fontWeight: 600 }}>Suggested Opening</div>
+            <div style={{ padding: '16px', background: 'var(--ok-soft)', border: '1px solid rgba(34, 197, 94, 0.15)', borderRadius: '10px' }}>
+              <div style={{ fontSize: '11px', color: 'var(--ok)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px', fontWeight: 600 }}>Suggested Opening</div>
               <div style={{ fontSize: '14px', lineHeight: '1.6' }}>"{research.openingHook}"</div>
             </div>
           </div>
@@ -2164,7 +2191,7 @@ function Section({ label, children }) {
 }
 
 function SectionLabel({ children }) {
-  return <div style={{ fontSize: '11px', color: '#7a8aa3', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px', fontWeight: 500 }}>{children}</div>;
+  return <div style={{ fontSize: '11px', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px', fontWeight: 500 }}>{children}</div>;
 }
 
 // =================================================================
@@ -2177,12 +2204,12 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
     <>
       <button style={{ ...styles.secondaryBtn, marginBottom: '16px' }} onClick={() => setView('research')}>← Back</button>
       <div style={styles.pageTitle}>Review & Send</div>
-      <div style={styles.pageSubtitle}>To: {prospect.email || <span style={{ color: '#fbbf24' }}>no email — add manually</span>}</div>
+      <div style={styles.pageSubtitle}>To: {prospect.email || <span style={{ color: 'var(--warn)' }}>no email — add manually</span>}</div>
 
       {!isDrafting && draftDiagnostic && (
         <div style={{ ...styles.card, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: '10px',
-          background: isAiDraft ? 'rgba(34, 197, 94, 0.06)' : 'rgba(251, 191, 36, 0.06)',
-          borderColor: isAiDraft ? 'rgba(34, 197, 94, 0.2)' : 'rgba(251, 191, 36, 0.2)' }}>
+          background: isAiDraft ? 'var(--ok-soft)' : 'var(--warn-soft)',
+          borderColor: isAiDraft ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : 'color-mix(in oklch, var(--warn) 30%, transparent)' }}>
           {isAiDraft
             ? <CheckCircle2 size={16} color="#4ade80" />
             : <AlertCircle size={16} color="#fbbf24" />}
@@ -2196,9 +2223,9 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
 
       {isDrafting ? (
         <div style={{ ...styles.card, textAlign: 'center', padding: '60px' }}>
-          <Loader2 size={32} className="spin" style={{ color: '#ff6b85', marginBottom: '16px' }} />
+          <Loader2 size={32} className="spin" style={{ color: 'var(--danger)', marginBottom: '16px' }} />
           <div style={{ fontSize: '15px', fontWeight: 500 }}>Writing personalized email in Anthony's voice…</div>
-          <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '6px' }}>Weaving in research findings, voice guide, and proof points.</div>
+          <div style={{ fontSize: '12px', color: 'var(--text-3)', marginTop: '6px' }}>Weaving in research findings, voice guide, and proof points.</div>
         </div>
       ) : (
         <>
@@ -2225,14 +2252,14 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
 
             {(pdRecords[prospect.id]?.leadId || pdRecords[prospect.id]?.dealId) && (
               <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(232, 236, 243, 0.06)' }}>
-                <div style={{ fontSize: '11px', color: '#7a8aa3', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Alternative</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Alternative</div>
                 <button style={{ ...styles.secondaryBtn, fontSize: '12px' }} onClick={openInPipedrive}>
                   <ExternalLink size={12} /> Open {pdRecords[prospect.id]?.leadId ? 'lead' : 'deal'} in Pipedrive (compose there instead)
                 </button>
               </div>
             )}
 
-            <div style={{ marginTop: '14px', padding: '10px 12px', background: 'rgba(34, 197, 94, 0.06)', borderRadius: '8px', fontSize: '12px', color: '#4ade80', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+            <div style={{ marginTop: '14px', padding: '10px 12px', background: 'var(--ok-soft)', borderRadius: '8px', fontSize: '12px', color: 'var(--ok)', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
               <CheckCircle2 size={13} style={{ flexShrink: 0, marginTop: '2px' }} />
               <div>
                 <strong>M365↔Pipedrive sync handles logging.</strong> Once you send from Outlook, the email auto-appears in the deal timeline. No Smart BCC required.
@@ -2248,10 +2275,10 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
 function SendStep({ styles, num, title, sub, done, disabled, loading, onClick, btnLabel, icon: Icon }) {
   return (
     <div style={{ display: 'flex', gap: '14px', marginBottom: '14px', alignItems: 'center' }}>
-      <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: done ? '#4ade80' : 'rgba(232, 236, 243, 0.1)', color: done ? '#0a1628' : '#a8b5c9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700 }}>{num}</div>
+      <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: done ? 'var(--ok)' : 'var(--border-strong)', color: done ? 'var(--shp-red-on)' : 'var(--text-2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700 }}>{num}</div>
       <div style={{ flex: 1 }}>
         <div style={{ fontSize: '13px', fontWeight: 600 }}>{title}</div>
-        <div style={{ fontSize: '12px', color: '#7a8aa3' }}>{sub}</div>
+        <div style={{ fontSize: '12px', color: 'var(--text-3)' }}>{sub}</div>
       </div>
       <button style={done ? styles.secondaryBtn : styles.primaryBtn} onClick={onClick} disabled={disabled || loading}>
         {loading ? <Loader2 size={14} className="spin" /> : <Icon size={14} />}
@@ -2282,7 +2309,7 @@ function PipelineView({ styles, pdConnected, pdMeta, stageDeals, syncPipeline, i
       {!pdConnected ? (
         <div style={styles.card}>
           <div style={{ textAlign: 'center', padding: '40px 20px' }}>
-            <Briefcase size={32} style={{ color: '#7a8aa3', marginBottom: '12px' }} />
+            <Briefcase size={32} style={{ color: 'var(--text-3)', marginBottom: '12px' }} />
             <div style={{ fontSize: '15px', fontWeight: 500, marginBottom: '6px' }}>Pipedrive not connected</div>
             <button style={styles.primaryBtn} onClick={() => setView('settings')}><Key size={14} /> Settings</button>
           </div>
@@ -2293,19 +2320,19 @@ function PipelineView({ styles, pdConnected, pdMeta, stageDeals, syncPipeline, i
             <div key={stage.id} style={styles.pipelineCol}>
               <div style={styles.pipelineHeader}>
                 <span style={{ flex: 1, minWidth: 0, lineHeight: 1.3 }} title={stage.name}>{stage.name}</span>
-                <span style={{ background: 'rgba(232, 236, 243, 0.08)', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', flexShrink: 0 }}>{(stageDeals[stage.id] || []).length}</span>
+                <span style={{ background: 'var(--border)', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', flexShrink: 0 }}>{(stageDeals[stage.id] || []).length}</span>
               </div>
               {(stageDeals[stage.id] || []).map(deal => (
                 <div key={deal.id} style={styles.pipelineCard}>
                   <div style={{ fontWeight: 600, fontSize: '12px', marginBottom: '3px' }}>{deal.title}</div>
-                  <div style={{ fontSize: '11px', color: '#7a8aa3', marginBottom: '6px' }}>{deal.org_name || ''}{deal.person_name ? ` · ${deal.person_name}` : ''}</div>
-                  <a href={`https://app.pipedrive.com/deal/${deal.id}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: '10px', color: '#93b0d6', display: 'inline-flex', alignItems: 'center', gap: '3px', textDecoration: 'none' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--text-3)', marginBottom: '6px' }}>{deal.org_name || ''}{deal.person_name ? ` · ${deal.person_name}` : ''}</div>
+                  <a href={`https://app.pipedrive.com/deal/${deal.id}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: '10px', color: 'var(--info)', display: 'inline-flex', alignItems: 'center', gap: '3px', textDecoration: 'none' }}>
                     <ExternalLink size={9} /> Open in PD
                   </a>
                 </div>
               ))}
               {(stageDeals[stage.id] || []).length === 0 && (
-                <div style={{ fontSize: '11px', color: '#5a6b85', textAlign: 'center', padding: '20px 8px', fontStyle: 'italic' }}>No deals</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-3)', textAlign: 'center', padding: '20px 8px', fontStyle: 'italic' }}>No deals</div>
               )}
             </div>
           ))}
@@ -2351,23 +2378,23 @@ function CoachView({ styles, coachTab, setCoachTab, coachSelectedSegment, setCoa
             <div key={level} style={styles.card}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
                 <div>
-                  <div style={{ fontSize: '15px', fontWeight: 700, color: level === 'level1' ? '#4ade80' : level === 'level2' ? '#fbbf24' : '#ff6b85' }}>{t.title}</div>
-                  <div style={{ fontSize: '12px', color: '#a8b5c9', marginTop: '2px' }}>{t.purpose}</div>
+                  <div style={{ fontSize: '15px', fontWeight: 700, color: level === 'level1' ? 'var(--ok)' : level === 'level2' ? 'var(--warn)' : 'var(--danger)' }}>{t.title}</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-2)', marginTop: '2px' }}>{t.purpose}</div>
                 </div>
                 <button style={{ ...styles.secondaryBtn, padding: '6px 12px', fontSize: '12px' }} onClick={() => copyToClipboard(t.questions.join('\n'))}>
                   <Copy size={11} /> Copy
                 </button>
               </div>
               {t.questions.map((q, i) => (
-                <div key={i} style={{ padding: '10px 12px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '6px', marginBottom: '6px', fontSize: '13px', lineHeight: '1.5' }}>
+                <div key={i} style={{ padding: '10px 12px', background: 'var(--bg-sunk)', borderRadius: '6px', marginBottom: '6px', fontSize: '13px', lineHeight: '1.5' }}>
                   {q}
                 </div>
               ))}
             </div>
           ))}
 
-          <div style={{ ...styles.card, background: 'rgba(99, 130, 175, 0.08)', borderColor: 'rgba(99, 130, 175, 0.2)' }}>
-            <div style={{ fontSize: '13px', color: '#93b0d6', display: 'flex', gap: '10px' }}>
+          <div style={{ ...styles.card, background: 'var(--info-soft)', borderColor: 'color-mix(in oklch, var(--info) 30%, transparent)' }}>
+            <div style={{ fontSize: '13px', color: 'var(--info)', display: 'flex', gap: '10px' }}>
               <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
               <div>
                 <div style={{ fontWeight: 600, marginBottom: '4px' }}>Reminder</div>
@@ -2392,7 +2419,7 @@ function CoachView({ styles, coachTab, setCoachTab, coachSelectedSegment, setCoa
                   <Copy size={11} /> Copy
                 </button>
               </div>
-              <pre style={{ background: 'rgba(10, 22, 40, 0.5)', padding: '14px', borderRadius: '8px', fontSize: '12px', lineHeight: '1.6', whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: 0 }}>
+              <pre style={{ background: 'var(--bg-sunk)', padding: '14px', borderRadius: '8px', fontSize: '12px', lineHeight: '1.6', whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: 0 }}>
                 {template}
               </pre>
             </div>
@@ -2402,28 +2429,38 @@ function CoachView({ styles, coachTab, setCoachTab, coachSelectedSegment, setCoa
 
       {coachTab === 'reversing' && (
         <>
-          <div style={{ ...styles.card, background: 'rgba(99, 130, 175, 0.08)', borderColor: 'rgba(99, 130, 175, 0.2)', marginBottom: '16px' }}>
-            <div style={{ fontSize: '13px', color: '#93b0d6' }}>
+          <div style={{ ...styles.card, background: 'var(--info-soft)', borderColor: 'color-mix(in oklch, var(--info) 30%, transparent)', marginBottom: '16px' }}>
+            <div style={{ fontSize: '13px', color: 'var(--info)' }}>
               When a prospect replies with a vague brush-off, don't accept it at face value. Reverse it back to surface the real signal.
             </div>
           </div>
           {Object.entries(REVERSING_RESPONSES).map(([key, r]) => (
             <div key={key} style={styles.card}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
-                <div style={{ fontSize: '13px', color: '#fbbf24', fontWeight: 600 }}>When they say:</div>
-                <button style={{ ...styles.secondaryBtn, padding: '6px 12px', fontSize: '12px' }} onClick={() => copyToClipboard(r.reversal)}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--space-4)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--fs-12)', color: 'var(--warn)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--warn)' }} />
+                  When they say
+                </div>
+                <button style={{ ...styles.secondaryBtn, padding: '6px 12px', fontSize: 'var(--fs-12)' }} onClick={() => copyToClipboard(r.reversal)}>
                   <Copy size={11} /> Copy reversal
                 </button>
               </div>
-              <div style={{ fontSize: '14px', fontStyle: 'italic', color: '#c8d4e8', marginBottom: '14px', padding: '10px 12px', background: 'rgba(245, 158, 11, 0.06)', borderLeft: '2px solid #fbbf24', borderRadius: '4px' }}>
-                "{r.pattern}"
+              {/* Quote pattern: large quote glyph + indented italic body. No side stripe. */}
+              <blockquote style={{ margin: '0 0 var(--space-5) 0', padding: '0 0 0 var(--space-5)', position: 'relative', fontStyle: 'italic', fontSize: 'var(--fs-16)', lineHeight: 1.5, color: 'var(--text)' }}>
+                <span aria-hidden="true" style={{ position: 'absolute', left: 0, top: -4, fontSize: 32, lineHeight: 1, color: 'var(--warn)', fontFamily: 'serif' }}>“</span>
+                {r.pattern}
+                <span aria-hidden="true" style={{ fontSize: 32, lineHeight: 0, color: 'var(--warn)', fontFamily: 'serif', marginLeft: 2 }}>”</span>
+              </blockquote>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--fs-12)', color: 'var(--ok)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 'var(--space-2)' }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ok)' }} />
+                You reverse with
               </div>
-              <div style={{ fontSize: '13px', color: '#4ade80', fontWeight: 600, marginBottom: '6px' }}>You reverse with:</div>
-              <div style={{ fontSize: '14px', padding: '12px', background: 'rgba(34, 197, 94, 0.06)', borderLeft: '2px solid #4ade80', borderRadius: '4px', marginBottom: '10px', lineHeight: '1.6' }}>
+              <div style={{ fontSize: 'var(--fs-15)', padding: 'var(--space-3) var(--space-4)', background: 'var(--ok-soft)', borderRadius: 'var(--r-md)', marginBottom: 'var(--space-3)', lineHeight: 1.6, color: 'var(--text)' }}>
                 {r.reversal}
               </div>
-              <div style={{ fontSize: '12px', color: '#a8b5c9', fontStyle: 'italic' }}>
-                <strong>Why it works:</strong> {r.why}
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-2)' }}>
+                <strong style={{ color: 'var(--text)' }}>Why it works:</strong> {r.why}
               </div>
             </div>
           ))}
@@ -2466,19 +2503,19 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Key size={14} /> Pipedrive Connection</div>
-        <div style={{ padding: '14px', background: pdConnected ? 'rgba(34, 197, 94, 0.06)' : 'rgba(255, 107, 133, 0.06)', border: `1px solid ${pdConnected ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 107, 133, 0.15)'}`, borderRadius: '10px', fontSize: '13px', marginBottom: '20px' }}>
+        <div style={{ padding: '14px', background: pdConnected ? 'var(--ok-soft)' : 'var(--danger-soft)', border: `1px solid ${pdConnected ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : 'color-mix(in oklch, var(--danger) 30%, transparent)'}`, borderRadius: '10px', fontSize: '13px', marginBottom: '20px' }}>
           {pdConnected ? (
             <>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#4ade80', fontWeight: 600 }}><CheckCircle2 size={14} /> Connected as {pdMeta.userName} ({pdMeta.userEmail})</div>
-              <div style={{ color: '#a8b5c9', fontSize: '12px' }}>Pipeline: <strong>{pdMeta.defaultPipelineName}</strong></div>
-              <div style={{ color: '#a8b5c9', fontSize: '12px', marginTop: '4px' }}>Stages: {pdMeta.stages.map(s => s.name).join(' → ')}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: 'var(--ok)', fontWeight: 600 }}><CheckCircle2 size={14} /> Connected as {pdMeta.userName} ({pdMeta.userEmail})</div>
+              <div style={{ color: 'var(--text-2)', fontSize: '12px' }}>Pipeline: <strong>{pdMeta.defaultPipelineName}</strong></div>
+              <div style={{ color: 'var(--text-2)', fontSize: '12px', marginTop: '4px' }}>Stages: {pdMeta.stages.map(s => s.name).join(' → ')}</div>
             </>
           ) : (
             <>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#ff6b85', fontWeight: 600 }}><AlertCircle size={14} /> Not connected</div>
-              <div style={{ color: '#a8b5c9', fontSize: '12px' }}>Set <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px' }}>PIPEDRIVE_API_TOKEN</code> in Vercel project settings, then redeploy.</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: 'var(--danger)', fontWeight: 600 }}><AlertCircle size={14} /> Not connected</div>
+              <div style={{ color: 'var(--text-2)', fontSize: '12px' }}>Set <code style={{ background: 'var(--bg-sunk)', padding: '2px 6px', borderRadius: '4px' }}>PIPEDRIVE_API_TOKEN</code> in Vercel project settings, then redeploy.</div>
               {pdConnectError && (
-                <div style={{ color: '#ff6b85', fontSize: '12px', marginTop: '8px', fontFamily: 'monospace' }}>
+                <div style={{ color: 'var(--danger)', fontSize: '12px', marginTop: '8px', fontFamily: 'monospace' }}>
                   Last error: {pdConnectError}
                 </div>
               )}
@@ -2528,7 +2565,7 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
         <div style={{ marginTop: '16px' }}>
           <label style={styles.label}>Email signature (used at the bottom of every cold draft)</label>
           <textarea style={{ ...styles.input, minHeight: '180px', fontFamily: 'inherit', lineHeight: '1.5', resize: 'vertical' }} value={config.signature || ''} onChange={e => setConfig({ ...config, signature: e.target.value })} />
-          <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '6px' }}>This exact text gets pasted at the bottom of every cold email draft. Edit freely.</div>
+          <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '6px' }}>This exact text gets pasted at the bottom of every cold email draft. Edit freely.</div>
         </div>
         <button style={{ ...styles.primaryBtn, marginTop: '16px' }} onClick={saveConfig}>
           <CheckCircle2 size={14} /> Save Settings
@@ -2537,8 +2574,8 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Send size={14} /> Send Configuration</div>
-        <div style={{ padding: '14px', background: 'rgba(34, 197, 94, 0.06)', border: '1px solid rgba(34, 197, 94, 0.15)', borderRadius: '10px', fontSize: '13px', marginBottom: '16px', color: '#a8b5c9', lineHeight: '1.6' }}>
-          <div style={{ display: 'flex', gap: '8px', marginBottom: '6px', color: '#4ade80', fontWeight: 600 }}>
+        <div style={{ padding: '14px', background: 'var(--ok-soft)', border: '1px solid rgba(34, 197, 94, 0.15)', borderRadius: '10px', fontSize: '13px', marginBottom: '16px', color: 'var(--text-2)', lineHeight: '1.6' }}>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '6px', color: 'var(--ok)', fontWeight: 600 }}>
             <CheckCircle2 size={14} /> Microsoft 365 ↔ Pipedrive sync
           </div>
           When you click <strong>Open in Outlook</strong> on a draft, the email pre-fills in Outlook web. After you click Send in Outlook, your M365 ↔ Pipedrive sync auto-logs the email to the deal timeline. <strong>No Smart BCC required.</strong>
@@ -2556,7 +2593,7 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
               </option>
             ))}
           </select>
-          <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '6px' }}>
+          <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '6px' }}>
             What time the Day-14 resource follow-up activity should fire in your timezone ({Intl.DateTimeFormat().resolvedOptions().timeZone}).
             Pipedrive stores activity times in UTC; the agent converts your local hour automatically.
           </div>
@@ -2564,28 +2601,28 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
         <div>
           <label style={styles.label}>Smart BCC (optional — only if you want belt-and-suspenders logging)</label>
           <input style={{ ...styles.input, fontFamily: 'monospace' }} placeholder="leave blank if M365 sync handles logging — or paste your Pipedrive Smart BCC address" value={config.smartBcc || ''} onChange={e => setConfig({ ...config, smartBcc: e.target.value })} />
-          <div style={{ fontSize: '11px', color: '#7a8aa3', marginTop: '6px' }}>Find this in Pipedrive → Settings → Tools → BCC. Most users with M365 sync don't need it.</div>
+          <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '6px' }}>Find this in Pipedrive → Settings → Tools → BCC. Most users with M365 sync don't need it.</div>
         </div>
       </div>
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Sparkles size={14} /> Apollo Credits</div>
         {apolloQuota ? (
-          <div style={{ padding: '14px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '10px', fontSize: '13px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ padding: '14px', background: 'var(--bg-sunk)', borderRadius: '10px', fontSize: '13px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
               <div style={{ fontWeight: 600, marginBottom: '4px' }}>
                 {apolloQuota.remaining ?? '—'} of {apolloQuota.total ?? '—'} remaining
-                {apolloQuota.plan && <span style={{ fontWeight: 400, color: '#7a8aa3', marginLeft: '8px' }}>({apolloQuota.plan})</span>}
+                {apolloQuota.plan && <span style={{ fontWeight: 400, color: 'var(--text-3)', marginLeft: '8px' }}>({apolloQuota.plan})</span>}
               </div>
-              <div style={{ fontSize: '12px', color: '#a8b5c9' }}>1 credit per Apollo person-match. Free tier = 50/mo.</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-2)' }}>1 credit per Apollo person-match. Free tier = 50/mo.</div>
             </div>
             <button style={styles.secondaryBtn} onClick={fetchApolloQuota}>
               <RefreshCw size={13} /> Refresh
             </button>
           </div>
         ) : (
-          <div style={{ padding: '14px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '10px', fontSize: '13px', color: '#a8b5c9' }}>
-            Apollo quota unavailable — check that <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px' }}>APOLLO_API_KEY</code> is set in Vercel.
+          <div style={{ padding: '14px', background: 'var(--bg-sunk)', borderRadius: '10px', fontSize: '13px', color: 'var(--text-2)' }}>
+            Apollo quota unavailable — check that <code style={{ background: 'var(--bg-sunk)', padding: '2px 6px', borderRadius: '4px' }}>APOLLO_API_KEY</code> is set in Vercel.
             <button style={{ ...styles.secondaryBtn, marginLeft: '12px' }} onClick={fetchApolloQuota}>
               <RefreshCw size={13} /> Retry
             </button>
@@ -2595,10 +2632,10 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Download size={14} /> Data Export</div>
-        <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '14px', lineHeight: 1.6 }}>
+        <div style={{ fontSize: '13px', color: 'var(--text-2)', marginBottom: '14px', lineHeight: 1.6 }}>
           Download a JSON snapshot of your config, prospect overrides, Pipedrive record IDs, and cached research. Useful for backups or migrating to a new browser.
         </div>
-        <div style={{ fontSize: '12px', color: '#7a8aa3', marginBottom: '14px' }}>
+        <div style={{ fontSize: '12px', color: 'var(--text-3)', marginBottom: '14px' }}>
           Includes: {prospects.length} prospects · {Object.keys(overrides).length} status overrides · {Object.keys(pdRecords).length} Pipedrive links · {Object.keys(researchData).length} cached research entries
         </div>
         <button style={styles.primaryBtn} onClick={exportAllData}>
@@ -2608,7 +2645,7 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><AlertCircle size={14} /> How it works</div>
-        <div style={{ fontSize: '13px', color: '#c8d4e8', lineHeight: '1.7' }}>
+        <div style={{ fontSize: '13px', color: 'var(--text)', lineHeight: '1.7' }}>
           <div style={{ marginBottom: '10px' }}><strong>1. Find:</strong> Browse your seed pool (602 prospects), search Apollo for new ones, or add manually.</div>
           <div style={{ marginBottom: '10px' }}><strong>2. Research:</strong> Claude pulls company snapshot, facility profile, segment-specific pain signals, and an opening hook.</div>
           <div style={{ marginBottom: '10px' }}><strong>3. Draft:</strong> Anthony's voice — humble, peer-tone, "arrow in the quiver" framing — with contextually-relevant SHP customer references when they fit.</div>
@@ -2639,7 +2676,7 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
   const newOnes = candidates.filter(c => !c.alreadyInPool);
   const pickedCount = newOnes.filter(c => picked[c.apolloId]).length;
 
-  const tierColor = (t) => t >= 4 ? '#4ade80' : t === 3 ? '#fbbf24' : t === 2 ? '#93b0d6' : '#7a8aa3';
+  const tierColor = (t) => t >= 4 ? 'var(--ok)' : t === 3 ? 'var(--warn)' : t === 2 ? 'var(--info)' : 'var(--text-3)';
   const tierLabel = (t) => t === 4 ? 'Strategic' : t === 3 ? 'Mgmt' : t === 2 ? 'Tactical' : t === 1 ? 'Frontline' : 'Adjacent';
 
   const handleAdd = () => {
@@ -2652,18 +2689,18 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
       <div style={{ ...styles.modalCard, maxWidth: '720px', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
         <div style={{ marginBottom: '8px' }}>
           <div style={{ fontSize: '18px', fontWeight: 700 }}>Find peers at {parent.company}</div>
-          <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '4px' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-3)', marginTop: '4px' }}>
             Multi-threading from <strong>{parent.name || '(unnamed)'}</strong> ({parent.title || 'unknown title'}). Search is free — adding to the pool is free. Verified emails cost 1 Apollo credit each, applied later when you enrich.
           </div>
         </div>
 
         {isLoading ? (
           <div style={{ textAlign: 'center', padding: '60px 0' }}>
-            <Loader2 size={28} className="spin" style={{ color: '#ff6b85' }} />
+            <Loader2 size={28} className="spin" style={{ color: 'var(--danger)' }} />
             <div style={{ fontSize: '14px', marginTop: '12px' }}>Searching Apollo for peers…</div>
           </div>
         ) : candidates.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '40px 0', color: '#7a8aa3' }}>
+          <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-3)' }}>
             <AlertCircle size={20} style={{ marginBottom: '8px' }} />
             <div style={{ fontSize: '13px' }}>No peers found at this org. Apollo may not index them — try Manual Add.</div>
           </div>
@@ -2687,21 +2724,21 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
                     disabled={c.alreadyInPool}
                     checked={checked}
                     onChange={() => togglePick(c.apolloId)}
-                    style={{ width: '16px', height: '16px', accentColor: '#ff6b85' }}
+                    style={{ width: '16px', height: '16px', accentColor: 'var(--danger)' }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                       <strong style={{ fontSize: '14px' }}>{c.name}</strong>
                       {tier > 0 && (
-                        <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(232, 236, 243, 0.06)', color: tierColor(tier), fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                        <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--bg-sunk)', color: tierColor(tier), fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                           {tierLabel(tier)}
                         </span>
                       )}
-                      {c.alreadyInPool && <span style={{ fontSize: '11px', color: '#7a8aa3' }}>· already in pool</span>}
+                      {c.alreadyInPool && <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>· already in pool</span>}
                     </div>
-                    <div style={{ fontSize: '12px', color: '#a8b5c9' }}>{c.title || '(no title)'}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-2)' }}>{c.title || '(no title)'}</div>
                     {c.linkedinUrl && (
-                      <a href={c.linkedinUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: '11px', color: '#93b0d6' }}>
+                      <a href={c.linkedinUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: '11px', color: 'var(--info)' }}>
                         LinkedIn ↗
                       </a>
                     )}
@@ -2713,7 +2750,7 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
         )}
 
         <div style={{ display: 'flex', gap: '10px', marginTop: '20px', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: '12px', color: '#7a8aa3' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-3)' }}>
             {newOnes.length > 0 && (
               <>{pickedCount} of {newOnes.length} selected · 0 credits cost (enrich separately later)</>
             )}
@@ -2775,50 +2812,50 @@ function BatchEnrichModal({ styles, prospects, clusters, pdRecords, apolloQuota,
     setPicked(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const tierColor = (t) => t >= 4 ? '#4ade80' : t === 3 ? '#fbbf24' : t === 2 ? '#93b0d6' : '#7a8aa3';
+  const tierColor = (t) => t >= 4 ? 'var(--ok)' : t === 3 ? 'var(--warn)' : t === 2 ? 'var(--info)' : 'var(--text-3)';
 
   return (
     <div style={styles.modalOverlay} onClick={isRunning ? undefined : onCancel}>
       <div style={{ ...styles.modalCard, maxWidth: '760px', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
         <div>
           <div style={{ fontSize: '18px', fontWeight: 700 }}>Spend remaining Apollo credits</div>
-          <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '4px' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-3)', marginTop: '4px' }}>
             Ranked by leverage: net-new accounts, multi-thread completion, cluster priority, decision-maker tier.
           </div>
         </div>
 
-        <div style={{ marginTop: '14px', padding: '12px 14px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '14px' }}>
+        <div style={{ marginTop: '14px', padding: '12px 14px', background: 'var(--bg-sunk)', borderRadius: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '14px' }}>
           <div style={{ fontSize: '13px' }}>
             <div><strong>Apollo cycle:</strong> {apolloCycle.cycle} · {daysUntilMonthEnd()} day{daysUntilMonthEnd() === 1 ? '' : 's'} until reset</div>
             {remaining != null && (
-              <div style={{ fontSize: '12px', color: '#a8b5c9', marginTop: '2px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-2)', marginTop: '2px' }}>
                 {remaining} of {apolloQuota.total} credits remaining{apolloCycle.creditsUsedThisCycle > 0 ? ` · ${apolloCycle.creditsUsedThisCycle} used this cycle` : ''}
               </div>
             )}
           </div>
           <div style={{ fontSize: '13px', textAlign: 'right' }}>
-            <div style={{ fontWeight: 700, fontSize: '20px', color: overBudget ? '#ff6b85' : '#4ade80' }}>{pickedCount}</div>
-            <div style={{ fontSize: '11px', color: '#7a8aa3' }}>selected · {pickedCount} credit{pickedCount === 1 ? '' : 's'}</div>
+            <div style={{ fontWeight: 700, fontSize: '20px', color: overBudget ? 'var(--danger)' : 'var(--ok)' }}>{pickedCount}</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-3)' }}>selected · {pickedCount} credit{pickedCount === 1 ? '' : 's'}</div>
           </div>
         </div>
 
         {overBudget && (
-          <div style={{ marginTop: '10px', padding: '10px 12px', background: 'rgba(255, 107, 133, 0.08)', borderRadius: '8px', fontSize: '12px', color: '#ff6b85' }}>
+          <div style={{ marginTop: '10px', padding: '10px 12px', background: 'var(--danger-soft)', borderRadius: '8px', fontSize: '12px', color: 'var(--danger)' }}>
             Selection ({pickedCount}) exceeds remaining credits ({remaining}). Trim selection or proceed knowing some enrichments will fail.
           </div>
         )}
 
         {isRunning ? (
           <div style={{ textAlign: 'center', padding: '40px 0' }}>
-            <Loader2 size={32} className="spin" style={{ color: '#ff6b85', marginBottom: '12px' }} />
+            <Loader2 size={32} className="spin" style={{ color: 'var(--danger)', marginBottom: '12px' }} />
             <div style={{ fontSize: '14px', fontWeight: 500 }}>Enriching {progress.done} of {progress.total}…</div>
-            <div style={{ fontSize: '12px', color: '#7a8aa3', marginTop: '6px' }}>~350ms between calls (rate-limit etiquette).</div>
-            <div style={{ marginTop: '16px', height: '6px', background: 'rgba(232, 236, 243, 0.08)', borderRadius: '3px', overflow: 'hidden' }}>
-              <div style={{ width: `${progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%`, height: '100%', background: 'linear-gradient(90deg, #C8102E, #ff6b85)', transition: 'width 0.3s' }} />
+            <div style={{ fontSize: '12px', color: 'var(--text-3)', marginTop: '6px' }}>~350ms between calls (rate-limit etiquette).</div>
+            <div style={{ marginTop: '16px', height: '6px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden' }}>
+              <div style={{ width: `${progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%`, height: '100%', background: 'var(--shp-red)', transition: 'width 0.3s' }} />
             </div>
           </div>
         ) : candidates.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '40px 0', color: '#7a8aa3' }}>
+          <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-3)' }}>
             <CheckCircle2 size={20} color="#4ade80" style={{ marginBottom: '8px' }} />
             <div style={{ fontSize: '13px' }}>No unenriched candidates. Your pool is clean.</div>
           </div>
@@ -2829,15 +2866,15 @@ function BatchEnrichModal({ styles, prospects, clusters, pdRecords, apolloQuota,
               const checked = !!picked[p.id];
               return (
                 <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 0', borderBottom: '1px solid rgba(232, 236, 243, 0.04)', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={checked} onChange={() => togglePick(p.id)} style={{ width: '16px', height: '16px', accentColor: '#ff6b85' }} />
-                  <div style={{ width: '32px', textAlign: 'center', fontSize: '14px', fontWeight: 700, color: score >= 12 ? '#4ade80' : score >= 8 ? '#fbbf24' : '#7a8aa3' }}>{score}</div>
+                  <input type="checkbox" checked={checked} onChange={() => togglePick(p.id)} style={{ width: '16px', height: '16px', accentColor: 'var(--danger)' }} />
+                  <div style={{ width: '32px', textAlign: 'center', fontSize: '14px', fontWeight: 700, color: score >= 12 ? 'var(--ok)' : score >= 8 ? 'var(--warn)' : 'var(--text-3)' }}>{score}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                       <strong style={{ fontSize: '13px' }}>{p.name || '(no name)'}</strong>
                       {tier > 0 && <span style={{ fontSize: '10px', color: tierColor(tier), fontWeight: 600 }}>T{tier}</span>}
-                      {p.parentProspectId && <span style={{ fontSize: '10px', color: '#93b0d6' }}>peer</span>}
+                      {p.parentProspectId && <span style={{ fontSize: '10px', color: 'var(--info)' }}>peer</span>}
                     </div>
-                    <div style={{ fontSize: '11px', color: '#7a8aa3' }}>{p.title || '(no title)'} · {p.company} · {p.county}</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-3)' }}>{p.title || '(no title)'} · {p.company} · {p.county}</div>
                   </div>
                 </label>
               );
@@ -2861,7 +2898,7 @@ function PursueLaterModal({ styles, date, setDate, onSave, onCancel }) {
     <div style={styles.modalOverlay} onClick={onCancel}>
       <div style={styles.modalCard} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize: '18px', fontWeight: 700, marginBottom: '8px' }}>Pursue Later</div>
-        <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '20px' }}>
+        <div style={{ fontSize: '13px', color: 'var(--text-2)', marginBottom: '20px' }}>
           When should I remind you to revisit this prospect? They'll appear on your Dashboard on this date.
         </div>
         <label style={styles.label}>Revisit Date</label>
@@ -2882,15 +2919,15 @@ function DeleteConfirmModal({ styles, prospect, onConfirm, onCancel }) {
     <div style={styles.modalOverlay} onClick={onCancel}>
       <div style={styles.modalCard} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize: '18px', fontWeight: 700, marginBottom: '8px' }}>Delete from pool?</div>
-        <div style={{ fontSize: '13px', color: '#a8b5c9', marginBottom: '20px', lineHeight: '1.6' }}>
-          This will remove <strong style={{ color: '#e8ecf3' }}>{prospect.name || prospect.company}</strong> from your prospect pool entirely. Pipedrive records (if any) are <strong>not</strong> affected — manage those in Pipedrive directly.
-          <div style={{ marginTop: '10px', padding: '10px 12px', background: 'rgba(255, 107, 133, 0.08)', borderRadius: '6px', fontSize: '12px', color: '#ff6b85' }}>
+        <div style={{ fontSize: '13px', color: 'var(--text-2)', marginBottom: '20px', lineHeight: '1.6' }}>
+          This will remove <strong style={{ color: 'var(--text)' }}>{prospect.name || prospect.company}</strong> from your prospect pool entirely. Pipedrive records (if any) are <strong>not</strong> affected — manage those in Pipedrive directly.
+          <div style={{ marginTop: '10px', padding: '10px 12px', background: 'var(--danger-soft)', borderRadius: '6px', fontSize: '12px', color: 'var(--danger)' }}>
             This action can't be undone from the agent. Re-importing the seed list won't restore deletions.
           </div>
         </div>
         <div style={{ display: 'flex', gap: '10px', marginTop: '24px', justifyContent: 'flex-end' }}>
           <button style={styles.secondaryBtn} onClick={onCancel}>Cancel</button>
-          <button style={{ ...styles.primaryBtn, background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)' }} onClick={onConfirm}>
+          <button style={{ ...styles.primaryBtn, background: 'var(--danger)' }} onClick={onConfirm}>
             <X size={14} /> Delete
           </button>
         </div>
@@ -2902,7 +2939,7 @@ function DeleteConfirmModal({ styles, prospect, onConfirm, onCancel }) {
 function Toast({ styles, toast }) {
   return (
     <div style={styles.toast}>
-      {toast.type === 'error' ? <AlertCircle size={16} color="#ff6b85" /> : <CheckCircle2 size={16} color={toast.type === 'info' ? '#93b0d6' : '#4ade80'} />}
+      {toast.type === 'error' ? <AlertCircle size={16} color="#ff6b85" /> : <CheckCircle2 size={16} color={toast.type === 'info' ? 'var(--info)' : 'var(--ok)'} />}
       {toast.msg}
     </div>
   );
@@ -2911,15 +2948,151 @@ function Toast({ styles, toast }) {
 function GlobalStyles() {
   return (
     <style>{`
+      /* === SHP DESIGN TOKENS (Phase 1: Foundation) ===
+         Light theme is primary. Tokens are scoped to :root so every inline
+         style elsewhere can pull them via var(--token-name). All colors are
+         oklch for perceptual uniformity; neutrals tinted toward SHP red (hue
+         ~25) for subconscious cohesion. */
+
+      :root {
+        /* Brand */
+        --shp-red:        oklch(50% 0.18 25);   /* #C8102E equiv */
+        --shp-red-hover:  oklch(45% 0.19 25);
+        --shp-red-press:  oklch(40% 0.18 25);
+        --shp-red-soft:   oklch(95% 0.04 25);   /* tinted bg for selected/hover states */
+        --shp-red-on:     #ffffff;              /* text color on red surfaces */
+
+        /* Surfaces — warm off-white tinted toward brand red */
+        --bg:             oklch(98.5% 0.005 25);   /* page background */
+        --bg-sunk:        oklch(96.5% 0.006 25);   /* slightly recessed (e.g. cluster row hover) */
+        --surface:        oklch(100% 0 0);          /* card */
+        --surface-2:      oklch(98% 0.004 25);      /* nested surface (modal, popover) */
+
+        /* Borders — subtle, warm-tinted */
+        --border:         oklch(91% 0.008 25);
+        --border-strong:  oklch(83% 0.01 25);
+        --border-subtle:  oklch(95% 0.005 25);
+
+        /* Text */
+        --text:           oklch(22% 0.012 25);   /* primary, near-black with warmth */
+        --text-2:         oklch(38% 0.01 25);    /* secondary */
+        --text-3:         oklch(54% 0.008 25);   /* tertiary / supportive */
+        --text-on-red:    #ffffff;
+        --text-link:      oklch(48% 0.13 250);   /* deliberately not red — keeps red as action color */
+
+        /* Status — accessible against light surfaces */
+        --ok:             oklch(48% 0.14 145);
+        --ok-soft:        oklch(94% 0.05 145);
+        --warn:           oklch(58% 0.14 70);
+        --warn-soft:      oklch(95% 0.06 70);
+        --danger:         oklch(48% 0.18 25);    /* aligns to brand red */
+        --danger-soft:    oklch(95% 0.04 25);
+        --info:           oklch(50% 0.10 250);
+        --info-soft:      oklch(95% 0.03 250);
+
+        /* Segment colors (consistent with badge logic) */
+        --seg-k12:        oklch(45% 0.13 250);
+        --seg-higher:     oklch(46% 0.18 305);
+        --seg-localgov:   oklch(55% 0.14 70);
+        --seg-healthcare: oklch(48% 0.18 25);
+        --seg-other:      oklch(50% 0.01 25);
+
+        /* Spacing — 4pt scale, semantic names */
+        --space-1: 4px;
+        --space-2: 8px;
+        --space-3: 12px;
+        --space-4: 16px;
+        --space-5: 24px;
+        --space-6: 32px;
+        --space-7: 48px;
+        --space-8: 64px;
+        --space-9: 96px;
+
+        /* Radii */
+        --r-sm: 6px;
+        --r-md: 10px;
+        --r-lg: 14px;
+        --r-xl: 20px;
+        --r-pill: 999px;
+
+        /* Type scale (rem-based, app-style fixed scale; not fluid) */
+        --fs-12: 12px;
+        --fs-13: 13px;
+        --fs-14: 14px;
+        --fs-15: 15px;
+        --fs-16: 16px;
+        --fs-18: 18px;
+        --fs-22: 22px;
+        --fs-28: 28px;
+        --fs-32: 32px;
+        --fs-40: 40px;
+
+        /* Shadows — minimal, no glow */
+        --shadow-1: 0 1px 2px oklch(20% 0.01 25 / 6%);
+        --shadow-2: 0 2px 6px oklch(20% 0.01 25 / 8%), 0 1px 2px oklch(20% 0.01 25 / 4%);
+        --shadow-3: 0 12px 32px oklch(20% 0.01 25 / 12%), 0 2px 6px oklch(20% 0.01 25 / 6%);
+
+        /* Type families */
+        --font-ui: 'Hanken Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+        --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', Menlo, monospace;
+
+        /* Motion */
+        --ease: cubic-bezier(0.22, 1, 0.36, 1);   /* ease-out-quart */
+        --t-fast: 120ms;
+        --t-med: 180ms;
+      }
+
+      /* === BASE === */
+      html, body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-ui);
+        font-size: var(--fs-14);
+        line-height: 1.5;
+      }
+
+      /* === MOTION === */
       .spin { animation: spin 1s linear infinite; }
       @keyframes spin { to { transform: rotate(360deg); } }
-      input:focus, textarea:focus, select:focus { border-color: rgba(200, 16, 46, 0.4) !important; }
-      button:hover:not(:disabled) { transform: translateY(-1px); }
-      button:active:not(:disabled) { transform: translateY(0); }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      /* === FORM ELEMENTS === */
+      input, textarea, select, button {
+        font-family: var(--font-ui);
+      }
+      input:focus, textarea:focus, select:focus {
+        border-color: var(--shp-red) !important;
+        outline: 2px solid color-mix(in oklch, var(--shp-red) 25%, transparent);
+        outline-offset: 1px;
+      }
+
+      /* Buttons: subtle hover + press, never lift */
+      button { transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease); }
       button:disabled { opacity: 0.5; cursor: not-allowed; }
-      code { font-family: 'SF Mono', Monaco, monospace; }
-      /* Override the global hover lift for items inside the status dropdown */
-      [data-status-menu] button:hover { transform: none !important; background: rgba(232, 236, 243, 0.08) !important; }
+
+      /* Code / mono */
+      code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+
+      /* Status menu items: no hover-lift, just bg change */
+      [data-status-menu] button:hover { background: var(--bg-sunk) !important; }
+
+      /* Numeric tabular figures for stat displays */
+      .tnum { font-variant-numeric: tabular-nums; }
+
+      /* Links */
+      a { color: var(--text-link); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      /* Scrollbars: subtle, themed */
+      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--r-pill); border: 2px solid var(--bg); }
+      ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
     `}</style>
   );
 }
@@ -2939,55 +3112,323 @@ function normalizeSeed(seed) {
 // === STYLE FACTORY ===
 // =================================================================
 function makeStyles(pdConnected, stagesLen) {
+  // Phase 1 refresh: every value reads from CSS tokens defined in <GlobalStyles />.
+  // No gradients, no glow shadows, no glassmorphism. SHP red used as a scalpel.
   return {
-    container: { minHeight: '100vh', background: 'linear-gradient(180deg, #0a1628 0%, #0f1d35 100%)', color: '#e8ecf3', fontFamily: '"Inter", -apple-system, sans-serif' },
-    header: { borderBottom: '1px solid rgba(232, 236, 243, 0.08)', padding: '20px 32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(10, 22, 40, 0.6)', backdropFilter: 'blur(12px)', position: 'sticky', top: 0, zIndex: 50 },
-    logo: { display: 'flex', alignItems: 'center', gap: '12px' },
-    logoMark: { width: '36px', height: '36px', background: 'linear-gradient(135deg, #C8102E 0%, #8b0a1f 100%)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '14px', letterSpacing: '0.5px', boxShadow: '0 4px 12px rgba(200, 16, 46, 0.3)' },
-    logoText: { fontSize: '15px', fontWeight: 600, letterSpacing: '-0.01em' },
-    logoSub: { fontSize: '11px', color: '#7a8aa3', letterSpacing: '0.05em', textTransform: 'uppercase', marginTop: '2px' },
-    nav: { display: 'flex', gap: '4px', background: 'rgba(232, 236, 243, 0.04)', padding: '4px', borderRadius: '10px' },
-    navBtn: (active) => ({ padding: '8px 16px', borderRadius: '7px', fontSize: '13px', fontWeight: 500, background: active ? 'rgba(200, 16, 46, 0.15)' : 'transparent', color: active ? '#ff6b85' : '#a8b5c9', border: 'none', cursor: 'pointer', transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: '6px' }),
-    pdBadge: (connected) => ({ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 600, padding: '5px 10px', borderRadius: '6px', background: connected ? 'rgba(34, 197, 94, 0.12)' : 'rgba(245, 158, 11, 0.12)', color: connected ? '#4ade80' : '#fbbf24', border: `1px solid ${connected ? 'rgba(34, 197, 94, 0.25)' : 'rgba(245, 158, 11, 0.25)'}`, cursor: 'pointer' }),
-    main: { padding: '32px', maxWidth: '1400px', margin: '0 auto' },
-    pageTitle: { fontSize: '28px', fontWeight: 700, letterSpacing: '-0.02em', marginBottom: '6px' },
-    pageSubtitle: { fontSize: '14px', color: '#7a8aa3', marginBottom: '24px' },
-    statsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px', marginBottom: '24px' },
-    statCard: { background: 'rgba(232, 236, 243, 0.03)', border: '1px solid rgba(232, 236, 243, 0.08)', borderRadius: '12px', padding: '20px' },
-    statLabel: { fontSize: '12px', color: '#7a8aa3', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 500 },
-    statValue: { fontSize: '32px', fontWeight: 700, letterSpacing: '-0.02em', marginTop: '8px' },
-    statSub: { fontSize: '12px', color: '#5a6b85', marginTop: '4px' },
-    card: { background: 'rgba(232, 236, 243, 0.03)', border: '1px solid rgba(232, 236, 243, 0.08)', borderRadius: '14px', padding: '24px', marginBottom: '16px' },
-    sectionTitle: { fontSize: '13px', fontWeight: 600, color: '#a8b5c9', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' },
-    input: { width: '100%', background: 'rgba(10, 22, 40, 0.6)', border: '1px solid rgba(232, 236, 243, 0.1)', borderRadius: '8px', padding: '10px 14px', color: '#e8ecf3', fontSize: '14px', fontFamily: 'inherit', outline: 'none', transition: 'border-color 0.15s', boxSizing: 'border-box' },
-    label: { display: 'block', fontSize: '12px', color: '#a8b5c9', marginBottom: '6px', fontWeight: 500 },
-    primaryBtn: { background: 'linear-gradient(135deg, #C8102E 0%, #a30d26 100%)', color: 'white', border: 'none', borderRadius: '9px', padding: '11px 20px', fontSize: '14px', fontWeight: 600, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '8px', boxShadow: '0 4px 12px rgba(200, 16, 46, 0.25)', transition: 'all 0.15s' },
-    secondaryBtn: { background: 'rgba(232, 236, 243, 0.06)', color: '#e8ecf3', border: '1px solid rgba(232, 236, 243, 0.12)', borderRadius: '9px', padding: '10px 18px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '6px', transition: 'all 0.15s' },
-    prospectCard: { background: 'rgba(232, 236, 243, 0.03)', border: '1px solid rgba(232, 236, 243, 0.08)', borderRadius: '10px', padding: '16px', marginBottom: '8px', transition: 'all 0.15s' },
-    badge: (color) => {
-      const colors = {
-        red: { bg: 'rgba(200, 16, 46, 0.15)', text: '#ff6b85', border: 'rgba(200, 16, 46, 0.3)' },
-        green: { bg: 'rgba(34, 197, 94, 0.12)', text: '#4ade80', border: 'rgba(34, 197, 94, 0.25)' },
-        amber: { bg: 'rgba(245, 158, 11, 0.12)', text: '#fbbf24', border: 'rgba(245, 158, 11, 0.25)' },
-        navy: { bg: 'rgba(99, 130, 175, 0.12)', text: '#93b0d6', border: 'rgba(99, 130, 175, 0.25)' },
-        purple: { bg: 'rgba(168, 85, 247, 0.12)', text: '#c084fc', border: 'rgba(168, 85, 247, 0.25)' },
-        gray: { bg: 'rgba(156, 163, 175, 0.12)', text: '#9ca3af', border: 'rgba(156, 163, 175, 0.25)' },
-      }[color] || { bg: 'rgba(99, 130, 175, 0.12)', text: '#93b0d6', border: 'rgba(99, 130, 175, 0.25)' };
-      return { display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '3px 9px', borderRadius: '6px', fontSize: '11px', fontWeight: 600, background: colors.bg, color: colors.text, border: `1px solid ${colors.border}`, textTransform: 'uppercase', letterSpacing: '0.04em' };
+    container: {
+      minHeight: '100vh',
+      background: 'var(--bg)',
+      color: 'var(--text)',
+      fontFamily: 'var(--font-ui)',
     },
-    // Pipeline grid: enforce a minimum column width and overflow horizontally
-    // so long stage names ("NEED TO SOURCE - QUOTE WON") don't shrink to
-    // unreadable widths. Users can scroll the kanban left/right.
-    pipelineGrid: { display: 'grid', gridTemplateColumns: `repeat(${Math.max(stagesLen, 1)}, minmax(180px, 1fr))`, gap: '12px', overflowX: 'auto', paddingBottom: '8px' },
-    pipelineCol: { background: 'rgba(232, 236, 243, 0.03)', border: '1px solid rgba(232, 236, 243, 0.08)', borderRadius: '12px', padding: '14px', minHeight: '320px', minWidth: '180px' },
-    pipelineHeader: { fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#a8b5c9', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' },
-    pipelineCard: { background: 'rgba(10, 22, 40, 0.6)', border: '1px solid rgba(232, 236, 243, 0.06)', borderRadius: '8px', padding: '10px 12px', marginBottom: '8px', fontSize: '12px' },
-    toast: { position: 'fixed', bottom: '24px', right: '24px', background: 'rgba(10, 22, 40, 0.95)', border: '1px solid rgba(232, 236, 243, 0.15)', borderRadius: '10px', padding: '12px 18px', fontSize: '13px', fontWeight: 500, backdropFilter: 'blur(12px)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', gap: '10px', zIndex: 100, maxWidth: '420px' },
-    grid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' },
-    grid3: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' },
-    statusMenu: { position: 'absolute', top: '100%', right: 0, marginTop: '4px', background: 'rgba(10, 22, 40, 0.98)', border: '1px solid rgba(232, 236, 243, 0.12)', borderRadius: '10px', padding: '6px', minWidth: '210px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)', zIndex: 100 },
-    statusMenuItem: { display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 12px', background: 'transparent', border: 'none', color: '#e8ecf3', fontSize: '13px', fontFamily: 'inherit', cursor: 'pointer', borderRadius: '6px', textAlign: 'left' },
-    modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200 },
-    modalCard: { background: 'linear-gradient(180deg, #0f1d35 0%, #0a1628 100%)', border: '1px solid rgba(232, 236, 243, 0.15)', borderRadius: '14px', padding: '28px', maxWidth: '460px', width: '90%', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' },
+    header: {
+      borderBottom: '1px solid var(--border)',
+      padding: 'var(--space-4) var(--space-6)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      background: 'var(--surface)',
+      position: 'sticky',
+      top: 0,
+      zIndex: 50,
+    },
+    logo: { display: 'flex', alignItems: 'center', gap: 'var(--space-3)' },
+    // Solid red mark, no gradient, no glow. Just a confident brand block.
+    logoMark: {
+      width: '36px',
+      height: '36px',
+      background: 'var(--shp-red)',
+      color: 'var(--shp-red-on)',
+      borderRadius: 'var(--r-sm)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontWeight: 700,
+      fontSize: 'var(--fs-13)',
+      letterSpacing: '0.04em',
+    },
+    logoText: { fontSize: 'var(--fs-15)', fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--text)' },
+    logoSub: {
+      fontSize: 'var(--fs-12)',
+      color: 'var(--text-3)',
+      letterSpacing: '0.06em',
+      textTransform: 'uppercase',
+      marginTop: '2px',
+      fontWeight: 500,
+    },
+    nav: {
+      display: 'flex',
+      gap: '2px',
+      background: 'var(--bg-sunk)',
+      padding: '3px',
+      borderRadius: 'var(--r-md)',
+      border: '1px solid var(--border-subtle)',
+    },
+    navBtn: (active) => ({
+      padding: '7px var(--space-3)',
+      borderRadius: 'var(--r-sm)',
+      fontSize: 'var(--fs-13)',
+      fontWeight: 500,
+      background: active ? 'var(--surface)' : 'transparent',
+      color: active ? 'var(--text)' : 'var(--text-2)',
+      border: 'none',
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+      boxShadow: active ? 'var(--shadow-1)' : 'none',
+    }),
+    pdBadge: (connected) => ({
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+      fontSize: 'var(--fs-12)',
+      fontWeight: 600,
+      padding: '5px 10px',
+      borderRadius: 'var(--r-pill)',
+      background: connected ? 'var(--ok-soft)' : 'var(--warn-soft)',
+      color: connected ? 'var(--ok)' : 'var(--warn)',
+      border: `1px solid ${connected ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : 'color-mix(in oklch, var(--warn) 30%, transparent)'}`,
+      cursor: 'pointer',
+    }),
+    main: { padding: 'var(--space-6)', maxWidth: '1400px', margin: '0 auto' },
+    pageTitle: {
+      fontSize: 'var(--fs-28)',
+      fontWeight: 700,
+      letterSpacing: '-0.02em',
+      marginBottom: '6px',
+      color: 'var(--text)',
+    },
+    pageSubtitle: { fontSize: 'var(--fs-14)', color: 'var(--text-3)', marginBottom: 'var(--space-5)' },
+    statsGrid: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+      gap: 'var(--space-4)',
+      marginBottom: 'var(--space-5)',
+    },
+    statCard: {
+      background: 'var(--surface)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-lg)',
+      padding: 'var(--space-5)',
+    },
+    statLabel: {
+      fontSize: 'var(--fs-12)',
+      color: 'var(--text-3)',
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      fontWeight: 600,
+    },
+    statValue: {
+      fontSize: 'var(--fs-32)',
+      fontWeight: 700,
+      letterSpacing: '-0.02em',
+      marginTop: 'var(--space-2)',
+      color: 'var(--text)',
+      fontVariantNumeric: 'tabular-nums',
+    },
+    statSub: { fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginTop: '4px' },
+    card: {
+      background: 'var(--surface)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-lg)',
+      padding: 'var(--space-5)',
+      marginBottom: 'var(--space-4)',
+    },
+    sectionTitle: {
+      fontSize: 'var(--fs-12)',
+      fontWeight: 600,
+      color: 'var(--text-3)',
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      marginBottom: 'var(--space-4)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+    },
+    input: {
+      width: '100%',
+      background: 'var(--surface)',
+      border: '1px solid var(--border-strong)',
+      borderRadius: 'var(--r-md)',
+      padding: '10px 14px',
+      color: 'var(--text)',
+      fontSize: 'var(--fs-14)',
+      fontFamily: 'inherit',
+      outline: 'none',
+      transition: 'border-color var(--t-fast) var(--ease)',
+      boxSizing: 'border-box',
+    },
+    label: {
+      display: 'block',
+      fontSize: 'var(--fs-12)',
+      color: 'var(--text-2)',
+      marginBottom: '6px',
+      fontWeight: 500,
+    },
+    primaryBtn: {
+      background: 'var(--shp-red)',
+      color: 'var(--shp-red-on)',
+      border: '1px solid var(--shp-red)',
+      borderRadius: 'var(--r-md)',
+      padding: '10px var(--space-4)',
+      fontSize: 'var(--fs-14)',
+      fontWeight: 600,
+      cursor: 'pointer',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '8px',
+    },
+    secondaryBtn: {
+      background: 'var(--surface)',
+      color: 'var(--text)',
+      border: '1px solid var(--border-strong)',
+      borderRadius: 'var(--r-md)',
+      padding: '9px var(--space-4)',
+      fontSize: 'var(--fs-13)',
+      fontWeight: 500,
+      cursor: 'pointer',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '6px',
+    },
+    prospectCard: {
+      background: 'var(--surface)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-md)',
+      padding: 'var(--space-4)',
+      marginBottom: 'var(--space-2)',
+      transition: 'border-color var(--t-fast) var(--ease)',
+    },
+    // Light-theme badge palette. Soft tinted bg, saturated text. No side stripes.
+    badge: (color) => {
+      const map = {
+        red:    { bg: 'var(--danger-soft)', text: 'var(--danger)', border: 'color-mix(in oklch, var(--danger) 30%, transparent)' },
+        green:  { bg: 'var(--ok-soft)',     text: 'var(--ok)',     border: 'color-mix(in oklch, var(--ok) 30%, transparent)' },
+        amber:  { bg: 'var(--warn-soft)',   text: 'var(--warn)',   border: 'color-mix(in oklch, var(--warn) 30%, transparent)' },
+        navy:   { bg: 'var(--info-soft)',   text: 'var(--info)',   border: 'color-mix(in oklch, var(--info) 30%, transparent)' },
+        purple: { bg: 'oklch(95% 0.04 305)', text: 'var(--seg-higher)', border: 'color-mix(in oklch, var(--seg-higher) 25%, transparent)' },
+        gray:   { bg: 'var(--bg-sunk)', text: 'var(--text-2)', border: 'var(--border-strong)' },
+      };
+      const c = map[color] || map.navy;
+      return {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '4px',
+        padding: '3px 9px',
+        borderRadius: 'var(--r-pill)',
+        fontSize: 'var(--fs-12)',
+        fontWeight: 600,
+        background: c.bg,
+        color: c.text,
+        border: `1px solid ${c.border}`,
+        textTransform: 'uppercase',
+        letterSpacing: '0.04em',
+      };
+    },
+    pipelineGrid: {
+      display: 'grid',
+      gridTemplateColumns: `repeat(${Math.max(stagesLen, 1)}, minmax(180px, 1fr))`,
+      gap: 'var(--space-3)',
+      overflowX: 'auto',
+      paddingBottom: 'var(--space-2)',
+    },
+    pipelineCol: {
+      background: 'var(--bg-sunk)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-lg)',
+      padding: 'var(--space-3)',
+      minHeight: '320px',
+      minWidth: '180px',
+    },
+    pipelineHeader: {
+      fontSize: 'var(--fs-12)',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      color: 'var(--text-2)',
+      marginBottom: 'var(--space-3)',
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      gap: '8px',
+    },
+    pipelineCard: {
+      background: 'var(--surface)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-md)',
+      padding: '10px 12px',
+      marginBottom: 'var(--space-2)',
+      fontSize: 'var(--fs-12)',
+      boxShadow: 'var(--shadow-1)',
+    },
+    toast: {
+      position: 'fixed',
+      bottom: 'var(--space-5)',
+      right: 'var(--space-5)',
+      background: 'var(--surface)',
+      border: '1px solid var(--border-strong)',
+      borderRadius: 'var(--r-md)',
+      padding: '12px 18px',
+      fontSize: 'var(--fs-13)',
+      fontWeight: 500,
+      color: 'var(--text)',
+      boxShadow: 'var(--shadow-3)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px',
+      zIndex: 100,
+      maxWidth: '420px',
+    },
+    grid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-4)' },
+    grid3: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--space-4)' },
+    statusMenu: {
+      position: 'absolute',
+      top: '100%',
+      right: 0,
+      marginTop: '4px',
+      background: 'var(--surface)',
+      border: '1px solid var(--border-strong)',
+      borderRadius: 'var(--r-md)',
+      padding: '4px',
+      minWidth: '220px',
+      boxShadow: 'var(--shadow-3)',
+      zIndex: 100,
+    },
+    statusMenuItem: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+      width: '100%',
+      padding: '8px 12px',
+      background: 'transparent',
+      border: 'none',
+      color: 'var(--text)',
+      fontSize: 'var(--fs-13)',
+      fontFamily: 'inherit',
+      cursor: 'pointer',
+      borderRadius: 'var(--r-sm)',
+      textAlign: 'left',
+    },
+    modalOverlay: {
+      position: 'fixed',
+      inset: 0,
+      background: 'oklch(20% 0.01 25 / 35%)',
+      backdropFilter: 'blur(4px)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 200,
+    },
+    modalCard: {
+      background: 'var(--surface)',
+      border: '1px solid var(--border-strong)',
+      borderRadius: 'var(--r-lg)',
+      padding: 'var(--space-6)',
+      maxWidth: '460px',
+      width: '90%',
+      boxShadow: 'var(--shadow-3)',
+      color: 'var(--text)',
+    },
   };
 }
