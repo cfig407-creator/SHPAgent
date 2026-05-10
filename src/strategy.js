@@ -713,7 +713,12 @@ export function isInTerritory(city, county) {
 // === ICP DETECTION ===
 const HEALTHCARE_KW = ['hospital', 'medical center', 'health system', 'orthopedic',
   'pediatric', 'mayo clinic', 'baptist medical', 'orlando health', 'adventhealth',
-  'ascension', 'va medical', 'memorial hospital', 'physicians group', 'medical group'];
+  'ascension', 'va medical', 'memorial hospital', 'physicians group', 'medical group',
+  // Major regional healthcare orgs whose names don't include the obvious words above
+  'nemours', 'borland groover', 'baptist health', 'flagler health',
+  'ucf health', 'central florida health', 'children\'s hospital',
+  'healthcare', 'health care', 'urgent care', 'surgery center',
+  'cancer center', 'rehabilitation hospital', 'rehab hospital'];
 const INDUSTRIAL_KW = ['warehouse', 'manufacturing', 'industrial', 'logistics',
   'distribution center', 'plant', 'factory', 'fulfillment'];
 const RETAIL_KW = ['retail', 'storefront', 'mall', 'outlet', 'shopping center'];
@@ -740,18 +745,23 @@ const LOCAL_GOV_KW = ['city of', '(city)', 'county government', 'county boc',
   'courthouse', 'county school', 'water management', 'transit authority',
   'department of'];
 
+// ICP policy: HEALTHCARE is the only auto-exclusion. Every other commercial
+// vertical (industrial, retail, residential, hospitality, CRE/PM, plus
+// uncategorized "Commercial") is in-ICP — SHP supplies door & hardware to all
+// of them. Segment is preserved for filtering/reporting; `status` drives
+// whether the prospect appears in the Active pool.
 export function classifyICP(company, title = '') {
   const text = `${company || ''} ${title || ''}`.toLowerCase();
   if (HEALTHCARE_KW.some(k => text.includes(k))) return { segment: 'Healthcare', status: 'out' };
-  if (INDUSTRIAL_KW.some(k => text.includes(k))) return { segment: 'Industrial', status: 'out' };
-  if (RETAIL_KW.some(k => text.includes(k))) return { segment: 'Retail', status: 'out' };
-  if (RESIDENTIAL_KW.some(k => text.includes(k))) return { segment: 'Residential', status: 'out' };
-  if (HOSPITALITY_KW.some(k => text.includes(k))) return { segment: 'Hospitality', status: 'out' };
-  if (CRE_PM_KW.some(k => text.includes(k))) return { segment: 'Multi-site CRE/PM', status: 'out' };
   if (HIGHER_ED_KW.some(k => text.includes(k))) return { segment: 'Higher Education', status: 'in' };
   if (K12_KW.some(k => text.includes(k))) return { segment: 'K-12 Education', status: 'in' };
   if (LOCAL_GOV_KW.some(k => text.includes(k))) return { segment: 'Local Government', status: 'in' };
-  return { segment: 'Unclassified', status: 'unknown' };
+  if (INDUSTRIAL_KW.some(k => text.includes(k))) return { segment: 'Industrial', status: 'in' };
+  if (RETAIL_KW.some(k => text.includes(k))) return { segment: 'Retail', status: 'in' };
+  if (RESIDENTIAL_KW.some(k => text.includes(k))) return { segment: 'Residential', status: 'in' };
+  if (HOSPITALITY_KW.some(k => text.includes(k))) return { segment: 'Hospitality', status: 'in' };
+  if (CRE_PM_KW.some(k => text.includes(k))) return { segment: 'Multi-site CRE/PM', status: 'in' };
+  return { segment: 'Commercial', status: 'in' };
 }
 
 // === TITLE ALTITUDE ===

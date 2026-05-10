@@ -443,7 +443,7 @@ export default function SHPProspectingAgent() {
 Titles to target: ${apolloCriteria.titles}
 Segments to target: ${apolloCriteria.segments}
 
-HARD AUTO-SKIPS — DO NOT RETURN: Healthcare, hospitals, medical, industrial, warehouse, manufacturing, single-storefront retail, multi-site commercial property managers (CBRE, JLL, Cushman, etc.), residential, hospitality (hotels, resorts).
+HARD AUTO-SKIP — DO NOT RETURN: Healthcare (hospitals, medical centers, health systems, physician groups, clinics, urgent care). Everything else commercial is fair game — industrial, retail, residential, hospitality, multi-site CRE/PM, plus the core K-12 / Higher Ed / Local Gov ICPs.
 
 Return ONLY a JSON array (no preamble, no markdown) of up to 8 in-ICP, in-territory prospects:
 [{"name":"Full Name","title":"Job Title","company":"Org Name","city":"City","email":"email or empty","phone":"phone or empty"}]
@@ -1666,7 +1666,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
             <input style={styles.input} value={apolloCriteria.segments} onChange={e => setApolloCriteria({ ...apolloCriteria, segments: e.target.value })} />
           </div>
           <div style={{ fontSize: '12px', color: '#7a8aa3', marginBottom: '14px', padding: '10px 12px', background: 'rgba(232, 236, 243, 0.04)', borderRadius: '6px' }}>
-            Searches all 15 CFL North counties. Out-of-ICP results auto-filtered (healthcare, industrial, retail, multi-site CRE, residential, hospitality).
+            Searches all 15 CFL North counties. Healthcare is the only auto-skip — everything else commercial is in-ICP.
           </div>
           <button style={styles.primaryBtn} onClick={runApolloSearch} disabled={isApolloSearching}>
             {isApolloSearching ? <Loader2 size={16} className="spin" /> : <Search size={16} />}
