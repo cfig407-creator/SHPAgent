@@ -97,6 +97,14 @@ export default function SHPProspectingAgent() {
   const [bulkCrossThreadResults, setBulkCrossThreadResults] = useState([]);
   const [bulkCrossThreadCancel, setBulkCrossThreadCancel] = useState(false);
 
+  // Net-new account discovery (Apollo organization search → chained people search).
+  // newAccountsResults shape: [{ org: {...}, candidates: [{...}], alreadyInPool: bool }]
+  const [newAccountsOpen, setNewAccountsOpen] = useState(false);
+  const [newAccountsRunning, setNewAccountsRunning] = useState(false);
+  const [newAccountsProgress, setNewAccountsProgress] = useState({ phase: 'idle', done: 0, total: 0, currentOrg: '' });
+  const [newAccountsResults, setNewAccountsResults] = useState([]);
+  const [newAccountsCancel, setNewAccountsCancel] = useState(false);
+
   // Batch-enrich wizard state — "Spend remaining credits" end-of-month workflow
   const [batchEnrichOpen, setBatchEnrichOpen] = useState(false);
   const [batchEnrichRunning, setBatchEnrichRunning] = useState(false);
@@ -1263,6 +1271,185 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     setBulkCrossThreadResults([]);
   };
 
+  // === Net-new account discovery ===
+  // Runs Apollo organization search across the three ICP segments
+  // (K-12, Higher Ed, Local Gov) restricted to the CFL North territory,
+  // then for each new org chains a free people-search to surface
+  // facilities decision-makers. Apollo charges 0 credits for either —
+  // credits are only spent later when the user enriches a candidate.
+  //
+  // Strategy:
+  //   - Phase 1 (search): three parallel-ish org searches with location +
+  //     keyword filters. Excludes healthcare via keywordsExclude.
+  //   - Filter results: drop orgs already in the pool (normalized name match).
+  //   - Cap: top 24 unique new orgs ordered by employee count (proxy for
+  //     facility footprint = TAM = priority).
+  //   - Phase 2 (people): for each org, run a people-search with the
+  //     facilities title ladder. 220ms throttle.
+  //   - Open the modal that streams progress; on complete, pivot to review.
+  const findNewAccounts = async () => {
+    if (newAccountsRunning) return;
+
+    setNewAccountsOpen(true);
+    setNewAccountsRunning(true);
+    setNewAccountsCancel(false);
+    setNewAccountsResults([]);
+    setNewAccountsProgress({ phase: 'orgs', done: 0, total: 3, currentOrg: 'Searching organizations…' });
+
+    // Common: territory + healthcare exclusion. Apollo accepts location
+    // strings like "Florida, US" — we narrow on our side using county.
+    const locations = ['Florida, US'];
+    const excludeKeywords = ['hospital', 'health system', 'medical center', 'physician', 'clinic'];
+
+    const segmentSearches = [
+      {
+        segment: 'K-12 Education',
+        keywords: ['school district', 'public schools', 'k-12', 'county schools'],
+      },
+      {
+        segment: 'Higher Education',
+        keywords: ['college', 'university', 'community college', 'state college'],
+      },
+      {
+        segment: 'Local Government',
+        keywords: ['city of', 'county government', 'town of', 'public works', 'county board of commissioners'],
+      },
+    ];
+
+    // Phase 1 — fire all three segment searches.
+    const orgsBySegment = [];
+    for (let i = 0; i < segmentSearches.length; i++) {
+      let cancelled = false;
+      setNewAccountsCancel(c => { cancelled = c; return c; });
+      if (cancelled) break;
+
+      const s = segmentSearches[i];
+      setNewAccountsProgress({ phase: 'orgs', done: i, total: segmentSearches.length, currentOrg: s.segment });
+
+      try {
+        const data = await postJson('/api/apollo-org-search', {
+          keywords: s.keywords,
+          locations,
+          keywordsExclude: excludeKeywords,
+          limit: 25,
+        }, { retries: 1, timeoutMs: 30_000 });
+        orgsBySegment.push({ segment: s.segment, orgs: data.organizations || [] });
+      } catch (err) {
+        console.error('[shp] org-search failed for', s.segment, err);
+        orgsBySegment.push({ segment: s.segment, orgs: [], error: err.message });
+      }
+      if (i < segmentSearches.length - 1) await new Promise(r => setTimeout(r, 220));
+    }
+
+    // Dedup against existing pool + collapse cross-segment duplicates.
+    const normalize = (s) => (s || '').toLowerCase().replace(/\b(inc|llc|corp|company|co|ltd|the)\b/g, '').replace(/[^a-z0-9]/g, '').trim();
+    const existingOrgKeys = new Set(prospects.map(p => normalize(p.company)).filter(Boolean));
+    const seen = new Set();
+    const newOrgs = [];
+
+    // Order: keep the segment ordering above, then by employee count desc within each.
+    for (const { segment, orgs } of orgsBySegment) {
+      const sorted = orgs
+        .filter(o => o.name && o.country && /united states|usa/i.test(o.country))
+        .filter(o => /(florida|fl)\b/i.test([o.state, o.city].filter(Boolean).join(' ')))
+        .sort((a, b) => (b.estimatedEmployees || 0) - (a.estimatedEmployees || 0));
+      for (const o of sorted) {
+        const key = normalize(o.name);
+        if (!key || seen.has(key) || existingOrgKeys.has(key)) continue;
+        // Filter to in-territory by city (best-effort using classifyCounty)
+        const county = classifyCounty(o.city) || '';
+        if (!county) continue; // out of CFL North 15 counties
+        seen.add(key);
+        newOrgs.push({ ...o, county, segment });
+        if (newOrgs.length >= 24) break;
+      }
+      if (newOrgs.length >= 24) break;
+    }
+
+    if (newOrgs.length === 0) {
+      setNewAccountsProgress({ phase: 'done', done: 0, total: 0, currentOrg: '' });
+      setNewAccountsResults([]);
+      setNewAccountsRunning(false);
+      showToast('No net-new in-territory orgs found across the three ICPs', 'info');
+      return;
+    }
+
+    // Phase 2 — for each new org, chained people-search.
+    setNewAccountsProgress({ phase: 'people', done: 0, total: newOrgs.length, currentOrg: '' });
+    const peopleResults = [];
+    for (let i = 0; i < newOrgs.length; i++) {
+      let cancelled = false;
+      setNewAccountsCancel(c => { cancelled = c; return c; });
+      if (cancelled) break;
+
+      const org = newOrgs[i];
+      setNewAccountsProgress({ phase: 'people', done: i, total: newOrgs.length, currentOrg: org.name });
+
+      // Use full facilities ladder for net-new accounts (no existing contact to anchor on)
+      const titles = getMultiThreadTitles(null, org.segment);
+
+      try {
+        const data = await postJson('/api/apollo-people-search', {
+          organizationName: org.name,
+          titles,
+          limit: 8,
+        }, { retries: 1, timeoutMs: 20_000 });
+        const candidates = (data?.candidates || []).filter(c => c.name).map(c => ({
+          ...c,
+          tier: classifyTier(c.title),
+        }));
+        peopleResults.push({ org, candidates });
+      } catch (err) {
+        peopleResults.push({ org, candidates: [], error: err.message });
+      }
+      if (i < newOrgs.length - 1) await new Promise(r => setTimeout(r, 220));
+    }
+
+    setNewAccountsResults(peopleResults);
+    setNewAccountsProgress({ phase: 'done', done: newOrgs.length, total: newOrgs.length, currentOrg: '' });
+    setNewAccountsRunning(false);
+
+    const totalCandidates = peopleResults.reduce((s, r) => s + (r.candidates?.length || 0), 0);
+    showToast(`Found ${peopleResults.length} new orgs with ${totalCandidates} candidates`);
+  };
+
+  // Bulk-add picks from the new-accounts wizard. Picks shape: [{ org, candidate }, ...]
+  const addNewAccountPicks = (picks) => {
+    if (!picks || picks.length === 0) return;
+    const now = Date.now();
+    const newProspects = picks.map(({ org, candidate }, i) => {
+      const icp = classifyICP(org.name, candidate.title);
+      const titleClass = classifyTitle(candidate.title);
+      return {
+        id: `newaccount_${now}_${i}`,
+        name: candidate.name,
+        title: candidate.title || '',
+        company: org.name,
+        email: '',
+        phone: '',
+        city: org.city || candidate.city || '',
+        county: org.county || classifyCounty(org.city) || '',
+        state: 'FL',
+        zip: '',
+        segment: org.segment || icp.segment,
+        icpStatus: icp.status,
+        titleAltitude: titleClass.altitude,
+        status: 'Ready',
+        source: `Apollo (new account: ${org.name})`,
+        priority: 95, // higher than cross-thread peers — these are net-new accounts
+        apolloId: candidate.apolloId,
+        organizationApolloId: org.apolloId,
+        linkedinUrl: candidate.linkedinUrl,
+        photoUrl: candidate.photoUrl,
+        organizationDomain: org.domain,
+      };
+    });
+    setProspects(prev => [...newProspects, ...prev]);
+    showToast(`Added ${newProspects.length} contact${newProspects.length === 1 ? '' : 's'} from net-new accounts`);
+    setNewAccountsOpen(false);
+    setNewAccountsResults([]);
+  };
+
   // === Batch enrich (end-of-month "Spend remaining credits" wizard) ===
   // Runs sequential Apollo enrichments on the user's chosen candidates with a
   // small delay between calls (rate-limit etiquette). Updates progress live.
@@ -1566,7 +1753,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         userName={pdMeta.userName}
       />
       <div className="shp-main" style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={apolloQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={apolloQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={apolloQuota} multiThreadAccount={multiThreadAccount} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
@@ -1615,6 +1802,20 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
             setBulkCrossThreadOpen(false);
           }}
           onCancelRun={() => setBulkCrossThreadCancel(true)}
+        />
+      )}
+      {newAccountsOpen && (
+        <NewAccountsModal
+          styles={styles}
+          isRunning={newAccountsRunning}
+          progress={newAccountsProgress}
+          results={newAccountsResults}
+          onAdd={addNewAccountPicks}
+          onCancel={() => {
+            setNewAccountsCancel(true);
+            setNewAccountsOpen(false);
+          }}
+          onCancelRun={() => setNewAccountsCancel(true)}
         />
       )}
       {/* Mobile bottom tab bar — only visible on small screens (CSS-gated). */}
@@ -1790,7 +1991,7 @@ function MoreSheet({ styles, view, setView, onClose }) {
 // =================================================================
 // === DASHBOARD ===
 // =================================================================
-function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, crossThreadPool, bulkCrossThreadRunning, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
+function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, crossThreadPool, bulkCrossThreadRunning, findNewAccounts, newAccountsRunning, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
   const topClusters = clusters.slice(0, 5);
   const firstName = (fromName || 'Anthony').split(' ')[0];
 
@@ -1901,36 +2102,69 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
         </div>
       </div>
 
-      {/* Pool Expansion — bulk multi-thread the existing pool to discover
-          peers at every account, then enrich the best ones with leftover
-          Apollo credits. Free Apollo people-search runs first; enrichment
-          (1 credit/match) happens later via the Batch Enrich wizard. */}
+      {/* Pool Expansion — three coordinated actions to maximize end-of-cycle
+          credit spend:
+            1. Cross-thread existing orgs (free)  — find peers at known accounts
+            2. Find new in-ICP accounts (free)    — net-new orgs + decision-makers
+            3. Batch enrich (1 credit/match)      — spend remaining quota on the best
+      */}
       <div style={{ ...styles.card, borderColor: 'color-mix(in oklch, var(--shp-red) 25%, transparent)' }}>
         <div style={styles.sectionTitle}><UserPlus size={14} /> Pool Expansion</div>
         <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-2)', marginBottom: 'var(--space-4)', lineHeight: 1.6 }}>
-          Cross-thread every org you already have a contact at — Apollo searches across the title ladder to find their managers, directors, and decision-makers.
-          Searches are <strong>free</strong>. Enrich the best matches afterward with the Batch Enrich wizard.
+          Three free Apollo searches, then spend leftover credits where it counts. Run in order: cross-thread existing → find net-new accounts → batch enrich.
         </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-3)', alignItems: 'center' }}>
+        <div className="shp-grid3" style={{ ...styles.grid3, marginBottom: 'var(--space-3)' }}>
+          {/* 1. Cross-thread */}
           <button
-            style={{ ...styles.primaryBtn, fontSize: 'var(--fs-14)' }}
+            style={{ ...styles.secondaryBtn, justifyContent: 'flex-start', padding: 'var(--space-4)', flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--space-2)', borderColor: 'color-mix(in oklch, var(--shp-red) 30%, transparent)' }}
             onClick={() => crossThreadPool({ maxOrgs: 60 })}
-            disabled={bulkCrossThreadRunning}
+            disabled={bulkCrossThreadRunning || newAccountsRunning}
           >
-            {bulkCrossThreadRunning ? <Loader2 size={14} className="spin" /> : <UserPlus size={14} />}
-            {bulkCrossThreadRunning ? 'Running…' : 'Cross-thread my top 60 orgs'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--shp-red)', fontWeight: 700, fontSize: 'var(--fs-13)' }}>
+              {bulkCrossThreadRunning ? <Loader2 size={16} className="spin" /> : <UserPlus size={16} />}
+              1 · Cross-thread existing
+            </div>
+            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-2)', textAlign: 'left' }}>
+              {bulkCrossThreadRunning ? 'Running…' : 'Find peers at top 60 orgs you already work'}
+            </div>
+            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>Free · ~12 sec</div>
           </button>
+
+          {/* 2. Find new accounts */}
           <button
-            style={styles.secondaryBtn}
+            style={{ ...styles.secondaryBtn, justifyContent: 'flex-start', padding: 'var(--space-4)', flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--space-2)', borderColor: 'color-mix(in oklch, var(--info) 30%, transparent)' }}
+            onClick={findNewAccounts}
+            disabled={newAccountsRunning || bulkCrossThreadRunning}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--info)', fontWeight: 700, fontSize: 'var(--fs-13)' }}>
+              {newAccountsRunning ? <Loader2 size={16} className="spin" /> : <Plus size={16} />}
+              2 · Find new accounts
+            </div>
+            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-2)', textAlign: 'left' }}>
+              {newAccountsRunning ? 'Searching…' : 'Net-new K-12 / Higher Ed / Local Gov in CFL North'}
+            </div>
+            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>Free · ~30 sec</div>
+          </button>
+
+          {/* 3. Batch enrich */}
+          <button
+            style={{ ...styles.secondaryBtn, justifyContent: 'flex-start', padding: 'var(--space-4)', flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--space-2)', borderColor: 'color-mix(in oklch, var(--ok) 30%, transparent)' }}
             onClick={openBatchEnrich}
           >
-            <Sparkles size={13} /> Then spend remaining credits
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--ok)', fontWeight: 700, fontSize: 'var(--fs-13)' }}>
+              <Sparkles size={16} />
+              3 · Batch enrich
+            </div>
+            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-2)', textAlign: 'left' }}>
+              Spend remaining credits on the best unenriched candidates
+            </div>
+            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>1 credit per match</div>
           </button>
-          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginLeft: 'auto' }}>
-            {apolloQuota?.remaining != null
-              ? `${apolloQuota.remaining} credits left this cycle`
-              : 'Apollo quota loading…'}
-          </span>
+        </div>
+        <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', textAlign: 'right' }}>
+          {apolloQuota?.remaining != null
+            ? `${apolloQuota.remaining} credits left this cycle${apolloQuota.total ? ` of ${apolloQuota.total}` : ''}`
+            : 'Apollo quota loading…'}
         </div>
       </div>
 
@@ -3471,6 +3705,246 @@ function BulkCrossThreadModal({ styles, isRunning, progress, results, onAdd, onC
         {!isRunning && results.length === 0 && (
           <div style={{ padding: 'var(--space-6)', textAlign: 'center', color: 'var(--text-3)' }}>
             No orgs to cross-thread. Add some prospects first.
+            <div style={{ marginTop: 'var(--space-4)' }}>
+              <button style={styles.secondaryBtn} onClick={onCancel}>Close</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// === NEW ACCOUNTS MODAL ===
+// =================================================================
+// Shows results of the chained org-search → people-search run.
+// Phase 1 (orgs) and Phase 2 (people per org) are streamed via progress.
+// On completion, the user reviews orgs grouped, picks specific people per
+// org, and bulk-adds them to the pool.
+function NewAccountsModal({ styles, isRunning, progress, results, onAdd, onCancel, onCancelRun }) {
+  const [picks, setPicks] = useState(new Set());
+  const [expandedOrgs, setExpandedOrgs] = useState(new Set());
+  const [tierFilter, setTierFilter] = useState('all');
+
+  // Auto-expand all orgs on first load when results arrive
+  useEffect(() => {
+    if (!isRunning && results.length > 0 && expandedOrgs.size === 0) {
+      setExpandedOrgs(new Set(results.map((_, i) => i)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning, results.length]);
+
+  const filteredResults = useMemo(() => {
+    return results.map(r => ({
+      ...r,
+      candidates: (r.candidates || []).filter(c => {
+        if (tierFilter === '34' && (c.tier ?? 0) < 3) return false;
+        if (tierFilter === '23' && ((c.tier ?? 0) < 2 || (c.tier ?? 0) > 3)) return false;
+        return true;
+      }),
+    }));
+  }, [results, tierFilter]);
+
+  const togglePick = (k) => {
+    setPicks(prev => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k); else next.add(k);
+      return next;
+    });
+  };
+  const toggleOrg = (idx) => {
+    setExpandedOrgs(prev => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx); else next.add(idx);
+      return next;
+    });
+  };
+  const selectAllVisible = () => {
+    setPicks(prev => {
+      const next = new Set(prev);
+      filteredResults.forEach((r, i) => {
+        r.candidates.forEach(c => next.add(`${i}::${c.name}`));
+      });
+      return next;
+    });
+  };
+
+  const onConfirmAdd = () => {
+    const payload = [];
+    for (let i = 0; i < filteredResults.length; i++) {
+      const r = filteredResults[i];
+      for (const c of r.candidates) {
+        if (picks.has(`${i}::${c.name}`)) {
+          payload.push({ org: r.org, candidate: c });
+        }
+      }
+    }
+    onAdd(payload);
+  };
+
+  const totalCandidates = results.reduce((s, r) => s + (r.candidates?.length || 0), 0);
+
+  return (
+    <div className="shp-modal-overlay" style={styles.modalOverlay} onClick={isRunning ? undefined : onCancel}>
+      <div
+        className="shp-modal-card"
+        style={{ ...styles.modalCard, maxWidth: '900px', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div style={{ marginBottom: 'var(--space-4)' }}>
+          <div style={{ fontSize: 'var(--fs-22)', fontWeight: 700, marginBottom: '4px' }}>
+            Find new in-ICP accounts
+          </div>
+          <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-3)' }}>
+            {isRunning
+              ? 'Apollo searching K-12, Higher Ed, Local Gov in CFL North — no credits spent.'
+              : `${results.length} net-new orgs · ${totalCandidates} candidates`}
+          </div>
+        </div>
+
+        {isRunning && (
+          <div style={{ padding: 'var(--space-5)', background: 'var(--bg-sunk)', borderRadius: 'var(--r-md)', marginBottom: 'var(--space-4)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
+              <span style={{ fontSize: 'var(--fs-14)', fontWeight: 600 }}>
+                {progress.phase === 'orgs' ? `Searching orgs · ${progress.done}/${progress.total} segments` : `Searching contacts · ${progress.done}/${progress.total} orgs`}
+              </span>
+              <button style={{ ...styles.secondaryBtn, padding: '6px 14px', fontSize: 'var(--fs-12)' }} onClick={onCancelRun}>
+                Cancel
+              </button>
+            </div>
+            <div style={{ height: 6, background: 'var(--border)', borderRadius: 'var(--r-pill)', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                width: `${(progress.done / Math.max(progress.total, 1)) * 100}%`,
+                background: 'var(--shp-red)',
+                transition: 'width 0.2s var(--ease)',
+              }} />
+            </div>
+            {progress.currentOrg && (
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginTop: 'var(--space-2)', fontFamily: 'var(--font-mono)' }}>
+                {progress.currentOrg}
+              </div>
+            )}
+          </div>
+        )}
+
+        {!isRunning && results.length > 0 && (
+          <>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-3)', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
+              <select
+                style={{ ...styles.input, width: 'auto', minWidth: 160 }}
+                value={tierFilter}
+                onChange={e => setTierFilter(e.target.value)}
+              >
+                <option value="all">All tiers</option>
+                <option value="34">Decision-makers (Tier 3-4)</option>
+                <option value="23">Mid-level (Tier 2-3)</option>
+              </select>
+              <button style={{ ...styles.secondaryBtn, fontSize: 'var(--fs-12)' }} onClick={selectAllVisible}>
+                Select all visible
+              </button>
+              <span style={{ fontSize: 'var(--fs-13)', color: 'var(--text-3)', marginLeft: 'auto' }}>
+                {picks.size} selected
+              </span>
+            </div>
+
+            <div style={{ overflowY: 'auto', flex: 1, border: '1px solid var(--border)', borderRadius: 'var(--r-md)' }}>
+              {filteredResults.map((r, idx) => {
+                const isOpen = expandedOrgs.has(idx);
+                const candidates = r.candidates;
+                return (
+                  <div key={idx} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                    <button
+                      onClick={() => toggleOrg(idx)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 'var(--space-3)',
+                        width: '100%',
+                        padding: 'var(--space-3)',
+                        background: 'transparent',
+                        border: 'none',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      }}
+                    >
+                      {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 'var(--fs-14)', fontWeight: 600, color: 'var(--text)' }}>
+                          {r.org.name}
+                        </div>
+                        <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
+                          {r.org.segment} · {r.org.county} County · {r.org.city}{r.org.estimatedEmployees ? ` · ${r.org.estimatedEmployees} employees` : ''}
+                        </div>
+                      </div>
+                      <span style={styles.badge('navy')}>{candidates.length} {candidates.length === 1 ? 'contact' : 'contacts'}</span>
+                    </button>
+                    {isOpen && candidates.length > 0 && (
+                      <div style={{ padding: '0 var(--space-3) var(--space-3) var(--space-7)' }}>
+                        {candidates.map(c => {
+                          const k = `${idx}::${c.name}`;
+                          const checked = picks.has(k);
+                          const tierLabel = c.tier === 4 ? 'Strategic' : c.tier === 3 ? 'Manager' : c.tier === 2 ? 'Tactical' : c.tier === 1 ? 'Frontline' : '—';
+                          return (
+                            <label
+                              key={k}
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: '24px 1fr auto',
+                                alignItems: 'center',
+                                gap: 'var(--space-3)',
+                                padding: 'var(--space-2) 0',
+                                cursor: 'pointer',
+                                background: checked ? 'var(--shp-red-soft)' : 'transparent',
+                                borderRadius: 'var(--r-sm)',
+                                paddingLeft: 'var(--space-2)',
+                              }}
+                            >
+                              <input type="checkbox" checked={checked} onChange={() => togglePick(k)} />
+                              <div>
+                                <div style={{ fontSize: 'var(--fs-13)', fontWeight: 600 }}>{c.name}</div>
+                                <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-2)' }}>{c.title || '(no title)'}</div>
+                              </div>
+                              <span style={styles.badge(c.tier === 4 ? 'red' : c.tier === 3 ? 'amber' : c.tier === 2 ? 'navy' : 'gray')}>
+                                {tierLabel}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {isOpen && candidates.length === 0 && (
+                      <div style={{ padding: 'var(--space-3) var(--space-7)', fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontStyle: 'italic' }}>
+                        No facilities contacts surfaced. Try the filter "All tiers" or revisit later.
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 'var(--space-4)', gap: 'var(--space-3)' }}>
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
+                Adding {picks.size} costs <strong>0 credits</strong> — they enter the pool flagged "Needs Enrichment".
+              </div>
+              <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                <button style={styles.secondaryBtn} onClick={onCancel}>Close</button>
+                <button
+                  style={{ ...styles.primaryBtn, opacity: picks.size === 0 ? 0.5 : 1 }}
+                  disabled={picks.size === 0}
+                  onClick={onConfirmAdd}
+                >
+                  <Plus size={14} /> Add {picks.size} to pool
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {!isRunning && results.length === 0 && (
+          <div style={{ padding: 'var(--space-6)', textAlign: 'center', color: 'var(--text-3)' }}>
+            No net-new in-territory orgs surfaced. Apollo's database may not have recent matches in your 15-county footprint.
             <div style={{ marginTop: 'var(--space-4)' }}>
               <button style={styles.secondaryBtn} onClick={onCancel}>Close</button>
             </div>
