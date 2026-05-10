@@ -171,6 +171,8 @@ export default function SHPProspectingAgent() {
   const [coachSelectedSegment, setCoachSelectedSegment] = useState('K-12 Education');
 
   const [toast, setToast] = useState(null);
+  // Mobile "More" sheet open state — overflow tabs (Coach, Settings) on phones.
+  const [moreOpen, setMoreOpen] = useState(false);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
@@ -1378,7 +1380,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         isConnecting={isConnecting}
         userName={pdMeta.userName}
       />
-      <div style={styles.main}>
+      <div className="shp-main" style={styles.main}>
         {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={apolloQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={apolloQuota} multiThreadAccount={multiThreadAccount} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
@@ -1415,6 +1417,20 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           onCancel={() => setBatchEnrichOpen(false)}
         />
       )}
+      {/* Mobile bottom tab bar — only visible on small screens (CSS-gated). */}
+      <MobileNav
+        view={view}
+        setView={(v) => { setView(v); setMoreOpen(false); }}
+        openMore={() => setMoreOpen(true)}
+      />
+      {moreOpen && (
+        <MoreSheet
+          styles={styles}
+          view={view}
+          setView={setView}
+          onClose={() => setMoreOpen(false)}
+        />
+      )}
       <GlobalStyles />
     </div>
   );
@@ -1423,9 +1439,31 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
 // =================================================================
 // === HEADER ===
 // =================================================================
+// Single source-of-truth for the nav items — used by Header (desktop)
+// and MobileNav (bottom tab bar on phones).
+const NAV_ITEMS = [
+  { id: 'dashboard', icon: TrendingUp, label: 'Dashboard',  short: 'Home'    },
+  { id: 'find',      icon: Search,     label: 'Find',       short: 'Find'    },
+  { id: 'clusters',  icon: Compass,    label: 'Clusters',   short: 'Trips'   },
+  { id: 'pipeline',  icon: Briefcase,  label: 'Pipeline',   short: 'Deals'   },
+  { id: 'coach',     icon: BookOpen,   label: 'Coach',      short: 'Coach'   },
+  { id: 'settings',  icon: Settings,   label: 'Settings',   short: 'Setup'   },
+];
+
+// Mobile bottom-tab primaries: 4 most-used flows are one-thumb reachable.
+// Coach / Settings live in the "More" sheet.
+const MOBILE_PRIMARY = ['dashboard', 'find', 'clusters', 'pipeline'];
+
 function Header({ styles, view, setView, pdConnected, isConnecting, userName }) {
+  const longChipLabel = pdConnected
+    ? `Pipedrive · ${userName || 'connected'}`
+    : isConnecting ? 'Connecting…' : 'Pipedrive disconnected';
+  const shortChipLabel = pdConnected
+    ? (userName ? userName.split(' ')[0] : 'Connected')
+    : isConnecting ? 'Connecting…' : 'Disconnected';
+
   return (
-    <div style={styles.header}>
+    <div className="shp-header" style={styles.header}>
       <div style={styles.logo}>
         <div style={styles.logoMark}>SHP</div>
         <div>
@@ -1433,26 +1471,116 @@ function Header({ styles, view, setView, pdConnected, isConnecting, userName }) 
           <div style={styles.logoSub}>CFL North · v3</div>
         </div>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-        <div style={styles.pdBadge(pdConnected)} onClick={() => setView('settings')}>
-          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: pdConnected ? 'var(--ok)' : isConnecting ? 'var(--warn)' : 'var(--danger)' }} />
+
+      {/* Desktop right side: full connection chip + horizontal nav */}
+      <div className="shp-show-desktop" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div style={styles.pdBadge(pdConnected)} onClick={() => setView('settings')} title={longChipLabel}>
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: pdConnected ? 'var(--ok)' : isConnecting ? 'var(--warn)' : 'var(--danger)' }} />
           {/* Order matters: "Connecting…" wins over the stale "disconnected" label
               while a connection attempt is in flight, so the badge never lies. */}
-          {pdConnected ? `Pipedrive · ${userName || 'connected'}` : isConnecting ? 'Connecting…' : 'Pipedrive disconnected'}
+          {longChipLabel}
         </div>
         <div style={styles.nav}>
-          {[
-            { id: 'dashboard', icon: TrendingUp, label: 'Dashboard' },
-            { id: 'find', icon: Search, label: 'Find' },
-            { id: 'clusters', icon: Compass, label: 'Clusters' },
-            { id: 'pipeline', icon: Briefcase, label: 'Pipeline' },
-            { id: 'coach', icon: BookOpen, label: 'Coach' },
-            { id: 'settings', icon: Settings, label: 'Settings' },
-          ].map(item => (
+          {NAV_ITEMS.map(item => (
             <button key={item.id} style={styles.navBtn(view === item.id)} onClick={() => setView(item.id)}>
               <item.icon size={14} /> {item.label}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Mobile right side: compact connection chip only — nav lives in MobileNav at the bottom */}
+      <div className="shp-show-mobile" style={{ display: 'none', alignItems: 'center' }}>
+        <button
+          aria-label={longChipLabel}
+          onClick={() => setView('settings')}
+          title={longChipLabel}
+          style={{
+            ...styles.pdBadge(pdConnected),
+            padding: '6px 10px',
+            fontSize: 'var(--fs-12)',
+            border: 'none',
+            cursor: 'pointer',
+          }}
+        >
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: pdConnected ? 'var(--ok)' : isConnecting ? 'var(--warn)' : 'var(--danger)' }} />
+          {shortChipLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Bottom-fixed mobile nav. CSS @media gates visibility — only renders on small screens.
+function MobileNav({ view, setView, openMore }) {
+  return (
+    <nav className="shp-mobile-nav" aria-label="Primary">
+      {MOBILE_PRIMARY.map(id => {
+        const item = NAV_ITEMS.find(n => n.id === id);
+        if (!item) return null;
+        const Icon = item.icon;
+        const active = view === item.id;
+        return (
+          <button
+            key={item.id}
+            className="shp-mobile-nav-btn"
+            data-active={active}
+            onClick={() => setView(item.id)}
+            aria-current={active ? 'page' : undefined}
+          >
+            <Icon size={20} />
+            {item.short}
+          </button>
+        );
+      })}
+      <button
+        className="shp-mobile-nav-btn"
+        data-active={view === 'coach' || view === 'settings'}
+        onClick={openMore}
+        aria-haspopup="menu"
+      >
+        <Hash size={20} />
+        More
+      </button>
+    </nav>
+  );
+}
+
+// Bottom-sheet for overflow tabs (Coach, Settings). Reuses modal styling so it
+// gets the bottom-sheet @media treatment automatically.
+function MoreSheet({ styles, view, setView, onClose }) {
+  const overflow = NAV_ITEMS.filter(n => !MOBILE_PRIMARY.includes(n.id));
+  return (
+    <div className="shp-modal-overlay" style={styles.modalOverlay} onClick={onClose}>
+      <div className="shp-modal-card" style={styles.modalCard} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600, marginBottom: 'var(--space-3)' }}>
+          More
+        </div>
+        <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+          {overflow.map(item => {
+            const Icon = item.icon;
+            const active = view === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => { setView(item.id); onClose(); }}
+                style={{
+                  ...styles.secondaryBtn,
+                  justifyContent: 'flex-start',
+                  padding: 'var(--space-4)',
+                  borderColor: active ? 'var(--shp-red)' : 'var(--border)',
+                  color: active ? 'var(--shp-red)' : 'var(--text)',
+                  fontSize: 'var(--fs-15)',
+                }}
+              >
+                <Icon size={18} />
+                {item.label}
+              </button>
+            );
+          })}
+          <button onClick={onClose} style={{ ...styles.secondaryBtn, justifyContent: 'center', marginTop: 'var(--space-3)' }}>
+            Close
+          </button>
         </div>
       </div>
     </div>
@@ -1492,7 +1620,7 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
 
   return (
     <>
-      <div style={styles.pageTitle}>Welcome back, {firstName}</div>
+      <div className="shp-page-title" style={styles.pageTitle}>Welcome back, {firstName}</div>
       <div style={styles.pageSubtitle}>{subtitle}</div>
 
       {showDisconnectedBanner && (
@@ -1525,7 +1653,7 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
         </div>
       )}
 
-      <div style={styles.statsGrid}>
+      <div className="shp-stats-grid" style={styles.statsGrid}>
         <StatCard styles={styles} label="Active Pool" value={stats.ready} sub="Ready, in-ICP, clean data" />
         <StatCard styles={styles} label="Customers" value={stats.customers} sub="Auto-detected from invoice list" />
         <StatCard
@@ -1566,7 +1694,7 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Sparkles size={14} /> Quick Actions</div>
-        <div style={styles.grid3}>
+        <div className="shp-grid3" style={styles.grid3}>
           <ActionTile styles={styles} icon={Target} color="#ff6b85" title="Find Prospects" sub="Apollo search · Manual add · Filter pool" onClick={() => setView('find')} />
           <ActionTile styles={styles} icon={Compass} color="#fbbf24" title="View Clusters" sub={`${clusters.length} trip-worthy clusters`} onClick={() => setView('clusters')} />
           <ActionTile styles={styles} icon={BookOpen} color="#93b0d6" title="Sandler Coach" sub="Pain Funnel · UFC · Reversing" onClick={() => setView('coach')} />
@@ -1671,7 +1799,7 @@ function StatCard({ styles, label, value, sub, onClick }) {
       onKeyDown={isClickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') onClick(); } : undefined}
     >
       <div style={styles.statLabel}>{label}</div>
-      <div style={styles.statValue}>{value}</div>
+      <div className="shp-stat-value" style={styles.statValue}>{value}</div>
       <div style={styles.statSub}>{sub}</div>
       {isClickable && (
         <ArrowRight size={14} style={{ position: 'absolute', top: '20px', right: '16px', color: 'var(--text-3)' }} />
@@ -1698,7 +1826,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
 
   return (
     <>
-      <div style={styles.pageTitle}>Find Prospects</div>
+      <div className="shp-page-title" style={styles.pageTitle}>Find Prospects</div>
       <div style={styles.pageSubtitle}>{totalProspects} prospects in pool · {prospects.length} matching filters</div>
 
       <div style={{ ...styles.nav, marginBottom: '20px', display: 'inline-flex' }}>
@@ -1737,7 +1865,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
       {findTab === 'manual' && (
         <div style={styles.card}>
           <div style={styles.sectionTitle}><Plus size={14} /> Add a Prospect Manually</div>
-          <div style={styles.grid2}>
+          <div className="shp-grid2" style={styles.grid2}>
             <div>
               <label style={styles.label}>Full Name *</label>
               <input style={styles.input} value={manualForm.name} onChange={e => setManualForm({ ...manualForm, name: e.target.value })} placeholder="e.g. Jane Smith" />
@@ -2048,7 +2176,7 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
 
   return (
     <>
-      <div style={styles.pageTitle}>Clusters</div>
+      <div className="shp-page-title" style={styles.pageTitle}>Clusters</div>
       <div style={styles.pageSubtitle}>Geographic pockets of in-ICP prospects ranked by trip score (size + reachable contacts).</div>
 
       {clusters.length === 0 ? (
@@ -2105,7 +2233,7 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
   return (
     <>
       <button style={{ ...styles.secondaryBtn, marginBottom: '16px' }} onClick={() => setView('find')}>← Back</button>
-      <div style={styles.pageTitle}>{prospect.name || 'Unnamed contact'}</div>
+      <div className="shp-page-title" style={styles.pageTitle}>{prospect.name || 'Unnamed contact'}</div>
       <div style={styles.pageSubtitle}>{prospect.title} · {prospect.company} · {prospect.city}, {prospect.county}</div>
 
       {isResearching ? (
@@ -2271,7 +2399,7 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
   return (
     <>
       <button style={{ ...styles.secondaryBtn, marginBottom: '16px' }} onClick={() => setView('research')}>← Back</button>
-      <div style={styles.pageTitle}>Review & Send</div>
+      <div className="shp-page-title" style={styles.pageTitle}>Review & Send</div>
       <div style={styles.pageSubtitle}>To: {prospect.email || <span style={{ color: 'var(--warn)' }}>no email — add manually</span>}</div>
 
       {!isDrafting && draftDiagnostic && (
@@ -2364,7 +2492,7 @@ function PipelineView({ styles, pdConnected, pdMeta, stageDeals, syncPipeline, i
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <div style={styles.pageTitle}>Pipeline</div>
+          <div className="shp-page-title" style={styles.pageTitle}>Pipeline</div>
           <div style={styles.pageSubtitle}>{pdConnected ? `Live from ${pdMeta.defaultPipelineName}` : 'Connect Pipedrive to see live deals'}</div>
         </div>
         {pdConnected && (
@@ -2383,7 +2511,7 @@ function PipelineView({ styles, pdConnected, pdMeta, stageDeals, syncPipeline, i
           </div>
         </div>
       ) : (
-        <div style={styles.pipelineGrid}>
+        <div className="shp-pipeline-grid" style={styles.pipelineGrid}>
           {pdMeta.stages.map(stage => (
             <div key={stage.id} style={styles.pipelineCol}>
               <div style={styles.pipelineHeader}>
@@ -2416,7 +2544,7 @@ function PipelineView({ styles, pdConnected, pdMeta, stageDeals, syncPipeline, i
 function CoachView({ styles, coachTab, setCoachTab, coachSelectedSegment, setCoachSelectedSegment, copyToClipboard }) {
   return (
     <>
-      <div style={styles.pageTitle}>Sandler Coach</div>
+      <div className="shp-page-title" style={styles.pageTitle}>Sandler Coach</div>
       <div style={styles.pageSubtitle}>Pain Funnel prep · Up-Front Contracts · Reversing helpers — for warm conversations after the cold touch</div>
 
       <div style={{ ...styles.nav, marginBottom: '20px', display: 'inline-flex' }}>
@@ -2566,7 +2694,7 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 
   return (
     <>
-      <div style={styles.pageTitle}>Settings</div>
+      <div className="shp-page-title" style={styles.pageTitle}>Settings</div>
       <div style={styles.pageSubtitle}>Pipedrive token is set on the server (Vercel env vars). Other settings save to your browser and sync to Vercel KV when configured.</div>
 
       <div style={styles.card}>
@@ -2604,7 +2732,7 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Mail size={14} /> Sender Identity</div>
-        <div style={styles.grid2}>
+        <div className="shp-grid2" style={styles.grid2}>
           <div>
             <label style={styles.label}>Name</label>
             <input style={styles.input} value={config.fromName} onChange={e => setConfig({ ...config, fromName: e.target.value })} />
@@ -2803,7 +2931,7 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
   };
 
   return (
-    <div style={styles.modalOverlay} onClick={onCancel}>
+    <div className="shp-modal-overlay" style={styles.modalOverlay} onClick={onCancel}>
       <div style={{ ...styles.modalCard, maxWidth: '720px', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
         <div style={{ marginBottom: '8px' }}>
           <div style={{ fontSize: '18px', fontWeight: 700 }}>Find peers at {parent.company}</div>
@@ -2933,7 +3061,7 @@ function BatchEnrichModal({ styles, prospects, clusters, pdRecords, apolloQuota,
   const tierColor = (t) => t >= 4 ? 'var(--ok)' : t === 3 ? 'var(--warn)' : t === 2 ? 'var(--info)' : 'var(--text-3)';
 
   return (
-    <div style={styles.modalOverlay} onClick={isRunning ? undefined : onCancel}>
+    <div className="shp-modal-overlay" style={styles.modalOverlay} onClick={isRunning ? undefined : onCancel}>
       <div style={{ ...styles.modalCard, maxWidth: '760px', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
         <div>
           <div style={{ fontSize: '18px', fontWeight: 700 }}>Spend remaining Apollo credits</div>
@@ -3013,8 +3141,8 @@ function BatchEnrichModal({ styles, prospects, clusters, pdRecords, apolloQuota,
 
 function PursueLaterModal({ styles, date, setDate, onSave, onCancel }) {
   return (
-    <div style={styles.modalOverlay} onClick={onCancel}>
-      <div style={styles.modalCard} onClick={e => e.stopPropagation()}>
+    <div className="shp-modal-overlay" style={styles.modalOverlay} onClick={onCancel}>
+      <div className="shp-modal-card" style={styles.modalCard} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize: '18px', fontWeight: 700, marginBottom: '8px' }}>Pursue Later</div>
         <div style={{ fontSize: '13px', color: 'var(--text-2)', marginBottom: '20px' }}>
           When should I remind you to revisit this prospect? They'll appear on your Dashboard on this date.
@@ -3034,8 +3162,8 @@ function PursueLaterModal({ styles, date, setDate, onSave, onCancel }) {
 
 function DeleteConfirmModal({ styles, prospect, onConfirm, onCancel }) {
   return (
-    <div style={styles.modalOverlay} onClick={onCancel}>
-      <div style={styles.modalCard} onClick={e => e.stopPropagation()}>
+    <div className="shp-modal-overlay" style={styles.modalOverlay} onClick={onCancel}>
+      <div className="shp-modal-card" style={styles.modalCard} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize: '18px', fontWeight: 700, marginBottom: '8px' }}>Delete from pool?</div>
         <div style={{ fontSize: '13px', color: 'var(--text-2)', marginBottom: '20px', lineHeight: '1.6' }}>
           This will remove <strong style={{ color: 'var(--text)' }}>{prospect.name || prospect.company}</strong> from your prospect pool entirely. Pipedrive records (if any) are <strong>not</strong> affected — manage those in Pipedrive directly.
@@ -3211,6 +3339,100 @@ function GlobalStyles() {
       ::-webkit-scrollbar-track { background: transparent; }
       ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--r-pill); border: 2px solid var(--bg); }
       ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+      /* === RESPONSIVE LAYER ===
+         Three breakpoints: mobile (<=720), tablet (721-1024), desktop (>1024).
+         Token-level overrides keep every component responsive without
+         touching their inline styles. */
+
+      /* Show/hide helpers used by the Header / MobileNav split */
+      .shp-show-mobile { display: none; }
+      .shp-show-desktop { display: flex; }
+
+      /* Mobile bottom-tab-bar baseline */
+      .shp-mobile-nav { display: none; }
+
+      @media (max-width: 720px) {
+        :root {
+          --space-5: 16px;
+          --space-6: 20px;
+          --fs-28: 22px;
+          --fs-32: 26px;
+        }
+        .shp-show-mobile { display: flex; }
+        .shp-show-desktop { display: none !important; }
+        .shp-main {
+          padding: var(--space-4) var(--space-3) calc(72px + env(safe-area-inset-bottom)) !important;
+        }
+        .shp-page-title { font-size: var(--fs-22) !important; }
+        .shp-stats-grid { grid-template-columns: 1fr 1fr !important; gap: var(--space-3) !important; }
+        .shp-stat-card { padding: var(--space-3) !important; }
+        .shp-stat-value { font-size: var(--fs-22) !important; }
+        .shp-card { padding: var(--space-4) !important; border-radius: var(--r-md) !important; }
+        .shp-grid2 { grid-template-columns: 1fr !important; }
+        .shp-grid3 { grid-template-columns: 1fr !important; }
+        .shp-modal-card {
+          width: 100% !important;
+          max-width: 100% !important;
+          border-radius: var(--r-lg) var(--r-lg) 0 0 !important;
+          align-self: flex-end;
+          padding: var(--space-5) var(--space-4) calc(var(--space-5) + env(safe-area-inset-bottom)) !important;
+        }
+        .shp-modal-overlay { align-items: flex-end !important; }
+        .shp-mobile-nav {
+          display: grid;
+          grid-template-columns: repeat(5, 1fr);
+          position: fixed;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 60;
+          background: var(--surface);
+          border-top: 1px solid var(--border);
+          padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+          box-shadow: 0 -2px 12px oklch(20% 0.01 25 / 6%);
+        }
+        .shp-mobile-nav-btn {
+          background: transparent;
+          border: none;
+          color: var(--text-2);
+          padding: 8px 4px;
+          border-radius: var(--r-sm);
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 4px;
+          font-family: var(--font-ui);
+          font-size: 11px;
+          font-weight: 600;
+          cursor: pointer;
+          min-height: 52px;
+        }
+        .shp-mobile-nav-btn[data-active="true"] { color: var(--shp-red); }
+        .shp-mobile-nav-btn:hover { background: var(--bg-sunk); }
+
+        /* Pipeline kanban: keep horizontal scroll, but tighter cards */
+        .shp-pipeline-grid { gap: var(--space-2) !important; }
+
+        /* Header: shrink to logo + connection chip; nav is bottom-fixed instead */
+        .shp-header { padding: var(--space-3) var(--space-4) !important; }
+      }
+
+      @media (min-width: 721px) and (max-width: 1024px) {
+        .shp-stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+        .shp-grid3 { grid-template-columns: repeat(2, 1fr) !important; }
+      }
+
+      /* Min tap target on touch — 44px per Apple HIG, 48px per Material */
+      @media (pointer: coarse) {
+        button, a[role="button"], input[type="button"], input[type="submit"] {
+          min-height: 44px;
+        }
+        select, input[type="date"], input[type="text"], input[type="email"], input[type="tel"], textarea {
+          min-height: 44px;
+        }
+      }
     `}</style>
   );
 }
