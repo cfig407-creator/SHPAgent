@@ -7,8 +7,16 @@
 // lets users discover candidates without spending credits.
 //
 // Endpoint: POST /api/apollo-people-search
-// Body: { organizationName, titles: string[], limit?: number }
-// Returns: { candidates: [{ apolloId, firstName, lastName, name, title, organizationName, linkedinUrl, photoUrl }] }
+// Body: {
+//   organizationName?: string,        // narrow to one org (multi-thread use case)
+//   titles: string[],                 // required: job titles to match
+//   locations?: string[],             // e.g. ["Florida, US"] — filters geographically
+//   orgKeywords?: string[],           // e.g. ["school district", "city of"] — segment filter
+//   orgKeywordsExclude?: string[],    // healthcare exclusions etc
+//   limit?: number,                   // 1-25, default 10
+//   page?: number,                    // pagination, default 1
+// }
+// Returns: { candidates: [...], totalEntries }
 
 export default async function handler(req, res) {
   const apiKey = process.env.APOLLO_API_KEY;
@@ -21,21 +29,35 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed — use POST' });
   }
 
-  const { organizationName, titles = [], limit = 10 } = req.body || {};
+  const {
+    organizationName,
+    titles = [],
+    locations = [],
+    orgKeywords = [],
+    orgKeywordsExclude = [],
+    limit = 10,
+    page = 1,
+  } = req.body || {};
 
-  if (!organizationName || !Array.isArray(titles) || titles.length === 0) {
+  if (!Array.isArray(titles) || titles.length === 0) {
     return res.status(400).json({
       error: 'Missing required fields',
-      hint: 'Provide { organizationName, titles: [string, ...], limit? }',
+      hint: 'Provide { titles: [string, ...], plus optional organizationName / locations / orgKeywords / orgKeywordsExclude }',
     });
   }
 
+  // Build the payload — Apollo's mixed_people/search accepts any combination of
+  // org-name, location, and org-keyword filters. We bias toward the user's
+  // titles and overlay whatever scoping they provided.
   const payload = {
-    q_organization_name: organizationName,
-    person_titles: titles.slice(0, 25), // Apollo accepts arrays of titles, capped to be safe
-    page: 1,
+    person_titles: titles.slice(0, 25),
+    page,
     per_page: Math.min(Math.max(limit, 1), 25),
   };
+  if (organizationName) payload.q_organization_name = organizationName;
+  if (locations.length) payload.person_locations = locations.slice(0, 25);
+  if (orgKeywords.length) payload.q_organization_keyword_tags = orgKeywords.slice(0, 25);
+  if (orgKeywordsExclude.length) payload.q_organization_not_keyword_tags = orgKeywordsExclude.slice(0, 25);
 
   try {
     const apolloResp = await fetch('https://api.apollo.io/api/v1/mixed_people/search', {

@@ -473,70 +473,115 @@ export default function SHPProspectingAgent() {
 
   const syncPipeline = () => syncPipelineWith(pdMeta.defaultPipelineId, pdMeta.stages);
 
-  // === Apollo search ===
+  // === Apollo search (criteria-based, direct Apollo people-search) ===
+  // Calls /api/apollo-people-search with parsed user criteria. No Anthropic /
+  // MCP dependency — direct Apollo REST. Free (search is always free; only
+  // enrichment costs credits).
+  //
+  // User inputs (apolloCriteria):
+  //   - titles: comma-separated job titles
+  //   - segments: comma-separated segment labels (K-12, Higher Ed, Local Gov)
+  //
+  // We translate segments → org keyword filters Apollo understands, layer in
+  // Florida location, and exclude healthcare. Results are filtered to the
+  // 15 CFL North counties via classifyCounty.
   const runApolloSearch = async () => {
     setIsApolloSearching(true);
+
+    // Parse user inputs.
+    const titles = apolloCriteria.titles
+      .split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+    const requestedSegments = apolloCriteria.segments
+      .split(/[,\n]/).map(s => s.trim().toLowerCase()).filter(Boolean);
+
+    if (titles.length === 0) {
+      showToast('Add at least one job title to search for', 'error');
+      setIsApolloSearching(false);
+      return;
+    }
+
+    // Map segment labels → Apollo org keyword tags.
+    const SEGMENT_KEYWORDS = {
+      'k-12 education': ['school district', 'public schools', 'k-12', 'county schools', 'isd'],
+      'higher education': ['college', 'university', 'community college', 'state college'],
+      'local government': ['city of', 'county government', 'town of', 'public works', 'county board of commissioners'],
+    };
+    const orgKeywords = [];
+    for (const s of requestedSegments) {
+      const kw = SEGMENT_KEYWORDS[s];
+      if (kw) orgKeywords.push(...kw);
+    }
+
     try {
-      const data = await postJson('/api/anthropic', {
-        model: ANTHROPIC_MODEL,
-        max_tokens: 2000,
-        messages: [{
-          role: 'user',
-          content: `Search Apollo.io for facilities decision-makers in CFL North Florida (these counties: ${TERRITORY.counties.join(', ')}).
+      const data = await postJson('/api/apollo-people-search', {
+        titles,
+        locations: ['Florida, US'],
+        orgKeywords: orgKeywords.length > 0 ? orgKeywords : undefined,
+        orgKeywordsExclude: ['hospital', 'health system', 'medical center', 'physician', 'clinic'],
+        limit: 25,
+      }, { retries: 1, timeoutMs: 30_000 });
 
-Titles to target: ${apolloCriteria.titles}
-Segments to target: ${apolloCriteria.segments}
+      const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
 
-HARD AUTO-SKIP — DO NOT RETURN: Healthcare (hospitals, medical centers, health systems, physician groups, clinics, urgent care). Everything else commercial is fair game — industrial, retail, residential, hospitality, multi-site CRE/PM, plus the core K-12 / Higher Ed / Local Gov ICPs.
+      // De-dupe against existing pool by normalized name+org pair.
+      const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const existingKeys = new Set(
+        prospects.map(p => `${norm(p.name)}|${norm(p.company)}`).filter(k => k !== '|')
+      );
 
-Return ONLY a JSON array (no preamble, no markdown) of up to 8 in-ICP, in-territory prospects:
-[{"name":"Full Name","title":"Job Title","company":"Org Name","city":"City","email":"email or empty","phone":"phone or empty"}]
+      const newProspects = candidates
+        .filter(c => c.name && c.organizationName)
+        .map((c, i) => {
+          const county = classifyCounty(c.city);
+          const icp = classifyICP(c.organizationName, c.title);
+          const titleClass = classifyTitle(c.title);
+          return {
+            id: `apollo_${Date.now()}_${i}`,
+            name: c.name,
+            title: c.title || '',
+            company: c.organizationName,
+            email: '', // Apollo people-search doesn't return verified emails — enrich later
+            phone: '',
+            city: c.city || '',
+            county: county || '',
+            state: c.state || 'FL',
+            zip: '',
+            segment: icp.segment,
+            icpStatus: icp.status,
+            titleAltitude: titleClass.altitude,
+            status: icp.status === 'in' ? 'Ready' : (icp.status === 'unknown' ? 'Review Needed' : 'Out of ICP'),
+            source: 'Apollo Search',
+            priority: 80 + (icp.status === 'in' ? 10 : 0),
+            apolloId: c.apolloId,
+            linkedinUrl: c.linkedinUrl,
+            photoUrl: c.photoUrl,
+            _key: `${norm(c.name)}|${norm(c.organizationName)}`,
+          };
+        });
 
-If Apollo unavailable, return realistic example data for one of the three ICP segments in CFL North.`
-        }],
-        mcp_servers: [{ type: 'url', url: 'https://mcp.apollo.io/mcp', name: 'apollo-mcp' }],
-      }, { retries: 1, timeoutMs: 90_000 });
+      // Filter: in-territory only AND not already in pool.
+      const inTerritory = newProspects.filter(p => p.county && !existingKeys.has(p._key));
+      // Strip _key before persisting.
+      inTerritory.forEach(p => { delete p._key; });
 
-      const blocks = Array.isArray(data?.content) ? data.content : [];
-      const text = blocks.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text).join('\n');
-      if (!text.trim()) {
-        throw new Error('Anthropic returned no text content');
+      const filteredOut = newProspects.length - inTerritory.length;
+      setProspects(prev => [...inTerritory, ...prev]);
+
+      if (inTerritory.length === 0) {
+        showToast(
+          candidates.length === 0
+            ? `Apollo returned 0 matches — try broader titles or fewer segments`
+            : `Apollo returned ${candidates.length} matches but none were in-territory or all were already in pool`,
+          'info',
+        );
+      } else {
+        showToast(
+          `Added ${inTerritory.length} prospect${inTerritory.length === 1 ? '' : 's'} from Apollo${filteredOut > 0 ? ` (${filteredOut} skipped: out-of-territory or duplicates)` : ''}`,
+        );
       }
-      const cleaned = text.replace(/```json|```/g, '').trim();
-      const match = cleaned.match(/\[[\s\S]*\]/);
-      const parsed = match ? JSON.parse(match[0]) : [];
-
-      // Process each result through territory + ICP classification
-      const newProspects = parsed.map((p, i) => {
-        const county = classifyCounty(p.city);
-        const icp = classifyICP(p.company, p.title);
-        const titleClass = classifyTitle(p.title);
-        return {
-          id: `apollo_${Date.now()}_${i}`,
-          name: p.name || '',
-          title: p.title || '',
-          company: p.company || '',
-          email: p.email || '',
-          phone: p.phone || '',
-          city: p.city || '',
-          county: county || '',
-          state: 'FL',
-          zip: '',
-          segment: icp.segment,
-          icpStatus: icp.status,
-          titleAltitude: titleClass.altitude,
-          status: icp.status === 'in' ? 'Ready' : (icp.status === 'unknown' ? 'Review Needed' : 'Out of ICP'),
-          source: 'Apollo',
-          priority: 50 + (icp.status === 'in' ? 30 : 0) + (p.email ? 20 : 0),
-        };
-      });
-
-      // Filter to keep only in-territory results
-      const inTerritory = newProspects.filter(p => p.county);
-      setProspects(prev => [...prev, ...inTerritory]);
-      showToast(`Added ${inTerritory.length} prospects from Apollo (${parsed.length - inTerritory.length} filtered out)`);
     } catch (err) {
-      showToast(`Apollo search unavailable — try Manual Add instead`, 'info');
+      console.error('[shp] Apollo search failed:', err);
+      showToast(`Apollo search failed: ${err.message || 'unknown error'}`, 'error');
     } finally {
       setIsApolloSearching(false);
     }
