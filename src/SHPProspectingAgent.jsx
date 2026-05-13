@@ -125,6 +125,11 @@ export default function SHPProspectingAgent() {
     companyAddress: SHP_IDENTITY.companyAddress,
     softOptOut: DEFAULT_SOFT_OPT_OUT,
     maxTouches: DEFAULT_MAX_TOUCHES,
+    // Apollo plan's monthly credit cap. Free tier = 50; increase if upgraded.
+    // Used as the local fallback when Apollo's API doesn't expose usage data
+    // (auth/health returns nulls on the free tier — local tracking is the
+    // ground truth in that case).
+    apolloMonthlyCredits: 50,
     sendMode: 'pipedrive', // 'pipedrive' (direct send via M365) | 'gmail' (legacy fallback)
     followUpHour: 9, // 0-23, local hour of day for the Day-14 activity
   });
@@ -1714,6 +1719,35 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     );
   }, [prospectsWithOverrides, nowTick]);
 
+  // === Effective Apollo quota ===
+  // Apollo's free-tier API doesn't expose usage data via auth/health, so
+  // /api/apollo-quota returns nulls there. The local cycle tracker is the
+  // ground truth: we know how many credits we've spent because we count
+  // them on each successful enrich. Merge the two sources, preferring
+  // server data when present.
+  const effectiveQuota = useMemo(() => {
+    const serverHasData = apolloQuota?.total != null;
+    if (serverHasData) {
+      return {
+        used: apolloQuota.used ?? apolloCycle.creditsUsedThisCycle ?? 0,
+        total: apolloQuota.total,
+        remaining: apolloQuota.remaining ?? Math.max(0, apolloQuota.total - (apolloCycle.creditsUsedThisCycle ?? 0)),
+        plan: apolloQuota.plan,
+        source: 'server',
+      };
+    }
+    // Server data unavailable — fall back to local tracker + configured cap.
+    const cap = Number.isFinite(config.apolloMonthlyCredits) ? config.apolloMonthlyCredits : 50;
+    const used = apolloCycle.creditsUsedThisCycle ?? 0;
+    return {
+      used,
+      total: cap,
+      remaining: Math.max(0, cap - used),
+      plan: 'local tracker',
+      source: 'local',
+    };
+  }, [apolloQuota, apolloCycle, config.apolloMonthlyCredits]);
+
   // === Stats ===
   // pushedLeads / pushedDeals split so the dashboard can label honestly.
   // Previous "Leads Pushed: 0" was misleading because it assumed pushes always
@@ -1753,14 +1787,14 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         userName={pdMeta.userName}
       />
       <div className="shp-main" style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={apolloQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
-        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={apolloQuota} multiThreadAccount={multiThreadAccount} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
+        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
-        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={apolloQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} />}
+        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} />}
       </div>
       {toast && <Toast styles={styles} toast={toast} />}
       {pursueLaterFor && <PursueLaterModal styles={styles} date={pursueLaterDate} setDate={setPursueLaterDate} onSave={savePursueLater} onCancel={() => setPursueLaterFor(null)} />}
@@ -1781,7 +1815,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           prospects={prospectsWithOverrides}
           clusters={clusters}
           pdRecords={pdRecords}
-          apolloQuota={apolloQuota}
+          apolloQuota={effectiveQuota}
           apolloCycle={apolloCycle}
           isRunning={batchEnrichRunning}
           progress={batchEnrichProgress}
@@ -3320,27 +3354,49 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 
       <div style={styles.card}>
         <div style={styles.sectionTitle}><Sparkles size={14} /> Apollo Credits</div>
-        {apolloQuota ? (
-          <div style={{ padding: '14px', background: 'var(--bg-sunk)', borderRadius: '10px', fontSize: '13px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <div style={{ fontWeight: 600, marginBottom: '4px' }}>
-                {apolloQuota.remaining ?? '—'} of {apolloQuota.total ?? '—'} remaining
-                {apolloQuota.plan && <span style={{ fontWeight: 400, color: 'var(--text-3)', marginLeft: '8px' }}>({apolloQuota.plan})</span>}
-              </div>
-              <div style={{ fontSize: '12px', color: 'var(--text-2)' }}>1 credit per Apollo person-match. Free tier = 50/mo.</div>
+        {/* Quota display — works against effectiveQuota which always renders
+            something even when Apollo's API doesn't expose usage data (the
+            free-tier auth/health endpoint returns nulls). When `source` is
+            'local', we're counting credits ourselves from successful enriches. */}
+        <div style={{ padding: 'var(--space-4)', background: 'var(--bg-sunk)', borderRadius: 'var(--r-md)', fontSize: 'var(--fs-13)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+              {apolloQuota?.remaining ?? '—'} of {apolloQuota?.total ?? '—'} remaining
+              {apolloQuota?.plan && <span style={{ fontWeight: 400, color: 'var(--text-3)', marginLeft: '8px' }}>({apolloQuota.plan})</span>}
             </div>
-            <button style={styles.secondaryBtn} onClick={fetchApolloQuota}>
-              <RefreshCw size={13} /> Refresh
-            </button>
+            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-2)' }}>
+              {apolloQuota?.source === 'local'
+                ? 'Counted locally — Apollo\'s free-tier API doesn\'t expose usage. Update the cap below if you upgraded.'
+                : '1 credit per Apollo person-match. Free tier = 50/mo.'}
+            </div>
           </div>
-        ) : (
-          <div style={{ padding: '14px', background: 'var(--bg-sunk)', borderRadius: '10px', fontSize: '13px', color: 'var(--text-2)' }}>
-            Apollo quota unavailable — check that <code style={{ background: 'var(--bg-sunk)', padding: '2px 6px', borderRadius: '4px' }}>APOLLO_API_KEY</code> is set in Vercel.
-            <button style={{ ...styles.secondaryBtn, marginLeft: '12px' }} onClick={fetchApolloQuota}>
-              <RefreshCw size={13} /> Retry
-            </button>
+          <button style={styles.secondaryBtn} onClick={fetchApolloQuota}>
+            <RefreshCw size={13} /> Refresh
+          </button>
+        </div>
+
+        <div>
+          <label style={styles.label}>Monthly credit cap (used for the local fallback when server data is unavailable)</label>
+          <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+            <input
+              type="number"
+              min="0"
+              step="50"
+              style={{ ...styles.input, maxWidth: '160px' }}
+              value={config.apolloMonthlyCredits ?? 50}
+              onChange={e => setConfig({ ...config, apolloMonthlyCredits: parseInt(e.target.value, 10) || 0 })}
+            />
+            <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
+              credits / month
+            </span>
           </div>
-        )}
+          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginTop: '6px' }}>
+            Free tier = 50. Set this to whatever your Apollo plan provides so the dashboard "credits remaining" stays accurate.
+          </div>
+          <button style={{ ...styles.primaryBtn, marginTop: 'var(--space-3)', fontSize: 'var(--fs-13)' }} onClick={saveConfig}>
+            <CheckCircle2 size={13} /> Save cap
+          </button>
+        </div>
       </div>
 
       <div style={styles.card}>
