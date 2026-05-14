@@ -1352,14 +1352,27 @@ ${VOICE_GUIDE}
 ${voiceExamples}
 
 ═════ STRUCTURE FOR YOUR DRAFT ═════
-1. Opener — ${hasRealHook
-   ? `lead with the assumptive question from the OPENING HOOK above. Keep it framed as a question that the prospect is plausibly dealing with right now — not as a statement of facts about them. You may lightly adjust phrasing to match Anthony's voice (humble, peer-tone, no exclamation points). NEVER add "I noticed...", "I saw...", or specific facts/numbers/dates back in. The question itself does the work — it lands because it's relevant, not because it cites their data.`
-   : `disarming, not salesy. Examples Anthony actually uses:
+GREETING — Always "Hi {firstName}," using the prospect's FIRST name only.
+Never use "Ms./Mr./Dr. {LastName}" — that's too formal for Anthony's
+peer voice. If you only have one name, use it as-is.
+
+${hasRealHook
+  ? `1. OPENER (hasRealHook = TRUE): the assumptive question from the OPENING
+   HOOK above IS your opener. Place it RIGHT AFTER the greeting on its own
+   paragraph. DO NOT stack a generic "I hope email is OK" or "I wanted to
+   send a quick note" preamble in front of it — the question is the opener.
+
+2. (SKIP the standard humble-framing beat — the question itself is humble,
+   it asks the prospect for their point of view. Going from question →
+   humble framing reads as backpedaling.) Move straight to step 3.`
+  : `1. OPENER (no research hook): disarming, not salesy. Examples Anthony actually uses:
    - "I got your name while wandering [their site/area]..."
    - "I hope email is OK. I did not want to interrupt your day with a phone call..."
    - "I am reaching out for a quick introduction..."
-   Pick whichever fits the situation.`}
-2. Humble framing — acknowledge they likely have a vendor: "I know you likely have someone for what we do, but..." OR if research surfaced something specific, lead with that and skip this beat.
+   Pick whichever fits the situation.
+
+2. Humble framing — acknowledge they likely have a vendor: "I know you likely
+   have someone for what we do, but..."`}
 3. SHP intro + capability summary — one sentence about who SHP is and what we cover. Keep it tight.
 4. Optional proof drop — if a proof point fits naturally (1-2 names max).
 5. Soft CTA — borrow from: ${cta}
