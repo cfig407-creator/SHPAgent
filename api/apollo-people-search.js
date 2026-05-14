@@ -35,6 +35,7 @@ export default async function handler(req, res) {
     locations = [],
     orgKeywords = [],
     orgKeywordsExclude = [],
+    emailRequired = true, // default: only return contacts where Apollo has a deliverable email
     limit = 10,
     page = 1,
   } = req.body || {};
@@ -64,6 +65,13 @@ export default async function handler(req, res) {
   if (locations.length) payload.organization_locations = locations.slice(0, 200);
   if (orgKeywords.length) payload.q_organization_keyword_tags = orgKeywords.slice(0, 25);
   if (orgKeywordsExclude.length) payload.q_organization_not_keyword_tags = orgKeywordsExclude.slice(0, 25);
+
+  // Email-availability filter. Apollo's API field is `contact_email_status[]`.
+  // We allow the three high-confidence buckets and drop unverified +
+  // unavailable. Caller can override by passing emailRequired: false.
+  if (emailRequired) {
+    payload.contact_email_status = ['verified', 'extrapolated_verified', 'likely_to_engage'];
+  }
 
   try {
     const apolloResp = await fetch('https://api.apollo.io/api/v1/mixed_people/search', {
@@ -117,6 +125,11 @@ export default async function handler(req, res) {
       photoUrl: p.photo_url,
       city: p.city,
       state: p.state,
+      // Email + status — only populated on paid plans / verified emails.
+      // Free tier often returns email_status without the actual email
+      // (the enrich endpoint is required to reveal the address).
+      email: p.email || '',
+      emailStatus: p.email_status || null,
     })).filter(c => c.name); // drop anything Apollo couldn't name
 
     return res.status(200).json({

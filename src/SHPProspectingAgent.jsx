@@ -538,12 +538,16 @@ export default function SHPProspectingAgent() {
           const county = classifyCounty(c.city);
           const icp = classifyICP(c.organizationName, c.title);
           const titleClass = classifyTitle(c.title);
+          // Use the email Apollo returned (paid tier) or empty (free tier
+          // returns status without the actual address — still requires
+          // running through /api/apollo-enrich to reveal).
+          const apolloEmail = c.email && c.email.trim() ? c.email.toLowerCase() : '';
           return {
             id: `apollo_${Date.now()}_${i}`,
             name: c.name,
             title: c.title || '',
             company: c.organizationName,
-            email: '', // Apollo people-search doesn't return verified emails — enrich later
+            email: apolloEmail,
             phone: '',
             city: c.city || '',
             county: county || '',
@@ -554,8 +558,10 @@ export default function SHPProspectingAgent() {
             titleAltitude: titleClass.altitude,
             status: icp.status === 'in' ? 'Ready' : (icp.status === 'unknown' ? 'Review Needed' : 'Out of ICP'),
             source: 'Apollo Search',
-            priority: 80 + (icp.status === 'in' ? 10 : 0),
+            // Bonus priority if Apollo already supplied a verified email
+            priority: 80 + (icp.status === 'in' ? 10 : 0) + (apolloEmail ? 10 : 0),
             apolloId: c.apolloId,
+            apolloEmailStatus: c.emailStatus || null,
             linkedinUrl: c.linkedinUrl,
             photoUrl: c.photoUrl,
             _key: `${norm(c.name)}|${norm(c.organizationName)}`,
@@ -2517,8 +2523,8 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
             <label style={styles.label}>Segments <span style={{ color: 'var(--text-3)', fontWeight: 400 }}>(comma-separated)</span></label>
             <input style={styles.input} value={apolloCriteria.segments} onChange={e => setApolloCriteria({ ...apolloCriteria, segments: e.target.value })} />
           </div>
-          <div style={{ fontSize: '12px', color: 'var(--text-3)', marginBottom: '14px', padding: '10px 12px', background: 'var(--bg-sunk)', borderRadius: '6px' }}>
-            Locked to your 15 CFL North counties: {TERRITORY.counties.join(', ')}. Healthcare is the only auto-skip.
+          <div style={{ fontSize: '12px', color: 'var(--text-3)', marginBottom: '14px', padding: '10px 12px', background: 'var(--bg-sunk)', borderRadius: '6px', lineHeight: 1.55 }}>
+            <strong style={{ color: 'var(--text)' }}>Filters applied:</strong> orgs HQ'd in your 15 CFL North counties · healthcare excluded · only contacts with deliverable emails (verified, extrapolated-verified, or likely-to-engage).
           </div>
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center' }}>
@@ -4848,12 +4854,30 @@ function GlobalStyles() {
 // Used as the free-tier workaround for the search API plan-limit: user
 // clicks the button → reviews/refines in Apollo's UI → exports CSV →
 // drops the CSV into Find → Import CSV. Full closed loop without paying.
-function buildApolloSearchUrl({ titles = [], segments = [], locations = APOLLO_LOCATION_STRINGS, keywordsExclude = [] }) {
+function buildApolloSearchUrl({
+  titles = [],
+  segments = [],
+  locations = APOLLO_LOCATION_STRINGS,
+  keywordsExclude = [],
+  emailRequired = true, // default: only return contacts where Apollo has an email
+}) {
   const params = [];
   const push = (key, value) => {
     if (value == null || value === '') return;
     params.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
   };
+
+  // Email availability filter. Apollo's email-status taxonomy on the search
+  // UI uses `contactEmailStatusV2[]`. Values worth keeping:
+  //   verified                — Apollo SMTP-confirmed
+  //   extrapolated_verified   — pattern-derived, deliverable
+  //   likely_to_engage        — high open/reply propensity
+  // Excludes 'unverified' (low confidence) and 'unavailable' (no email at all).
+  if (emailRequired) {
+    push('contactEmailStatusV2[]', 'verified');
+    push('contactEmailStatusV2[]', 'extrapolated_verified');
+    push('contactEmailStatusV2[]', 'likely_to_engage');
+  }
 
   // Person titles — Apollo accepts array-style params (key[]=...).
   for (const t of titles) push('personTitles[]', t);
