@@ -23,7 +23,7 @@ import { apiFetch, postJson } from './api-client.js';
 // Anthropic model — promoted to a constant so we change it in one place.
 // Use a stable alias rather than a dated snapshot so we don't break when
 // Anthropic retires old snapshots.
-const ANTHROPIC_MODEL = 'claude-sonnet-4-5';
+const ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 
 // === APOLLO CYCLE HELPERS ===
 // Tracks credit usage by calendar month so we can surface end-of-cycle nudges
@@ -163,6 +163,14 @@ export default function SHPProspectingAgent() {
   const [draftDiagnostic, setDraftDiagnostic] = useState(null);
   // Track recently-used variant IDs so the composer rotates rather than repeats
   const [recentVariants, setRecentVariants] = useState([]);
+
+  // Batch draft queue — multi-select in Find → research + draft N prospects in one run
+  const [selectedProspectIds, setSelectedProspectIds] = useState(new Set());
+  const [batchDraftOpen, setBatchDraftOpen] = useState(false);
+  const [batchDraftRunning, setBatchDraftRunning] = useState(false);
+  const [batchDraftProgress, setBatchDraftProgress] = useState({ done: 0, total: 0, currentName: '' });
+  const [batchDraftQueue, setBatchDraftQueue] = useState({}); // { [id]: { status, research?, draft?, fallback?, error? } }
+  const [batchDraftCancel, setBatchDraftCancel] = useState(false);
 
   // Pipedrive records — pdRecords[prospectId] = {leadId, leadUrl, dealId, dealUrl, personId, orgId, sentAt, sentHistory[], touchCount}
   // leadId is set when we push (default). dealId is set later if/when the lead is converted in Pipedrive.
@@ -1800,6 +1808,136 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
   // Backwards-compatible alias for any UI still calling sendViaGmail
   const sendViaGmail = sendViaOutlook;
 
+  // === Batch Draft Queue ===
+  // Research + AI-draft N selected prospects sequentially.
+  // Re-uses cached research when available (same research that was already done
+  // for a prospect via the single-prospect flow). Falls back to the deterministic
+  // composer when the AI draft call fails so every prospect always gets something.
+  const runBatchDraft = async (ids) => {
+    if (!ids || ids.length === 0) return;
+    setBatchDraftOpen(true);
+    setBatchDraftRunning(true);
+    setBatchDraftCancel(false);
+    setBatchDraftProgress({ done: 0, total: ids.length, currentName: '' });
+    setBatchDraftQueue(Object.fromEntries(ids.map(id => [id, { status: 'pending' }])));
+
+    for (let i = 0; i < ids.length; i++) {
+      let cancelled = false;
+      setBatchDraftCancel(c => { cancelled = c; return c; });
+      if (cancelled) break;
+
+      const id = ids[i];
+      const prospect = prospectsWithOverrides.find(p => p.id === id);
+      if (!prospect) continue;
+
+      setBatchDraftProgress({ done: i, total: ids.length, currentName: prospect.name || prospect.company });
+
+      // === RESEARCH (skip if already cached) ===
+      setBatchDraftQueue(prev => ({ ...prev, [id]: { status: 'researching' } }));
+      let research = researchData[id] || null;
+      if (!research) {
+        try {
+          const data = await postJson('/api/anthropic', {
+            model: ANTHROPIC_MODEL,
+            max_tokens: 2000,
+            messages: [{
+              role: 'user',
+              content: `You are researching a sales prospect for Superior Hardware Products, a commercial door & hardware distributor in Central Florida. The prospect is:
+
+Name: ${prospect.name || '(no contact name)'}
+Title: ${prospect.title || '(unknown)'}
+Organization: ${prospect.company}
+Location: ${prospect.city}, ${prospect.county || 'Florida'}
+ICP segment: ${prospect.segment}
+
+YOUR TASK: Use web_search to find SPECIFIC, CONCRETE information about THIS organization. Don't return generic segment-level pain points. Search for:
+1. Their facilities footprint — number of buildings, square footage, recent construction or renovation news
+2. Recent news, board meeting items, or budget discussions about facilities/maintenance/security
+3. Capital improvement plans, master plans, RFPs related to doors/hardware/access control
+4. Anything specific that suggests a current or upcoming facility need
+
+If you can't find specifics about the organization, search broader (the school district, the city's CIP, etc.). Try at least 2 different search queries before giving up.
+
+Return ONLY a JSON object (no preamble, no markdown). Be honest about specificity:
+{
+  "companySnapshot": "1-2 sentences about the org. Reference specific facts when found.",
+  "facilityProfile": "1-2 sentences on facility footprint. Use real numbers when found, otherwise say 'inferred from segment'.",
+  "painSignals": ["3 specific pain points. Mark with [SPECIFIC] if grounded in research, [INFERRED] if from segment defaults."],
+  "openingHook": "ONE assumptive question that applies BROADLY to the segment — never reveal research. Stay segment-universal.",
+  "fitScore": 85,
+  "fitReasoning": "1 sentence on SHP fit",
+  "specificityRating": "high | medium | low",
+  "specificityNote": "1 sentence explaining what you found vs. couldn't find"
+}`,
+            }],
+            tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+          }, { retries: 1, timeoutMs: 90_000 });
+
+          const blocks = Array.isArray(data?.content) ? data.content : [];
+          const text = blocks.filter(b => b?.type === 'text').map(b => b.text).filter(Boolean).join('\n');
+          const cleaned = text.replace(/```json|```/g, '').trim();
+          const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            parsed.painSignals = Array.isArray(parsed.painSignals) ? parsed.painSignals : [];
+            parsed.fitScore = Number.isFinite(parsed.fitScore) ? parsed.fitScore : 70;
+            research = parsed;
+            setResearchData(prev => ({ ...prev, [id]: research }));
+          }
+        } catch {
+          // Research failed — use segment-default pain signals as fallback context
+          const segPains = PAIN_LIBRARY[prospect.segment]?.tactical || [];
+          research = {
+            companySnapshot: `${prospect.company} — ${prospect.segment} in ${prospect.county || 'CFL North'}.`,
+            facilityProfile: 'Multi-building operator, inferred from segment.',
+            painSignals: segPains.slice(0, 3).map(p => `[INFERRED] ${p}`),
+            fitScore: 75,
+            fitReasoning: `${prospect.segment} is in-ICP for SHP.`,
+            specificityRating: 'low',
+            specificityNote: 'Research unavailable — segment defaults used.',
+          };
+          setResearchData(prev => ({ ...prev, [id]: research }));
+        }
+      }
+      setBatchDraftQueue(prev => ({ ...prev, [id]: { ...prev[id], status: 'drafting', research } }));
+
+      // === DRAFT ===
+      const proofs = pickProofPoints(prospect, 3);
+      const sigWithAddress = ensureAddressInSignature(config.signature, config.companyAddress);
+      let draft;
+      let draftFallback = false;
+      try {
+        const prompt = buildColdEmailPrompt(prospect, research, prospect.segment, sigWithAddress, config.softOptOut);
+        const data = await postJson('/api/anthropic', {
+          model: ANTHROPIC_MODEL,
+          max_tokens: 1500,
+          messages: [{ role: 'user', content: prompt }],
+        }, { retries: 1, timeoutMs: 60_000 });
+
+        const blocks = Array.isArray(data?.content) ? data.content : [];
+        const text = blocks.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text).join('\n').trim();
+        const cleaned = text.replace(/```json|```/g, '').trim();
+        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (parsed?.subject && parsed?.body) {
+            draft = { subject: parsed.subject, body: parsed.body };
+          }
+        }
+      } catch { /* fall through to deterministic below */ }
+
+      if (!draft) {
+        const result = composeEmail({ prospect, signature: sigWithAddress, proofPoints: proofs, softOptOut: config.softOptOut });
+        draft = { subject: result.subject, body: result.body };
+        draftFallback = true;
+      }
+
+      setBatchDraftQueue(prev => ({ ...prev, [id]: { status: 'ready', research, draft, fallback: draftFallback } }));
+    }
+
+    setBatchDraftProgress(prev => ({ ...prev, done: ids.length, currentName: '' }));
+    setBatchDraftRunning(false);
+  };
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
@@ -1951,7 +2089,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       />
       <div className="shp-main" style={styles.main}>
         {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
-        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} />}
+        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
@@ -1962,6 +2100,22 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       {toast && <Toast styles={styles} toast={toast} />}
       {pursueLaterFor && <PursueLaterModal styles={styles} date={pursueLaterDate} setDate={setPursueLaterDate} onSave={savePursueLater} onCancel={() => setPursueLaterFor(null)} />}
       {deleteConfirm && <DeleteConfirmModal styles={styles} prospect={deleteConfirm} onConfirm={executeDelete} onCancel={() => setDeleteConfirm(null)} />}
+      {batchDraftOpen && (
+        <BatchDraftModal
+          styles={styles}
+          isRunning={batchDraftRunning}
+          progress={batchDraftProgress}
+          queue={batchDraftQueue}
+          prospects={prospectsWithOverrides}
+          config={config}
+          pdRecords={pdRecords}
+          onCancel={() => {
+            if (batchDraftRunning) setBatchDraftCancel(true);
+            else setBatchDraftOpen(false);
+          }}
+          onClose={() => setBatchDraftOpen(false)}
+        />
+      )}
       {findPeersFor && (
         <FindPeersModal
           styles={styles}
@@ -2485,7 +2639,7 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
 // =================================================================
 // === FIND VIEW ===
 // =================================================================
-function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount }) {
+function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount, selectedProspectIds, onToggleSelect, onSelectAll, onClearSelection, onBatchDraft }) {
   const [findTab, setFindTab] = useState('pool');
 
   return (
@@ -2661,9 +2815,60 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
           </div>
 
           <div style={styles.card}>
-            <div style={styles.sectionTitle}><Users size={14} /> Prospects ({prospects.length})</div>
+            {/* Section header with select-all toggle */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-4)' }}>
+              <div style={styles.sectionTitle}><Users size={14} /> Prospects ({prospects.length})</div>
+              {prospects.length > 0 && (
+                <button
+                  style={{ ...styles.secondaryBtn, fontSize: 'var(--fs-12)', padding: '4px 10px' }}
+                  onClick={() => {
+                    const visibleIds = prospects.slice(0, 50).map(p => p.id);
+                    const allSelected = visibleIds.every(id => selectedProspectIds.has(id));
+                    if (allSelected) {
+                      onClearSelection && onClearSelection();
+                    } else {
+                      onSelectAll && onSelectAll(visibleIds);
+                    }
+                  }}
+                >
+                  {prospects.slice(0, 50).every(p => selectedProspectIds.has(p.id)) ? 'Deselect all' : 'Select all'}
+                </button>
+              )}
+            </div>
+
+            {/* Floating action bar — appears when any prospects are selected */}
+            {selectedProspectIds.size > 0 && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-3)',
+                padding: 'var(--space-3) var(--space-4)',
+                background: 'var(--shp-red-soft)',
+                border: '1px solid color-mix(in oklch, var(--shp-red) 25%, transparent)',
+                borderRadius: 'var(--r-md)',
+                marginBottom: 'var(--space-4)',
+                flexWrap: 'wrap',
+              }}>
+                <span style={{ fontSize: 'var(--fs-13)', fontWeight: 600, color: 'var(--text)' }}>
+                  {selectedProspectIds.size} prospect{selectedProspectIds.size === 1 ? '' : 's'} selected
+                </span>
+                <button
+                  style={{ ...styles.primaryBtn, fontSize: 'var(--fs-13)' }}
+                  onClick={() => onBatchDraft && onBatchDraft(Array.from(selectedProspectIds))}
+                >
+                  <Sparkles size={14} /> Draft {selectedProspectIds.size} email{selectedProspectIds.size === 1 ? '' : 's'}
+                </button>
+                <button
+                  style={{ ...styles.secondaryBtn, fontSize: 'var(--fs-13)' }}
+                  onClick={() => onClearSelection && onClearSelection()}
+                >
+                  <X size={13} /> Clear
+                </button>
+              </div>
+            )}
+
             {prospects.slice(0, 50).map(p => (
-              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />
+              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} selected={selectedProspectIds.has(p.id)} onToggleSelect={() => onToggleSelect && onToggleSelect(p.id)} />
             ))}
             {prospects.length > 50 && (
               <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic' }}>
@@ -2884,7 +3089,7 @@ function CSVImportTab({ styles, importCsvRows, showToast }) {
   );
 }
 
-function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
+function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, selected, onToggleSelect }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const research = researchData[prospect.id];
   const rec = pdRecords[prospect.id];
@@ -2907,6 +3112,16 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
   return (
     <div style={cardStyle}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '20px' }}>
+        {onToggleSelect && (
+          <div style={{ paddingTop: '2px', flexShrink: 0 }}>
+            <input
+              type="checkbox"
+              checked={!!selected}
+              onChange={onToggleSelect}
+              style={{ width: 15, height: 15, cursor: 'pointer', accentColor: 'var(--shp-red)' }}
+            />
+          </div>
+        )}
         <div style={{ flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px', flexWrap: 'wrap' }}>
             <div style={{ fontSize: '14px', fontWeight: 600 }}>{prospect.name || <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>(no contact name)</span>}</div>
@@ -3947,6 +4162,256 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
 // Two-state modal:
 //   1. Running: progress bar showing "Searching X of Y orgs · {currentOrg}"
 //      with a Cancel button.
+// =================================================================
+// === BATCH DRAFT MODAL ==========================================
+// =================================================================
+// Two phases:
+//   1. Running: progress bar + current prospect name + cancel button
+//   2. Review: list of all drafted emails — edit subject/body inline,
+//      open each in Outlook, or open all at once. Fallback drafts
+//      are flagged so Anthony knows which ones to double-check.
+function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config, pdRecords, onCancel, onClose }) {
+  const [expandedId, setExpandedId] = useState(null);
+  // Local edits to subject/body — keyed by prospect id
+  const [localEdits, setLocalEdits] = useState({});
+
+  const entries = Object.entries(queue);
+  const readyEntries = entries.filter(([, v]) => v.status === 'ready');
+  const errorEntries = entries.filter(([, v]) => v.status === 'error');
+  const pendingCount = entries.filter(([, v]) => ['pending', 'researching', 'drafting'].includes(v.status)).length;
+
+  const getProspect = (id) => prospects.find(p => p.id === id);
+
+  const openInOutlook = (id) => {
+    const prospect = getProspect(id);
+    if (!prospect?.email) return;
+    const item = queue[id];
+    const edit = localEdits[id];
+    const subject = edit?.subject ?? item?.draft?.subject ?? '';
+    const body = edit?.body ?? item?.draft?.body ?? '';
+    const enc = encodeURIComponent;
+    const parts = [`to=${enc(prospect.email)}`, `subject=${enc(subject)}`, `body=${enc(body)}`];
+    if (config?.smartBcc) parts.push(`bcc=${enc(config.smartBcc)}`);
+    window.open(`https://outlook.office.com/mail/deeplink/compose?${parts.join('&')}`, '_blank', 'noopener,noreferrer');
+  };
+
+  const openAllInOutlook = () => {
+    readyEntries.forEach(([id]) => {
+      const prospect = getProspect(id);
+      if (prospect?.email) openInOutlook(id);
+    });
+  };
+
+  const progressPct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+
+  return (
+    <div className="shp-modal-overlay" style={styles.modalOverlay} onClick={isRunning ? undefined : onClose}>
+      <div
+        className="shp-modal-card"
+        style={{ ...styles.modalCard, maxWidth: '860px', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 'var(--space-4)' }}>
+          <div>
+            <div style={{ fontSize: 'var(--fs-22)', fontWeight: 700, marginBottom: '4px' }}>
+              {isRunning ? 'Drafting emails…' : 'Batch Draft Queue'}
+            </div>
+            <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-3)' }}>
+              {isRunning
+                ? `${progress.done} of ${progress.total} complete`
+                : `${readyEntries.length} ready · ${errorEntries.length} failed · ${pendingCount} pending`}
+            </div>
+          </div>
+          {!isRunning && (
+            <button style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '4px' }} onClick={onClose}>
+              <X size={18} />
+            </button>
+          )}
+        </div>
+
+        {/* Progress bar (shown while running) */}
+        {isRunning && (
+          <div style={{ padding: 'var(--space-4)', background: 'var(--bg-sunk)', borderRadius: 'var(--r-md)', marginBottom: 'var(--space-4)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
+              <span style={{ fontSize: 'var(--fs-13)', fontWeight: 600 }}>
+                {progress.currentName || 'Starting…'}
+              </span>
+              <button
+                style={{ ...styles.secondaryBtn, padding: '5px 12px', fontSize: 'var(--fs-12)' }}
+                onClick={onCancel}
+              >
+                Cancel
+              </button>
+            </div>
+            <div style={{ height: 6, background: 'var(--border)', borderRadius: 'var(--r-pill)', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                width: `${progressPct}%`,
+                background: 'var(--shp-red)',
+                transition: 'width 0.3s var(--ease)',
+              }} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 'var(--space-2)', fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
+              <span>{progressPct}%</span>
+              <span>{progress.done} / {progress.total}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Live status list while running (compact) */}
+        {isRunning && entries.length > 0 && (
+          <div style={{ overflowY: 'auto', flex: 1, border: '1px solid var(--border)', borderRadius: 'var(--r-md)' }}>
+            {entries.map(([id, item]) => {
+              const p = getProspect(id);
+              const statusIcon = item.status === 'ready' ? '✓' : item.status === 'error' ? '✗' : item.status === 'drafting' ? '✍' : item.status === 'researching' ? '🔍' : '·';
+              const statusColor = item.status === 'ready' ? 'var(--ok)' : item.status === 'error' ? 'var(--err)' : 'var(--text-3)';
+              return (
+                <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-3) var(--space-4)', borderBottom: '1px solid var(--border-subtle)' }}>
+                  <span style={{ color: statusColor, width: 16, textAlign: 'center', fontSize: 'var(--fs-13)' }}>{statusIcon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 'var(--fs-13)', fontWeight: 500 }}>{p?.name || id}</div>
+                    <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>{p?.company}</div>
+                  </div>
+                  <span style={{ fontSize: 'var(--fs-12)', color: statusColor, textTransform: 'capitalize' }}>{item.status}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Review phase — shown when not running */}
+        {!isRunning && entries.length > 0 && (
+          <>
+            {readyEntries.length > 0 && (
+              <div style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', flexWrap: 'wrap' }}>
+                <button
+                  style={{ ...styles.primaryBtn }}
+                  onClick={openAllInOutlook}
+                >
+                  <Send size={14} /> Open all in Outlook ({readyEntries.filter(([id]) => getProspect(id)?.email).length} with email)
+                </button>
+              </div>
+            )}
+
+            <div style={{ overflowY: 'auto', flex: 1, border: '1px solid var(--border)', borderRadius: 'var(--r-md)' }}>
+              {entries.map(([id, item]) => {
+                const p = getProspect(id);
+                const isExpanded = expandedId === id;
+                const edit = localEdits[id] || {};
+                const subject = edit.subject ?? item?.draft?.subject ?? '';
+                const body = edit.body ?? item?.draft?.body ?? '';
+                const hasEmail = !!p?.email;
+
+                return (
+                  <div key={id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                    {/* Row header */}
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 'var(--space-3)',
+                        padding: 'var(--space-3) var(--space-4)',
+                        cursor: item.status === 'ready' ? 'pointer' : 'default',
+                        background: isExpanded ? 'var(--bg-sunk)' : 'transparent',
+                      }}
+                      onClick={() => item.status === 'ready' && setExpandedId(isExpanded ? null : id)}
+                    >
+                      <div style={{ width: 20, textAlign: 'center', flexShrink: 0 }}>
+                        {item.status === 'ready' ? (
+                          isExpanded ? <ChevronDown size={14} color="var(--text-3)" /> : <ChevronRight size={14} color="var(--text-3)" />
+                        ) : item.status === 'error' ? (
+                          <AlertCircle size={14} color="var(--err)" />
+                        ) : (
+                          <Loader2 size={14} color="var(--text-3)" className="spin" />
+                        )}
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 'var(--fs-13)', fontWeight: 600 }}>{p?.name || '(no name)'}</span>
+                          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>· {p?.company}</span>
+                          {item.fallback && (
+                            <span style={{ ...styles.badge('amber'), fontSize: '10px' }}>deterministic</span>
+                          )}
+                          {!hasEmail && (
+                            <span style={{ ...styles.badge('gray'), fontSize: '10px' }}>no email</span>
+                          )}
+                        </div>
+                        {item.status === 'ready' && subject && (
+                          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {subject}
+                          </div>
+                        )}
+                        {item.status === 'error' && (
+                          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--err)', marginTop: '2px' }}>
+                            {item.error || 'Unknown error'}
+                          </div>
+                        )}
+                      </div>
+
+                      {item.status === 'ready' && (
+                        <button
+                          style={{
+                            ...styles.primaryBtn,
+                            fontSize: 'var(--fs-12)',
+                            padding: '5px 12px',
+                            flexShrink: 0,
+                            opacity: hasEmail ? 1 : 0.4,
+                            cursor: hasEmail ? 'pointer' : 'not-allowed',
+                          }}
+                          onClick={(e) => { e.stopPropagation(); hasEmail && openInOutlook(id); }}
+                          title={hasEmail ? 'Open in Outlook' : 'No email address — enrich this prospect first'}
+                        >
+                          <Send size={12} /> Open in Outlook
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Expanded draft editor */}
+                    {isExpanded && item.status === 'ready' && (
+                      <div style={{ padding: 'var(--space-4)', background: 'var(--bg-sunk)', borderTop: '1px solid var(--border-subtle)' }}>
+                        <div style={{ marginBottom: 'var(--space-3)' }}>
+                          <label style={{ ...styles.label, marginBottom: 'var(--space-2)' }}>Subject</label>
+                          <input
+                            style={styles.input}
+                            value={subject}
+                            onChange={e => setLocalEdits(prev => ({ ...prev, [id]: { ...prev[id], subject: e.target.value } }))}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ ...styles.label, marginBottom: 'var(--space-2)' }}>Body</label>
+                          <textarea
+                            style={{ ...styles.input, height: '240px', resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.6 }}
+                            value={body}
+                            onChange={e => setLocalEdits(prev => ({ ...prev, [id]: { ...prev[id], body: e.target.value } }))}
+                          />
+                        </div>
+                        {item.fallback && (
+                          <div style={{ marginTop: 'var(--space-2)', fontSize: 'var(--fs-12)', color: 'var(--warn)' }}>
+                            Deterministic fallback — AI draft failed. Review before sending.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {/* Footer */}
+        {!isRunning && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--space-4)' }}>
+            <button style={styles.secondaryBtn} onClick={onClose}>Close</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 //   2. Complete: aggregated review screen with all candidates from all orgs.
 //      User filters / multi-selects / bulk-adds. Apollo searches were free —
 //      only enrichment costs credits, which happens later via Batch Enrich.
