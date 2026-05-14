@@ -8,7 +8,8 @@ import {
 } from 'lucide-react';
 import {
   SHP_IDENTITY, DEFAULT_SIGNATURE, DEFAULT_SOFT_OPT_OUT, DEFAULT_MAX_TOUCHES,
-  TERRITORY, classifyCounty, isInTerritory,
+  TERRITORY, APOLLO_LOCATION_STRINGS, ZIP_TO_COUNTY,
+  classifyCounty, isInTerritory,
   classifyICP, classifyTitle, PAIN_LIBRARY, RESOURCE_CTAS, CUSTOMERS, pickProofPoints,
   customerCheck, detectEnrichmentNeeds,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
@@ -515,7 +516,9 @@ export default function SHPProspectingAgent() {
     try {
       const data = await postJson('/api/apollo-people-search', {
         titles,
-        locations: ['Florida, US'],
+        // Send each CFL North county as its own location filter so Apollo
+        // narrows from "anyone in Florida" to "anyone in these 15 counties".
+        locations: APOLLO_LOCATION_STRINGS,
         orgKeywords: orgKeywords.length > 0 ? orgKeywords : undefined,
         orgKeywordsExclude: ['hospital', 'health system', 'medical center', 'physician', 'clinic'],
         limit: 25,
@@ -617,7 +620,8 @@ export default function SHPProspectingAgent() {
       const key = `${norm(c.name)}|${norm(c.company)}`;
       if (existingKeys.has(key)) { stats.skippedDup++; return; }
 
-      const county = classifyCounty(c.city);
+      // Zip-aware county lookup — falls back to zip when city is unrecognized.
+      const county = classifyCounty(c.city, c.zip);
       const icp = classifyICP(c.company, c.title);
       const titleClass = classifyTitle(c.title);
 
@@ -636,7 +640,7 @@ export default function SHPProspectingAgent() {
         city: c.city || '',
         county,
         state: c.state || 'FL',
-        zip: '',
+        zip: c.zip || '',
         segment: icp.segment,
         icpStatus: icp.status,
         titleAltitude: titleClass.altitude,
@@ -1438,9 +1442,10 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     setNewAccountsResults([]);
     setNewAccountsProgress({ phase: 'orgs', done: 0, total: 3, currentOrg: 'Searching organizations…' });
 
-    // Common: territory + healthcare exclusion. Apollo accepts location
-    // strings like "Florida, US" — we narrow on our side using county.
-    const locations = ['Florida, US'];
+    // Send Apollo each CFL North county as a separate location filter so we
+    // don't pull orgs from the whole state and filter client-side. Healthcare
+    // is the only segment-wide exclusion.
+    const locations = APOLLO_LOCATION_STRINGS;
     const excludeKeywords = ['hospital', 'health system', 'medical center', 'physician', 'clinic'];
 
     const segmentSearches = [
@@ -2513,7 +2518,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
             <input style={styles.input} value={apolloCriteria.segments} onChange={e => setApolloCriteria({ ...apolloCriteria, segments: e.target.value })} />
           </div>
           <div style={{ fontSize: '12px', color: 'var(--text-3)', marginBottom: '14px', padding: '10px 12px', background: 'var(--bg-sunk)', borderRadius: '6px' }}>
-            Searches all 15 CFL North counties. Healthcare is the only auto-skip — everything else commercial is in-ICP.
+            Locked to your 15 CFL North counties: {TERRITORY.counties.join(', ')}. Healthcare is the only auto-skip.
           </div>
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center' }}>
@@ -2532,11 +2537,11 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
                 const url = buildApolloSearchUrl({
                   titles,
                   segments,
-                  locations: ['Florida, US'],
+                  locations: APOLLO_LOCATION_STRINGS,
                   keywordsExclude: ['hospital', 'health system', 'medical center', 'physician', 'clinic'],
                 });
                 window.open(url, '_blank', 'noopener,noreferrer');
-                showToast('Opened Apollo with your criteria. Export results to CSV, then use Import CSV tab.', 'info');
+                showToast(`Opened Apollo filtered to ${APOLLO_LOCATION_STRINGS.length} CFL North counties. Export to CSV → Import CSV tab.`, 'info');
               }}
             >
               <ExternalLink size={14} /> Search in Apollo (opens web UI)
@@ -2721,7 +2726,7 @@ function CSVImportTab({ styles, importCsvRows, showToast }) {
   const previewStats = useMemo(() => {
     const total = rows.length;
     const valid = parsedCandidates.length;
-    const inTerritory = parsedCandidates.filter(p => classifyCounty(p.city)).length;
+    const inTerritory = parsedCandidates.filter(p => classifyCounty(p.city, p.zip)).length;
     return { total, valid, inTerritory, dropped: total - valid };
   }, [rows.length, parsedCandidates]);
 
@@ -2822,7 +2827,7 @@ function CSVImportTab({ styles, importCsvRows, showToast }) {
               </div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-md)', overflow: 'hidden', marginBottom: 'var(--space-4)' }}>
                 {parsedCandidates.slice(0, 5).map((p, i) => {
-                  const county = classifyCounty(p.city);
+                  const county = classifyCounty(p.city, p.zip);
                   const icp = classifyICP(p.company, p.title);
                   return (
                     <div key={i} style={{
@@ -2835,7 +2840,7 @@ function CSVImportTab({ styles, importCsvRows, showToast }) {
                         {p.title || '(no title)'} · {p.company}
                       </div>
                       <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
-                        {p.city || '?'}, {county || 'out-of-territory'} · {icp.segment} · {p.email || 'no email'}
+                        {p.city || '?'}{p.zip ? ` ${p.zip}` : ''} · {county ? `${county} County` : 'out-of-territory'} · {icp.segment} · {p.email || 'no email'}
                       </div>
                     </div>
                   );
@@ -4843,7 +4848,7 @@ function GlobalStyles() {
 // Used as the free-tier workaround for the search API plan-limit: user
 // clicks the button → reviews/refines in Apollo's UI → exports CSV →
 // drops the CSV into Find → Import CSV. Full closed loop without paying.
-function buildApolloSearchUrl({ titles = [], segments = [], locations = ['Florida, US'], keywordsExclude = [] }) {
+function buildApolloSearchUrl({ titles = [], segments = [], locations = APOLLO_LOCATION_STRINGS, keywordsExclude = [] }) {
   const params = [];
   const push = (key, value) => {
     if (value == null || value === '') return;
@@ -4931,6 +4936,7 @@ const CSV_FIELDS = [
   { key: 'phone',       label: 'Phone',       optional: true },
   { key: 'city',        label: 'City',        optional: true,  notes: 'Used to classify county' },
   { key: 'state',       label: 'State',       optional: true },
+  { key: 'zip',         label: 'Zip Code',    optional: true,  notes: 'Fallback for county when city is missing' },
   { key: 'linkedinUrl', label: 'LinkedIn URL', optional: true },
 ];
 
@@ -4947,6 +4953,7 @@ function autoMapCsvColumns(headers) {
     phone:       [/^(work[ _-]+)?(direct[ _-]+)?phone( number)?$/i, /^mobile( phone)?$/i, /^cell( phone)?$/i],
     city:        [/^city$/i, /^location$/i],
     state:       [/^state$/i, /^state\/province$/i, /^region$/i],
+    zip:         [/^zip([ _-]+code)?$/i, /^postal([ _-]+code)?$/i, /^postcode$/i],
     linkedinUrl: [/^linkedin([ _-]+url)?$/i, /^linkedin[ _-]+profile$/i],
   };
   const out = {};
@@ -4982,6 +4989,7 @@ function csvRowToProspect(row, mapping, idx) {
     phone: get('phone'),
     city: get('city'),
     state: get('state') || 'FL',
+    zip: get('zip'),
     linkedinUrl: get('linkedinUrl'),
     _csvRow: idx,
   };

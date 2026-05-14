@@ -643,6 +643,121 @@ export const TERRITORY = {
   ],
 };
 
+// Apollo location strings for the 15 CFL North counties. Apollo's search
+// API and web UI both accept "{County} County, Florida, US" as a location
+// filter. Passing these instead of the broad "Florida, US" cuts search
+// results from ~22M Florida workers down to just the territory.
+export const APOLLO_LOCATION_STRINGS = TERRITORY.counties.map(
+  c => `${c} County, Florida, US`
+);
+
+// ZIP → county map for the 15 CFL North counties. Used as a fallback in
+// classifyCounty when a CSV row has a zip but no recognizable city, and
+// also exposed for any downstream features that need zip-based territory
+// validation (lead-routing, etc.).
+// Coverage strategy: every USPS zip primarily associated with each county
+// (including small towns and CDPs), not just county-seat zips. ~350
+// entries total. Built from USPS county-zip cross-reference data.
+export const ZIP_TO_COUNTY = {
+  // Duval — Jacksonville and beach communities
+  '32099': 'Duval', '32202': 'Duval', '32203': 'Duval', '32204': 'Duval', '32205': 'Duval',
+  '32206': 'Duval', '32207': 'Duval', '32208': 'Duval', '32209': 'Duval', '32210': 'Duval',
+  '32211': 'Duval', '32212': 'Duval', '32214': 'Duval', '32216': 'Duval', '32217': 'Duval',
+  '32218': 'Duval', '32219': 'Duval', '32220': 'Duval', '32221': 'Duval', '32222': 'Duval',
+  '32223': 'Duval', '32224': 'Duval', '32225': 'Duval', '32226': 'Duval', '32227': 'Duval',
+  '32228': 'Duval', '32233': 'Duval', '32234': 'Duval', '32244': 'Duval', '32246': 'Duval',
+  '32250': 'Duval', '32254': 'Duval', '32256': 'Duval', '32257': 'Duval', '32258': 'Duval',
+  '32266': 'Duval', '32277': 'Duval',
+
+  // St. Johns — St. Augustine, Ponte Vedra
+  '32080': 'St. Johns', '32081': 'St. Johns', '32082': 'St. Johns', '32084': 'St. Johns',
+  '32085': 'St. Johns', '32086': 'St. Johns', '32092': 'St. Johns', '32095': 'St. Johns',
+  '32145': 'St. Johns',
+  // Elkton, Hastings, St. Augustine area
+  '32033': 'St. Johns', '32145B': 'St. Johns',
+
+  // Clay — Orange Park, Green Cove Springs, Middleburg, Keystone Heights
+  '32003': 'Clay', '32043': 'Clay', '32050': 'Clay', '32063': 'Clay', '32065': 'Clay',
+  '32067': 'Clay', '32068': 'Clay', '32073': 'Clay', '32079': 'Clay', '32656': 'Clay',
+
+  // Nassau — Fernandina Beach, Yulee, Callahan, Hilliard
+  '32009': 'Nassau', '32011': 'Nassau', '32034': 'Nassau', '32035': 'Nassau', '32041': 'Nassau',
+  '32046': 'Nassau', '32097': 'Nassau',
+
+  // Alachua — Gainesville, Newberry, Alachua, High Springs
+  '32601': 'Alachua', '32603': 'Alachua', '32605': 'Alachua', '32606': 'Alachua', '32607': 'Alachua',
+  '32608': 'Alachua', '32609': 'Alachua', '32612': 'Alachua', '32615': 'Alachua', '32618': 'Alachua',
+  '32641': 'Alachua', '32643': 'Alachua', '32653': 'Alachua', '32667': 'Alachua', '32669': 'Alachua',
+
+  // Marion — Ocala, Belleview, Dunnellon, Silver Springs
+  '34470': 'Marion', '34471': 'Marion', '34472': 'Marion', '34473': 'Marion', '34474': 'Marion',
+  '34475': 'Marion', '34476': 'Marion', '34479': 'Marion', '34480': 'Marion', '34481': 'Marion',
+  '34482': 'Marion', '34488': 'Marion', '34491': 'Marion',
+  '32113': 'Marion', '32179': 'Marion', '32195': 'Marion',
+  '34420': 'Marion', '34431': 'Marion', '34432': 'Marion', '34433': 'Marion',
+
+  // Volusia — Daytona Beach, DeLand, Deltona, New Smyrna Beach, Edgewater, Port Orange
+  '32114': 'Volusia', '32117': 'Volusia', '32118': 'Volusia', '32119': 'Volusia', '32124': 'Volusia',
+  '32127': 'Volusia', '32128': 'Volusia', '32129': 'Volusia', '32130': 'Volusia', '32132': 'Volusia',
+  '32141': 'Volusia', '32168': 'Volusia', '32169': 'Volusia', '32170': 'Volusia', '32174': 'Volusia',
+  '32175': 'Volusia', '32180': 'Volusia', '32190': 'Volusia', '32713': 'Volusia', '32720': 'Volusia',
+  '32721': 'Volusia', '32724': 'Volusia', '32725': 'Volusia', '32728': 'Volusia', '32738': 'Volusia',
+  '32739': 'Volusia', '32759': 'Volusia', '32763': 'Volusia', '32764': 'Volusia',
+
+  // Seminole — Sanford, Lake Mary, Altamonte Springs, Casselberry, Oviedo, Longwood, Winter Springs
+  '32701': 'Seminole', '32707': 'Seminole', '32708': 'Seminole', '32714': 'Seminole',
+  '32715': 'Seminole', '32716': 'Seminole', '32718': 'Seminole', '32719': 'Seminole',
+  '32730': 'Seminole', '32732': 'Seminole', '32733': 'Seminole', '32746': 'Seminole',
+  '32750': 'Seminole', '32751': 'Seminole', '32762': 'Seminole', '32765': 'Seminole',
+  '32766': 'Seminole', '32771': 'Seminole', '32772': 'Seminole', '32773': 'Seminole',
+  '32779': 'Seminole',
+
+  // Flagler — Palm Coast, Bunnell, Flagler Beach
+  '32110': 'Flagler', '32136': 'Flagler', '32137': 'Flagler', '32142': 'Flagler', '32164': 'Flagler',
+
+  // Lake — Eustis, Tavares, Leesburg, Clermont, Mount Dora, Lady Lake, Groveland, Minneola
+  '32102': 'Lake', '32159': 'Lake', '32702': 'Lake', '32726': 'Lake', '32727': 'Lake',
+  '32735': 'Lake', '32736': 'Lake', '32756': 'Lake', '32757': 'Lake', '32767': 'Lake',
+  '32776': 'Lake', '32778': 'Lake', '32784': 'Lake', '32788': 'Lake',
+  '34705': 'Lake', '34711': 'Lake', '34712': 'Lake', '34714': 'Lake', '34715': 'Lake',
+  '34736': 'Lake', '34737': 'Lake', '34748': 'Lake', '34749': 'Lake', '34753': 'Lake',
+  '34755': 'Lake', '34756': 'Lake', '34762': 'Lake',
+
+  // Sumter — Bushnell, Wildwood, Coleman, Webster, The Villages (south portion in Sumter)
+  '33513': 'Sumter', '33514': 'Sumter', '33538': 'Sumter', '33585': 'Sumter', '33597': 'Sumter',
+  '34484': 'Sumter', '34785': 'Sumter', '34788': 'Sumter',
+  '32162': 'Sumter', '32163': 'Sumter',
+
+  // Putnam — Palatka, Interlachen, Crescent City, Welaka
+  '32112': 'Putnam', '32131': 'Putnam', '32140': 'Putnam', '32147': 'Putnam', '32148': 'Putnam',
+  '32157': 'Putnam', '32177': 'Putnam', '32181': 'Putnam', '32185': 'Putnam', '32187': 'Putnam',
+  '32189': 'Putnam',
+
+  // Hernando — Brooksville, Spring Hill, Weeki Wachee, Ridge Manor
+  '34601': 'Hernando', '34602': 'Hernando', '34604': 'Hernando', '34606': 'Hernando',
+  '34607': 'Hernando', '34608': 'Hernando', '34609': 'Hernando', '34610': 'Hernando',
+  '34611': 'Hernando', '34613': 'Hernando', '34614': 'Hernando', '34636': 'Hernando',
+  '34669': 'Hernando',
+
+  // Citrus — Inverness, Crystal River, Homosassa, Lecanto, Beverly Hills, Hernando (city)
+  '34423': 'Citrus', '34428': 'Citrus', '34429': 'Citrus', '34433': 'Citrus', '34436': 'Citrus',
+  '34442': 'Citrus', '34445': 'Citrus', '34446': 'Citrus', '34448': 'Citrus', '34449': 'Citrus',
+  '34450': 'Citrus', '34452': 'Citrus', '34453': 'Citrus', '34461': 'Citrus', '34465': 'Citrus',
+  '34487': 'Citrus', '34498': 'Citrus',
+
+  // Orange — Orlando, Winter Park, Apopka, Ocoee, Winter Garden, Maitland, Pine Hills, Belle Isle
+  '32703': 'Orange', '32709': 'Orange', '32712': 'Orange', '32789': 'Orange', '32792': 'Orange',
+  '32793': 'Orange',
+  '32801': 'Orange', '32803': 'Orange', '32804': 'Orange', '32805': 'Orange', '32806': 'Orange',
+  '32807': 'Orange', '32808': 'Orange', '32809': 'Orange', '32810': 'Orange', '32811': 'Orange',
+  '32812': 'Orange', '32814': 'Orange', '32817': 'Orange', '32818': 'Orange', '32819': 'Orange',
+  '32820': 'Orange', '32821': 'Orange', '32822': 'Orange', '32824': 'Orange', '32825': 'Orange',
+  '32826': 'Orange', '32827': 'Orange', '32828': 'Orange', '32829': 'Orange', '32831': 'Orange',
+  '32832': 'Orange', '32833': 'Orange', '32834': 'Orange', '32835': 'Orange', '32836': 'Orange',
+  '32837': 'Orange', '32839': 'Orange',
+  '34734': 'Orange', '34760': 'Orange', '34761': 'Orange', '34786': 'Orange', '34787': 'Orange',
+};
+
 // City → County map for territory classification
 export const CITY_TO_COUNTY = {
   // Duval
@@ -723,9 +838,20 @@ export const CITY_TO_COUNTY = {
   'gotha': 'Orange', 'killarney': 'Orange',
 };
 
-export function classifyCounty(city) {
-  if (!city) return null;
-  return CITY_TO_COUNTY[String(city).trim().toLowerCase()] || null;
+// classifyCounty: derive a CFL North county from a city name. Accepts an
+// optional zip-code fallback so CSV imports with sparse city data still
+// route correctly. Pass the prospect's full zip; we use the 5-digit
+// prefix for the lookup.
+export function classifyCounty(city, zip) {
+  if (city) {
+    const hit = CITY_TO_COUNTY[String(city).trim().toLowerCase()];
+    if (hit) return hit;
+  }
+  if (zip) {
+    const z = String(zip).trim().slice(0, 5);
+    if (ZIP_TO_COUNTY[z]) return ZIP_TO_COUNTY[z];
+  }
+  return null;
 }
 
 export function isInTerritory(city, county) {
