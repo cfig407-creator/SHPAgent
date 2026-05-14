@@ -278,40 +278,38 @@ export function detectEnrichmentNeeds(prospect) {
 // === VOICE EXAMPLES ===
 // Anthony's actual cold email templates. Used as few-shot examples in the prompt
 // so AI drafts match his real voice (humble + "arrow in quiver" + peer tone).
+//
+// Opener style: SHORT and direct. No "I hope email is OK" or "I didn't want
+// to interrupt your day" preamble — that beats around the bush. Get to who
+// SHP is and why we're writing in one or two short sentences.
 export const VOICE_EXAMPLES = [
   {
-    context: 'Cold-cold, no research hook, "found you on website" framing',
-    body: `I got your name while wandering the [their website], hoping to get the right person some information about Superior Hardware Products.
+    context: 'Short, direct intro — preferred default for cold outreach',
+    body: `I'm Anthony with Superior Hardware Products in Longwood. Our team handles everything in your doorways — mechanical hardware, electrified access control integration, closers, panic devices, and service when something fails mid-year.
 
-Because I know how important doors are, I know you likely have someone for what we do, but I wanted to get you some information in case you need another arrow in your quiver.
+We're proud to work with multiple [match-segment-or-region peers] across Central Florida. Just wanted to be a name you recognize when something comes up — propped door, broken closer, access control tie-in. If anything's already on your radar, happy to walk it with you.
 
-In short, we can handle everything related to your door openings — from mechanical to electrified to automatics. SHP can provide, service, and install anything related to doors or hardware. I included our one-pager for easy reference.
+I'm often in the area with a few customers, so I can stop by for an in-person intro if you'd prefer.`,
+  },
+  {
+    context: '"Found you on website" framing — alternative opener pattern',
+    body: `I got your name while looking for the right facilities contact at [company]. Wanted to put Superior Hardware Products on your radar.
+
+I know you likely have someone for what we do, but in case you need another arrow in your quiver — we handle everything related to your door openings, from mechanical to electrified to automatics. We can provide, service, and install anything related to doors or hardware.
 
 Let me know if the timing is right for a conversation, or if there's another person I should reach out to.
 
 I'm often in the area with a few customers, so I can stop by for an in-person intro if you'd prefer.`,
   },
   {
-    context: 'New-rep introduction to existing customer (warm-ish, but useful pattern)',
+    context: 'New-rep introduction to existing customer (warm pattern — reference only)',
     body: `I am new to the SHP team and wanted to reach out for a quick introduction.
 
 I am now responsible for what we call N. Central Florida, which you are a part of.
 
 My list shows you as an active customer, so I want to ensure I have a good understanding of your needs so that I can best support your team/facility(s).
 
-Ideally, we would find some time to meet in person, but we can set up a call or video meeting if you would prefer.
-
-If you need to become more familiar with SHP, I have attached a snapshot of our capabilities.`,
-  },
-  {
-    context: 'Email-OK soft opener with peer credibility',
-    body: `I hope email is OK. I did not want to interrupt your day with a phone call, so I wanted to send a quick note introducing Superior Hardware Products.
-
-Our team provides service and installation for everything in your doorways across your facilities.
-
-We are proud to work with multiple [match-segment-or-region peers] across Central Florida, bridging the gap between their access control provider and locksmith. Our successful partnerships speak to our capabilities, and we can bring your team the same level of service.
-
-If you think there is an opportunity to support your team, I would appreciate the chance to discuss our capabilities.`,
+Ideally, we would find some time to meet in person, but we can set up a call or video meeting if you would prefer.`,
   },
 ];
 
@@ -354,29 +352,29 @@ ANTHONY'S VOICE — characteristics the draft must hit:
    - "Look forward to connecting"
    - "Have a great week"
 
-8. NO STALKER ENERGY. Use research to inform the QUESTION you ask, never to cite facts.
-   Research tells you what's TOP OF MIND for this prospect — use that to ask an
-   assumptive, industry-savvy question. Don't disclose what you read about them.
-   It comes across as "I've been studying your portfolio for an hour" which kills trust.
+8. OPENER STYLE — SHORT AND DIRECT.
+   DO NOT open with a question. DO NOT open with a preamble apology.
+   The opener is a brief introduction of who you are. Two to three sentences max.
+   Get to who SHP is and why we're writing without beating around the bush.
 
-   FORBIDDEN (reads as stalker):
-   - "I noticed Marion County just broke ground on Fire Station 11 in December..."
-   - "I saw your 5-year CIP runs through FY 2026..."
-   - "I noticed you manage 400+ buildings totaling 2 million square feet..."
-   - "I saw the recent board meeting where you discussed access control..."
+   PREFERRED openers (any of these patterns):
+   - "Hi {firstName}, I'm Anthony with Superior Hardware Products in Longwood..."
+   - "Hi {firstName}, quick intro from Superior Hardware Products..."
+   - "Hi {firstName}, I got your name while looking for the right facilities
+      contact at {company}. Wanted to put SHP on your radar..."
 
-   PREFERRED (reads as peer with industry insight):
-   - "When you're managing a portfolio that size, what's your usual default for
-      hardware standardization across new construction?"
-   - "With multi-year capital plans in the pipeline, how do you stay ahead of
-      door specs at the design stage vs the install stage?"
-   - "Curious how you're handling access control consistency when projects come
-      online at different times?"
-   - "When something fails on a critical opening at scale, who's the first call?"
+   FORBIDDEN openers:
+   - Leading question: "How are you currently managing..." — feels prosecutorial
+   - Long preamble: "I hope email is OK. I did not want to interrupt your day
+      with a phone call, so I wanted to send a quick note..." — wastes their time
+   - Apologies: "Sorry for the cold reach..." — don't apologize for doing the job
+   - Stalker disclosures: "I noticed your portfolio is 400+ buildings..." — kills trust
 
-   The research-informed question lands BECAUSE they're dealing with it — but
-   the prospect just hears a knowledgeable peer asking, not a stalker reciting
-   their org chart back at them.
+9. RESEARCH IS BACKGROUND, NOT THE OPENER.
+   Research tells you which segment-specific capabilities to emphasize and which
+   proof points to surface — it's never the subject of the email. The prospect
+   doesn't need to know we did research. They need to know what we do and that
+   we work with peers like them.
 `;
 
 
@@ -1314,10 +1312,10 @@ export function buildColdEmailPrompt(prospect, research, segment, signature, sof
   // Voice examples block
   const voiceExamples = VOICE_EXAMPLES.map((e, i) => `EXAMPLE ${i + 1} — ${e.context}:\n${e.body}`).join('\n\n---\n\n');
 
-  // Pull the suggested opener out so we can require it loudly. When research is
-  // present, this opener is grounded in real web-searched facts and is the
-  // single most important thing the email should contain.
-  const hasRealHook = !!(research?.openingHook && research.specificityRating !== 'low');
+  // Research is BACKGROUND ONLY — never quoted in the email body. The
+  // hasRealHook branch and the openingHook-as-opener strategy have been
+  // scrapped per user direction: don't open with questions, don't disclose
+  // research, use a short direct intro instead.
 
   return `You are drafting a cold email FROM ${SHP_IDENTITY.rep} (${SHP_IDENTITY.title} at ${SHP_IDENTITY.company}, ${SHP_IDENTITY.hq}, est. ${SHP_IDENTITY.founded}) TO ${prospect.name}, ${prospect.title} at ${prospect.company}.
 
@@ -1328,17 +1326,24 @@ Company: ${prospect.company}
 Segment: ${segment}
 Location: ${prospect.city}, ${prospect.county || ''} County
 
-═════ RESEARCH ═════
-${hasRealHook
-  ? `OPENING HOOK (an assumptive, peer-toned question informed by research — use this as the opener):
-"${research.openingHook}"
+═════ RESEARCH (BACKGROUND CONTEXT — DO NOT QUOTE OR REFERENCE IN THE EMAIL) ═════
+The research below is for YOU to internalize so you can pick the right
+capabilities to emphasize and the right proof points to surface. The
+prospect should NEVER hear research disclosed back at them — that breaks
+trust on the first read. Treat this as your private briefing, not content.
 
-CRITICAL: this hook is intentionally framed as a question, NOT a recital of facts. The research informed WHAT to ask, not what to disclose. Use the hook as-is or lightly rephrase to match Anthony's voice — but DO NOT add specific facts back in. NEVER include numbers (building counts, square footage, employee counts), proper nouns from news (specific building names, project codes), dates (FY 2026, December 2024), or any phrasing that signals "I researched you." Phrases to AVOID: "I noticed...", "I saw...", "I read that...", "Your recent...", "Your 2026...", "Your 400+...". The prospect should hear an industry-savvy peer asking a question, not a stalker citing their org chart.`
-  : `Opening hook (generic — research found nothing specific, so frame humbly): ${research?.openingHook || `${prospect.company} operates in ${segment}`}`}
-
-Pain signals (use as background context only — do NOT cite verbatim): ${research?.painSignals?.join('; ') || 'general facilities pain'}
-Company snapshot (background context — do NOT recite to prospect): ${research?.companySnapshot || ''}
+Pain signals (informs which capabilities to emphasize): ${research?.painSignals?.join('; ') || 'general facilities pain'}
+Company snapshot (informs proof-point selection): ${research?.companySnapshot || ''}
 Specificity: ${research?.specificityRating || 'unknown'}${research?.specificityNote ? ` — ${research.specificityNote}` : ''}
+
+FORBIDDEN PHRASES in the body (these are the stalker tells):
+  - "I noticed...", "I saw...", "I read that...", "Your recent..."
+  - "How are you currently..." or any leading question as the opener
+  - Specific numbers (building counts, square footage, employee counts)
+  - Project names, fiscal years, dates, news items
+  - Category-level disclosures: "donor-driven", "tax-funded",
+    "union-staffed", "5-year CIP", "extended care hours"
+  - Any question that reveals you researched them
 
 ═════ AVAILABLE PROOF POINTS (real SHP customers, ranked by relevance to this prospect) ═════
 ${proofText}
@@ -1356,31 +1361,42 @@ GREETING — Always "Hi {firstName}," using the prospect's FIRST name only.
 Never use "Ms./Mr./Dr. {LastName}" — that's too formal for Anthony's
 peer voice. If you only have one name, use it as-is.
 
-${hasRealHook
-  ? `1. OPENER (hasRealHook = TRUE): the assumptive question from the OPENING
-   HOOK above IS your opener. Place it RIGHT AFTER the greeting on its own
-   paragraph. DO NOT stack a generic "I hope email is OK" or "I wanted to
-   send a quick note" preamble in front of it — the question is the opener.
+1. OPENER — Short, direct introduction. One sentence (two max).
+   DO NOT open with a question.
+   DO NOT open with "I hope email is OK" or "I didn't want to interrupt
+   your day with a call" — those waste the prospect's time.
+   DO NOT open with research disclosures.
 
-2. (SKIP the standard humble-framing beat — the question itself is humble,
-   it asks the prospect for their point of view. Going from question →
-   humble framing reads as backpedaling.) Move straight to step 3.`
-  : `1. OPENER (no research hook): disarming, not salesy. Examples Anthony actually uses:
-   - "I got your name while wandering [their site/area]..."
-   - "I hope email is OK. I did not want to interrupt your day with a phone call..."
-   - "I am reaching out for a quick introduction..."
-   Pick whichever fits the situation.
+   Use one of these patterns:
+   (a) "I'm Anthony with Superior Hardware Products in Longwood."
+   (b) "Quick intro from Superior Hardware Products in Longwood."
+   (c) "I got your name while looking for the right facilities contact
+        at {company}. Wanted to put Superior Hardware Products on your
+        radar."
 
-2. Humble framing — acknowledge they likely have a vendor: "I know you likely
-   have someone for what we do, but..."`}
-3. SHP intro + capability summary — one sentence about who SHP is and what we cover. Keep it tight.
-4. Optional proof drop — if a proof point fits naturally (1-2 names max).
-5. Soft CTA — borrow from: ${cta}
-6. Optional in-person offer — "I'm often in the area with a few customers" — only if prospect is in CFL North.
-7. Soft opt-out — REQUIRED. Include this exact line (or a very close paraphrase that keeps the same meaning) on its own paragraph BEFORE the sign-off:
+   The opener establishes WHO is writing and that it's a cold reach.
+   That's all. The body does the work.
+
+2. CAPABILITY SUMMARY (immediately after opener) — one tight sentence
+   describing what SHP handles, IMPLICITLY emphasizing capabilities most
+   relevant to this prospect's segment (use the research's pain signals
+   to choose which to mention — but never quote the research).
+   Pattern: "Our team handles everything in your doorways — [3-4
+   relevant items chosen from: mechanical hardware, electrified access
+   control, automatic openers, closers, panic devices, fire-rated
+   doors, master keying, service-when-things-fail]."
+
+3. HUMBLE FRAMING + PROOF DROP — one paragraph. Acknowledge they likely
+   have a vendor ("I know you likely have someone for what we do,
+   but...") and name 1-2 real customers from the proof points if they
+   fit. Skip if no proof fits naturally.
+
+4. SOFT CTA — borrow phrasing from: ${cta}
+5. Optional in-person offer — "I'm often in the area with a few customers" — only if prospect is in CFL North.
+6. Soft opt-out — REQUIRED. Include this exact line (or a very close paraphrase that keeps the same meaning) on its own paragraph BEFORE the sign-off:
    "${softOptOut}"
    This protects domain reputation by giving recipients a friction-free way to decline instead of marking us as spam. Don't soften it past recognizability.
-8. Sign-off and signature.
+7. Sign-off and signature.
 
 ═════ HARD RULES ═════
 - 110-160 words in the body (Anthony's real emails run longer than the previous tight 80-110)
