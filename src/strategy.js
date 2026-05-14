@@ -353,6 +353,30 @@ ANTHONY'S VOICE — characteristics the draft must hit:
    - "Best Regards"
    - "Look forward to connecting"
    - "Have a great week"
+
+8. NO STALKER ENERGY. Use research to inform the QUESTION you ask, never to cite facts.
+   Research tells you what's TOP OF MIND for this prospect — use that to ask an
+   assumptive, industry-savvy question. Don't disclose what you read about them.
+   It comes across as "I've been studying your portfolio for an hour" which kills trust.
+
+   FORBIDDEN (reads as stalker):
+   - "I noticed Marion County just broke ground on Fire Station 11 in December..."
+   - "I saw your 5-year CIP runs through FY 2026..."
+   - "I noticed you manage 400+ buildings totaling 2 million square feet..."
+   - "I saw the recent board meeting where you discussed access control..."
+
+   PREFERRED (reads as peer with industry insight):
+   - "When you're managing a portfolio that size, what's your usual default for
+      hardware standardization across new construction?"
+   - "With multi-year capital plans in the pipeline, how do you stay ahead of
+      door specs at the design stage vs the install stage?"
+   - "Curious how you're handling access control consistency when projects come
+      online at different times?"
+   - "When something fails on a critical opening at scale, who's the first call?"
+
+   The research-informed question lands BECAUSE they're dealing with it — but
+   the prospect just hears a knowledgeable peer asking, not a stalker reciting
+   their org chart back at them.
 `;
 
 
@@ -1306,14 +1330,14 @@ Location: ${prospect.city}, ${prospect.county || ''} County
 
 ═════ RESEARCH ═════
 ${hasRealHook
-  ? `OPENING HOOK (use this — it's grounded in real research and is the single most important sentence in this email):
+  ? `OPENING HOOK (an assumptive, peer-toned question informed by research — use this as the opener):
 "${research.openingHook}"
 
-Open the body with this hook (you may lightly adjust phrasing to match Anthony's voice, but keep the specific fact intact). DO NOT replace it with a generic "I got your name while wandering your website" opener — the whole point of researching this prospect was to surface this hook.`
+CRITICAL: this hook is intentionally framed as a question, NOT a recital of facts. The research informed WHAT to ask, not what to disclose. Use the hook as-is or lightly rephrase to match Anthony's voice — but DO NOT add specific facts back in. NEVER include numbers (building counts, square footage, employee counts), proper nouns from news (specific building names, project codes), dates (FY 2026, December 2024), or any phrasing that signals "I researched you." Phrases to AVOID: "I noticed...", "I saw...", "I read that...", "Your recent...", "Your 2026...", "Your 400+...". The prospect should hear an industry-savvy peer asking a question, not a stalker citing their org chart.`
   : `Opening hook (generic — research found nothing specific, so frame humbly): ${research?.openingHook || `${prospect.company} operates in ${segment}`}`}
 
-Pain signals: ${research?.painSignals?.join('; ') || 'general facilities pain'}
-Company snapshot: ${research?.companySnapshot || ''}
+Pain signals (use as background context only — do NOT cite verbatim): ${research?.painSignals?.join('; ') || 'general facilities pain'}
+Company snapshot (background context — do NOT recite to prospect): ${research?.companySnapshot || ''}
 Specificity: ${research?.specificityRating || 'unknown'}${research?.specificityNote ? ` — ${research.specificityNote}` : ''}
 
 ═════ AVAILABLE PROOF POINTS (real SHP customers, ranked by relevance to this prospect) ═════
@@ -1329,7 +1353,7 @@ ${voiceExamples}
 
 ═════ STRUCTURE FOR YOUR DRAFT ═════
 1. Opener — ${hasRealHook
-   ? `lead with the OPENING HOOK from the research above. That specific fact is what justifies this email being personalized rather than spray-and-pray. You may adjust the wording slightly to fit Anthony's voice (humble, peer-tone, no exclamation points), but the concrete fact MUST appear in the first 1-2 sentences.`
+   ? `lead with the assumptive question from the OPENING HOOK above. Keep it framed as a question that the prospect is plausibly dealing with right now — not as a statement of facts about them. You may lightly adjust phrasing to match Anthony's voice (humble, peer-tone, no exclamation points). NEVER add "I noticed...", "I saw...", or specific facts/numbers/dates back in. The question itself does the work — it lands because it's relevant, not because it cites their data.`
    : `disarming, not salesy. Examples Anthony actually uses:
    - "I got your name while wandering [their site/area]..."
    - "I hope email is OK. I did not want to interrupt your day with a phone call..."
