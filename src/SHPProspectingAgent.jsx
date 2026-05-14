@@ -2505,20 +2505,54 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
         <div style={styles.card}>
           <div style={styles.sectionTitle}><Filter size={14} /> Apollo Search Criteria</div>
           <div style={{ marginBottom: '16px' }}>
-            <label style={styles.label}>Job Titles</label>
+            <label style={styles.label}>Job Titles <span style={{ color: 'var(--text-3)', fontWeight: 400 }}>(comma-separated)</span></label>
             <input style={styles.input} value={apolloCriteria.titles} onChange={e => setApolloCriteria({ ...apolloCriteria, titles: e.target.value })} />
           </div>
           <div style={{ marginBottom: '16px' }}>
-            <label style={styles.label}>Segments</label>
+            <label style={styles.label}>Segments <span style={{ color: 'var(--text-3)', fontWeight: 400 }}>(comma-separated)</span></label>
             <input style={styles.input} value={apolloCriteria.segments} onChange={e => setApolloCriteria({ ...apolloCriteria, segments: e.target.value })} />
           </div>
           <div style={{ fontSize: '12px', color: 'var(--text-3)', marginBottom: '14px', padding: '10px 12px', background: 'var(--bg-sunk)', borderRadius: '6px' }}>
             Searches all 15 CFL North counties. Healthcare is the only auto-skip — everything else commercial is in-ICP.
           </div>
-          <button style={styles.primaryBtn} onClick={runApolloSearch} disabled={isApolloSearching}>
-            {isApolloSearching ? <Loader2 size={16} className="spin" /> : <Search size={16} />}
-            {isApolloSearching ? 'Searching…' : 'Run Search'}
-          </button>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center' }}>
+            {/* Primary path on free tier: open Apollo's web UI with criteria
+                pre-filled. User reviews/refines there, exports CSV, comes
+                back to Find → Import CSV. */}
+            <button
+              style={styles.primaryBtn}
+              onClick={() => {
+                const titles = apolloCriteria.titles.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+                const segments = apolloCriteria.segments.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+                if (titles.length === 0) {
+                  showToast('Add at least one job title first', 'error');
+                  return;
+                }
+                const url = buildApolloSearchUrl({
+                  titles,
+                  segments,
+                  locations: ['Florida, US'],
+                  keywordsExclude: ['hospital', 'health system', 'medical center', 'physician', 'clinic'],
+                });
+                window.open(url, '_blank', 'noopener,noreferrer');
+                showToast('Opened Apollo with your criteria. Export results to CSV, then use Import CSV tab.', 'info');
+              }}
+            >
+              <ExternalLink size={14} /> Search in Apollo (opens web UI)
+            </button>
+
+            {/* Secondary: try the API search anyway — works on paid plans, surfaces
+                a clear error on free tier pointing back to the Apollo deep link. */}
+            <button style={styles.secondaryBtn} onClick={runApolloSearch} disabled={isApolloSearching}>
+              {isApolloSearching ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
+              {isApolloSearching ? 'Searching…' : 'Try API search (paid plan)'}
+            </button>
+          </div>
+
+          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', marginTop: 'var(--space-3)', padding: 'var(--space-3)', background: 'var(--info-soft)', borderRadius: 'var(--r-md)', lineHeight: 1.55 }}>
+            <strong style={{ color: 'var(--info)' }}>Free-tier workflow:</strong> click <em>Search in Apollo</em> → review and refine results in Apollo's UI → click Apollo's <em>Export</em> button to download a CSV → come back to <em>Import CSV</em> tab and drop the file in.
+          </div>
         </div>
       )}
 
@@ -4799,6 +4833,50 @@ function GlobalStyles() {
 // =================================================================
 // === HELPERS ===
 // =================================================================
+// =================================================================
+// === APOLLO WEB UI PREFILL ========================================
+// =================================================================
+// Build a deep link to Apollo's web search UI with the user's criteria
+// pre-filled. Apollo's SPA reads filters from hash-fragment query params,
+// so we construct: https://app.apollo.io/#/people?personTitles[]=X&...
+//
+// Used as the free-tier workaround for the search API plan-limit: user
+// clicks the button → reviews/refines in Apollo's UI → exports CSV →
+// drops the CSV into Find → Import CSV. Full closed loop without paying.
+function buildApolloSearchUrl({ titles = [], segments = [], locations = ['Florida, US'], keywordsExclude = [] }) {
+  const params = [];
+  const push = (key, value) => {
+    if (value == null || value === '') return;
+    params.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  };
+
+  // Person titles — Apollo accepts array-style params (key[]=...).
+  for (const t of titles) push('personTitles[]', t);
+  // Person locations — typically a city/state/country string.
+  for (const loc of locations) push('personLocations[]', loc);
+
+  // Segments → Apollo's q_organization_keyword_tags. Reuse the same mapping
+  // the agent uses everywhere else for K-12 / Higher Ed / Local Gov.
+  const SEG_KW = {
+    'k-12 education': ['school district', 'public schools', 'k-12', 'county schools'],
+    'higher education': ['college', 'university', 'community college', 'state college'],
+    'local government': ['city of', 'county government', 'town of', 'public works'],
+  };
+  const orgKw = [];
+  for (const s of segments) {
+    const map = SEG_KW[(s || '').toLowerCase()];
+    if (map) orgKw.push(...map);
+  }
+  for (const kw of orgKw) push('qOrganizationKeywordTags[]', kw);
+  for (const kw of keywordsExclude) push('qOrganizationNotKeywordTags[]', kw);
+
+  // Sort: most-engaged contacts first — same default Apollo's UI uses.
+  push('sortByField', 'recommendations_score');
+  push('sortAscending', 'false');
+
+  return `https://app.apollo.io/#/people?${params.join('&')}`;
+}
+
 // =================================================================
 // === CSV IMPORT HELPERS ==========================================
 // =================================================================
