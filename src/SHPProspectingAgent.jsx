@@ -4857,8 +4857,17 @@ function buildApolloSearchUrl({ titles = [], segments = [], locations = APOLLO_L
 
   // Person titles — Apollo accepts array-style params (key[]=...).
   for (const t of titles) push('personTitles[]', t);
-  // Person locations — typically a city/state/country string.
-  for (const loc of locations) push('personLocations[]', loc);
+
+  // Filter by ORG location ONLY, not person location. SHP cares that the
+  // ORG/facility is in CFL North — the contact's personal address (LinkedIn
+  // profile location) is irrelevant and often wrong (a facilities director
+  // at City of Jacksonville might list "Atlanta, GA" as their personal
+  // location).
+  //
+  // Apollo ANDs personLocations + organizationLocations when both are
+  // present, so sending both over-restricts the result set. Org-only is
+  // the right semantic.
+  for (const loc of locations) push('organizationLocations[]', loc);
 
   // Segments → Apollo's q_organization_keyword_tags. Reuse the same mapping
   // the agent uses everywhere else for K-12 / Higher Ed / Local Gov.
@@ -4875,9 +4884,12 @@ function buildApolloSearchUrl({ titles = [], segments = [], locations = APOLLO_L
   for (const kw of orgKw) push('qOrganizationKeywordTags[]', kw);
   for (const kw of keywordsExclude) push('qOrganizationNotKeywordTags[]', kw);
 
-  // Sort: most-engaged contacts first — same default Apollo's UI uses.
-  push('sortByField', 'recommendations_score');
-  push('sortAscending', 'false');
+  // IMPORTANT: don't sort by `recommendations_score`. Apollo's
+  // recommendation engine relaxes filters when scoring, pulling in adjacent
+  // counties / states / "similar" matches and ranking them ahead of strict
+  // matches. Sort by something deterministic so our county filters bite.
+  push('sortByField', 'organization_name');
+  push('sortAscending', 'true');
 
   return `https://app.apollo.io/#/people?${params.join('&')}`;
 }

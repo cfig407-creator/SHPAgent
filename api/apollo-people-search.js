@@ -55,7 +55,10 @@ export default async function handler(req, res) {
     per_page: Math.min(Math.max(limit, 1), 25),
   };
   if (organizationName) payload.q_organization_name = organizationName;
-  if (locations.length) payload.person_locations = locations.slice(0, 25);
+  // Use organization_locations (ORG address) NOT person_locations
+  // (contact's profile city). Apollo ANDs the two if both are present,
+  // which would over-restrict. SHP cares about org location only.
+  if (locations.length) payload.organization_locations = locations.slice(0, 25);
   if (orgKeywords.length) payload.q_organization_keyword_tags = orgKeywords.slice(0, 25);
   if (orgKeywordsExclude.length) payload.q_organization_not_keyword_tags = orgKeywordsExclude.slice(0, 25);
 
