@@ -643,11 +643,10 @@ export const TERRITORY = {
   ],
 };
 
-// Apollo location strings for the 15 CFL North counties. Apollo's search
-// API and web UI both accept "{County} County, Florida, US" as a location
-// filter. Passing these instead of the broad "Florida, US" cuts search
-// results from ~22M Florida workers down to just the territory.
-export const APOLLO_LOCATION_STRINGS = TERRITORY.counties.map(
+// County-level location strings — kept for reference. Apollo's county
+// geocoder is unreliable on free tier (leaks results from other states),
+// so we use city-level strings (below, after CITY_TO_COUNTY) instead.
+export const APOLLO_COUNTY_LOCATION_STRINGS = TERRITORY.counties.map(
   c => `${c} County, Florida, US`
 );
 
@@ -837,6 +836,35 @@ export const CITY_TO_COUNTY = {
   'hunters creek': 'Orange', 'metrowest': 'Orange', 'lake nona': 'Orange',
   'gotha': 'Orange', 'killarney': 'Orange',
 };
+
+// Apollo city-level location strings — built from CITY_TO_COUNTY.
+// Apollo's city geocoder is reliable: "Jacksonville, Florida, US" matches
+// Jacksonville, FL specifically (not Jacksonville, NC or similar). This
+// fixes the over-broad results we got with county-level strings, which
+// Apollo geocodes loosely on the free tier.
+//
+// Title-cases the city name and appends ", Florida, US". Apollo accepts
+// up to dozens of organizationLocations[] entries in a single search.
+export const APOLLO_CITY_LOCATION_STRINGS = (() => {
+  const titleCase = (s) => s.split(' ').map(w => {
+    if (!w) return w;
+    if (w.toLowerCase() === 'st.' || w.toLowerCase() === 'st') return 'St.';
+    return w[0].toUpperCase() + w.slice(1).toLowerCase();
+  }).join(' ');
+  // De-dupe (multiple keys may share a title-cased form) and emit Apollo-shaped strings.
+  const seen = new Set();
+  const out = [];
+  for (const key of Object.keys(CITY_TO_COUNTY)) {
+    const city = titleCase(key);
+    if (seen.has(city)) continue;
+    seen.add(city);
+    out.push(`${city}, Florida, US`);
+  }
+  return out;
+})();
+
+// Primary export used by the agent. City-level by default — tightest match.
+export const APOLLO_LOCATION_STRINGS = APOLLO_CITY_LOCATION_STRINGS;
 
 // classifyCounty: derive a CFL North county from a city name. Accepts an
 // optional zip-code fallback so CSV imports with sparse city data still

@@ -58,7 +58,10 @@ export default async function handler(req, res) {
   // Use organization_locations (ORG address) NOT person_locations
   // (contact's profile city). Apollo ANDs the two if both are present,
   // which would over-restrict. SHP cares about org location only.
-  if (locations.length) payload.organization_locations = locations.slice(0, 25);
+  // Cap raised from 25 → 200 to fit our city-level location list (~166 cities
+  // across 15 CFL North counties). Apollo's API doesn't document a hard cap
+  // for this filter — 200 is well within tested working ranges.
+  if (locations.length) payload.organization_locations = locations.slice(0, 200);
   if (orgKeywords.length) payload.q_organization_keyword_tags = orgKeywords.slice(0, 25);
   if (orgKeywordsExclude.length) payload.q_organization_not_keyword_tags = orgKeywordsExclude.slice(0, 25);
 

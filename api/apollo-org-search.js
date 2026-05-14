@@ -56,7 +56,8 @@ export default async function handler(req, res) {
   if (keywords.length) payload.q_organization_keyword_tags = keywords.slice(0, 25);
   if (keywordsExclude.length) payload.q_organization_not_keyword_tags = keywordsExclude.slice(0, 25);
   if (industries.length) payload.organization_industry_tag_ids = industries.slice(0, 25);
-  if (locations.length) payload.organization_locations = locations.slice(0, 25);
+  // Cap raised to 200 to fit our city-level location list.
+  if (locations.length) payload.organization_locations = locations.slice(0, 200);
   if (employeeRanges.length) payload.organization_num_employees_ranges = employeeRanges.slice(0, 10);
 
   try {
