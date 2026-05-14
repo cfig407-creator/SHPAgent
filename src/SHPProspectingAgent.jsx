@@ -849,12 +849,21 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
   // Sends the prospect, research (incl. openingHook), proof points, voice guide, and
   // real email examples to Claude. Returns { subject, body }.
   // Falls back to the deterministic composer if the API call fails for any reason.
-  const draftOutreach = async () => {
+  const draftOutreach = async ({ ignoreHook = false } = {}) => {
     if (!selectedProspect) return;
     setIsDrafting(true);
     setView('compose');
 
-    const research = researchData[selectedProspect.id] || null;
+    // When `ignoreHook` is true (user clicked "Regenerate without research
+    // opener"), strip the research-derived hook and force specificity to
+    // 'low'. buildColdEmailPrompt detects low specificity and falls back to
+    // a generic humble opener instead of trying to use a possibly-wrong
+    // research fact. Catches the case where research matched the wrong
+    // company (data-quality issue) and the hook reads as off-base.
+    const rawResearch = researchData[selectedProspect.id] || null;
+    const research = ignoreHook && rawResearch
+      ? { ...rawResearch, openingHook: '', specificityRating: 'low' }
+      : rawResearch;
     const proofs = pickProofPoints(selectedProspect, 3);
 
     // Build the signature-with-address that goes into BOTH paths (AI + fallback).
@@ -930,13 +939,16 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         model: ANTHROPIC_MODEL,
         usedResearch: !!research,
         usedOpeningHook: !!research?.openingHook,
+        hookIntentionallyOmitted: ignoreHook && !!rawResearch,
         proofPointsAvailable: proofs.map(p => p.name),
         fallback: false,
       });
       showToast(
-        research?.openingHook
-          ? 'Draft composed in Anthony\'s voice — research opener woven in'
-          : 'Draft composed in Anthony\'s voice (no research found — generic frame)',
+        ignoreHook
+          ? 'Redraft in Anthony\'s voice — generic opener (research hook skipped)'
+          : research?.openingHook
+            ? 'Draft composed in Anthony\'s voice — research opener woven in'
+            : 'Draft composed in Anthony\'s voice (no research found — generic frame)',
       );
     } catch (err) {
       console.error('[shp] AI draft failed:', err);
@@ -3303,6 +3315,7 @@ function SectionLabel({ children }) {
 function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, draftDiagnostic, pushToPipedrive, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, config, setView, followUpDays }) {
   const isAiDraft = draftDiagnostic?.composer === 'ai' && !draftDiagnostic?.fallback;
   const usedHook = draftDiagnostic?.usedOpeningHook;
+  const hookSkipped = draftDiagnostic?.hookIntentionallyOmitted;
   return (
     <>
       <button style={{ ...styles.secondaryBtn, marginBottom: '16px' }} onClick={() => setView('research')}>← Back</button>
@@ -3318,7 +3331,11 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
             : <AlertCircle size={16} color="#fbbf24" />}
           <div style={{ fontSize: '13px' }}>
             {isAiDraft
-              ? <>Drafted by Claude in Anthony's voice {usedHook ? '· research opener woven in' : '· generic frame (no specific research hook)'}</>
+              ? hookSkipped
+                ? <>Drafted by Claude in Anthony's voice · generic opener (research hook intentionally skipped)</>
+                : usedHook
+                  ? <>Drafted by Claude in Anthony's voice · research opener woven in</>
+                  : <>Drafted by Claude in Anthony's voice · generic frame (no specific research hook)</>
               : <>Fallback composer used {draftDiagnostic.fallbackReason ? `· ${draftDiagnostic.fallbackReason}` : ''} — review carefully and regenerate if needed</>}
           </div>
         </div>
@@ -3345,7 +3362,18 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
               <label style={styles.label}>Body (review and edit before sending)</label>
               <textarea style={{ ...styles.input, minHeight: '380px', fontFamily: 'inherit', lineHeight: '1.6', resize: 'vertical' }} value={draftEmail.body} onChange={e => setDraftEmail({ ...draftEmail, body: e.target.value })} />
             </div>
-            <button style={styles.secondaryBtn} onClick={draftOutreach}><Sparkles size={13} /> Regenerate</button>
+            <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+              <button style={styles.secondaryBtn} onClick={() => draftOutreach()}>
+                <Sparkles size={13} /> Regenerate
+              </button>
+              <button
+                style={styles.secondaryBtn}
+                onClick={() => draftOutreach({ ignoreHook: true })}
+                title="Skip the research-derived opener — useful when research surfaced a wrong fact or matched the wrong company"
+              >
+                <RefreshCw size={13} /> Regenerate without research hook
+              </button>
+            </div>
           </div>
 
           <div style={styles.card}>
