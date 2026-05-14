@@ -284,7 +284,7 @@ export function detectEnrichmentNeeds(prospect) {
 // SHP is and why we're writing in one or two short sentences.
 export const VOICE_EXAMPLES = [
   {
-    context: 'Short, direct intro — preferred default for cold outreach',
+    context: 'Short, direct intro — three paragraphs, capability first',
     body: `I'm Anthony with Superior Hardware Products in Longwood. Our team handles everything in your doorways — mechanical hardware, electrified access control integration, closers, panic devices, and service when something fails mid-year.
 
 We're proud to work with multiple [match-segment-or-region peers] across Central Florida. Just wanted to be a name you recognize when something comes up — propped door, broken closer, access control tie-in. If anything's already on your radar, happy to walk it with you.
@@ -292,7 +292,7 @@ We're proud to work with multiple [match-segment-or-region peers] across Central
 I'm often in the area with a few customers, so I can stop by for an in-person intro if you'd prefer.`,
   },
   {
-    context: '"Found you on website" framing — alternative opener pattern',
+    context: '"Found you on website" framing — four paragraphs, humble frame leads the body',
     body: `I got your name while looking for the right facilities contact at [company]. Wanted to put Superior Hardware Products on your radar.
 
 I know you likely have someone for what we do, but in case you need another arrow in your quiver — we handle everything related to your door openings, from mechanical to electrified to automatics. We can provide, service, and install anything related to doors or hardware.
@@ -302,14 +302,34 @@ Let me know if the timing is right for a conversation, or if there's another per
 I'm often in the area with a few customers, so I can stop by for an in-person intro if you'd prefer.`,
   },
   {
-    context: 'New-rep introduction to existing customer (warm pattern — reference only)',
-    body: `I am new to the SHP team and wanted to reach out for a quick introduction.
+    context: 'Two-paragraph punch — no capability laundry list, resource frame dominant',
+    body: `Quick intro from Superior Hardware Products in Longwood. We're a 40-year shop that handles commercial doors and hardware across Central Florida — from a single broken closer to a master key rebuild across multiple buildings.
 
-I am now responsible for what we call N. Central Florida, which you are a part of.
+I know you likely have a vendor for this. Wanted to be a name you know in case they're ever tied up or it's worth having options. Happy to connect whenever it makes sense, or just file this for when something comes up.`,
+  },
+  {
+    context: 'Proof-point-first structure — same-segment customer anchors the opening body paragraph',
+    body: `I'm Anthony with Superior Hardware Products. We work with [Customer A] and [Customer B] in the area and wanted to reach out to [company] as well.
 
-My list shows you as an active customer, so I want to ensure I have a good understanding of your needs so that I can best support your team/facility(s).
+Our team handles everything on the door side — hardware, closers, access control integration, automatics, and service. One call covers it regardless of brand or age of the hardware.
 
-Ideally, we would find some time to meet in person, but we can set up a call or video meeting if you would prefer.`,
+I am sure you already have a resource for this. Just wanted to make sure you knew we operated in your area.`,
+  },
+  {
+    context: 'Geography-anchor opener — county or region as the reason for reaching out',
+    body: `We've been working with a few [segment type] clients in [county] County and came across [company] — figured it was worth a quick intro.
+
+Superior Hardware Products handles commercial doors and hardware from end to end: mechanical, electrified access control, automatics, and service when something goes down mid-year. No need to manage three different vendors for door problems.
+
+I am sure you already have someone for this. Wanted to be on your list in case it's useful.`,
+  },
+  {
+    context: 'Short resource-frame — three tight paragraphs, humble frame leads',
+    body: `I got your name while looking for the right facilities contact at [company]. Wanted to introduce Superior Hardware Products briefly.
+
+I know you likely have someone for door and hardware work. We're based in Longwood and cover Central Florida — mechanical hardware, access control, automatics, and service. Wanted to be another option if you ever need a second call or your current vendor is backed up.
+
+Let me know if the timing is right for a quick conversation. If not, happy to just be a name on your list.`,
   },
 ];
 
@@ -375,6 +395,13 @@ ANTHONY'S VOICE — characteristics the draft must hit:
    proof points to surface — it's never the subject of the email. The prospect
    doesn't need to know we did research. They need to know what we do and that
    we work with peers like them.
+
+10. VARY THE STRUCTURE. No two cold emails should feel like the same template
+    filled in differently. Vary paragraph count (2–4), vary what leads, vary
+    sentence rhythm. Sometimes proof comes before capability. Sometimes the
+    humble frame is the first thing after the greeting. Sometimes the intro
+    and capability are one sentence. Sometimes there is no in-person offer.
+    The voice examples show different structures — use the full range.
 `;
 
 
@@ -402,10 +429,26 @@ export const OPENER_BANK = [
     text: `I got your name while looking around for the right person at {company} to share some information with about Superior Hardware Products.`,
   },
   {
+    id: 'B_quick_intro',
+    when: 'default — punchy alternative, no "looking for" framing',
+    text: `Quick intro from Superior Hardware Products in Longwood. Wanted to get on your radar.`,
+  },
+  {
     id: 'C_geography',
     when: 'fires when there\'s a same-county customer to anchor on',
-    text: `I came across {company} while working with a few customers in {county} County and wanted to make sure you knew about Superior Hardware Products.`,
+    text: `We've been working with a few clients in {county} County and came across {company} — figured it was worth a quick introduction.`,
     requires: ['sameCountyCustomer'],
+  },
+  {
+    id: 'D_peer_anchor',
+    when: 'fires when proof points exist — leads with the peer reference',
+    text: `SHP has been supporting {proof} and a few other partners in the area. Wanted to reach out to {company} as well.`,
+    requires: ['hasProofPoints'],
+  },
+  {
+    id: 'E_plain_intro',
+    when: 'default — clean self-intro, no "I got your name" framing',
+    text: `I'm Anthony with Superior Hardware Products — we handle commercial doors and hardware across Central Florida and wanted to introduce ourselves to {company}.`,
   },
   {
     id: 'F_higher_altitude',
@@ -1356,50 +1399,42 @@ ${VOICE_GUIDE}
 ═════ ANTHONY'S REAL EMAIL EXAMPLES — match this voice ═════
 ${voiceExamples}
 
-═════ STRUCTURE FOR YOUR DRAFT ═════
-GREETING — Always "Hi {firstName}," using the prospect's FIRST name only.
-Never use "Ms./Mr./Dr. {LastName}" — that's too formal for Anthony's
-peer voice. If you only have one name, use it as-is.
+═════ STRUCTURE ═════
+Greeting: "Hi {firstName}," — first name only, never Ms./Mr./Dr.
 
-1. OPENER — Short, direct introduction. One sentence (two max).
-   DO NOT open with a question.
-   DO NOT open with "I hope email is OK" or "I didn't want to interrupt
-   your day with a call" — those waste the prospect's time.
-   DO NOT open with research disclosures.
+The email must include these four things — but NOT in a fixed order.
+Vary the structure so no two drafts feel like the same template:
 
-   Use one of these patterns:
-   (a) "I'm Anthony with Superior Hardware Products in Longwood."
-   (b) "Quick intro from Superior Hardware Products in Longwood."
-   (c) "I got your name while looking for the right facilities contact
-        at {company}. Wanted to put Superior Hardware Products on your
-        radar."
+  WHO    — who Anthony is, that this is SHP, Longwood-based
+  WHAT   — what SHP does, weighted toward this prospect's segment needs
+  HUMBLE — acknowledge they likely have a vendor; position SHP as a resource
+  CLOSE  — low-pressure invitation; no demands, no timelines
 
-   The opener establishes WHO is writing and that it's a cold reach.
-   That's all. The body does the work.
+Mix the order. Sometimes proof anchors the opening. Sometimes the humble
+frame leads. Sometimes WHO and WHAT collapse into one sentence. Sometimes
+you skip the in-person offer entirely. Vary paragraph count (2–4).
+Look at all six voice examples above — they use different structures.
+Do not default to the same one every time.
 
-2. CAPABILITY SUMMARY (immediately after opener) — one tight sentence
-   describing what SHP handles, IMPLICITLY emphasizing capabilities most
-   relevant to this prospect's segment (use the research's pain signals
-   to choose which to mention — but never quote the research).
-   Pattern: "Our team handles everything in your doorways — [3-4
-   relevant items chosen from: mechanical hardware, electrified access
-   control, automatic openers, closers, panic devices, fire-rated
-   doors, master keying, service-when-things-fail]."
+Forbidden opener moves (no exceptions):
+  × Opening with a question
+  × "I hope email is OK" / preamble apologies
+  × Disclosing research ("I noticed...", "I saw that...", "Your recent...")
 
-3. HUMBLE FRAMING + PROOF DROP — one paragraph. Acknowledge they likely
-   have a vendor ("I know you likely have someone for what we do,
-   but...") and name 1-2 real customers from the proof points if they
-   fit. Skip if no proof fits naturally.
+REQUIRED — always include regardless of structure:
+  • Soft opt-out on its own paragraph BEFORE sign-off:
+    "${softOptOut}"
+  • Signature block verbatim (CAN-SPAM — physical address required)
 
-4. SOFT CTA — borrow phrasing from: ${cta}
-5. Optional in-person offer — "I'm often in the area with a few customers" — only if prospect is in CFL North.
-6. Soft opt-out — REQUIRED. Include this exact line (or a very close paraphrase that keeps the same meaning) on its own paragraph BEFORE the sign-off:
-   "${softOptOut}"
-   This protects domain reputation by giving recipients a friction-free way to decline instead of marking us as spam. Don't soften it past recognizability.
-7. Sign-off and signature.
+Optional — include only when contextually natural:
+  • In-person offer: "I'm often in the area with a few customers, so I can
+    stop by for an in-person intro if you'd prefer."
+  • Proof drop: 1–2 customers from the list above, only if they fit
+
+Soft CTA reference: ${cta}
 
 ═════ HARD RULES ═════
-- 110-160 words in the body (Anthony's real emails run longer than the previous tight 80-110)
+- 80-180 words in the body. Tight 2-paragraph emails are fine. So are fuller 4-paragraph ones. Match length to how much there is to say.
 - NO exclamation points
 - NO corporate filler ("hope this finds you well", "wanted to reach out", "circle back", "leverage", "synergy")
 - Use sentence case in subject line
