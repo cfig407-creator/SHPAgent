@@ -74,6 +74,16 @@ export default async function handler(req, res) {
     let data;
     try { data = JSON.parse(text); }
     catch {
+      // Apollo's free tier rejects search endpoints with a plain-text
+      // "Invalid access credentials." body. Surface a typed error so the
+      // client can pivot to the CSV import flow.
+      if (/invalid access credentials/i.test(text)) {
+        return res.status(403).json({
+          error: 'apollo_plan_required',
+          message: 'Apollo organization-search is a paid-plan feature. Your current API key works for enrichment but not discovery.',
+          raw: text.slice(0, 200),
+        });
+      }
       return res.status(apolloResp.status).json({
         error: 'Apollo returned non-JSON response',
         raw: text.slice(0, 500),

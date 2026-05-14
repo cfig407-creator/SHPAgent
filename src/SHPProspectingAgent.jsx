@@ -581,10 +581,75 @@ export default function SHPProspectingAgent() {
       }
     } catch (err) {
       console.error('[shp] Apollo search failed:', err);
-      showToast(`Apollo search failed: ${err.message || 'unknown error'}`, 'error');
+      const isPlanLimit = err?.status === 403 || /apollo_plan_required|invalid access credentials/i.test(err?.message || '');
+      if (isPlanLimit) {
+        showToast(
+          `Apollo search requires a paid plan — switch to "Import CSV" tab to upload an Apollo CSV export instead`,
+          'info',
+        );
+      } else {
+        showToast(`Apollo search failed: ${err.message || 'unknown error'}`, 'error');
+      }
     } finally {
       setIsApolloSearching(false);
     }
+  };
+
+  // === CSV Import ===
+  // Bulk-add prospects from a CSV (typically an Apollo web-UI export, or any
+  // other lead list). Each row is run through classifyICP + classifyCounty.
+  // De-duped against existing pool by normalized name+company pair.
+  // Rows missing a name OR company are dropped upstream by csvRowToProspect.
+  const importCsvRows = (candidates) => {
+    if (!candidates || candidates.length === 0) {
+      showToast('No valid rows to import', 'error');
+      return { added: 0, skippedDup: 0, skippedOutOfTerritory: 0 };
+    }
+    const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const existingKeys = new Set(
+      prospects.map(p => `${norm(p.name)}|${norm(p.company)}`).filter(k => k !== '|')
+    );
+
+    const stats = { added: 0, skippedDup: 0, skippedOutOfTerritory: 0 };
+    const now = Date.now();
+    const newOnes = [];
+    candidates.forEach((c, i) => {
+      const key = `${norm(c.name)}|${norm(c.company)}`;
+      if (existingKeys.has(key)) { stats.skippedDup++; return; }
+
+      const county = classifyCounty(c.city);
+      const icp = classifyICP(c.company, c.title);
+      const titleClass = classifyTitle(c.title);
+
+      if (!county) {
+        stats.skippedOutOfTerritory++;
+        return;
+      }
+      existingKeys.add(key);
+      newOnes.push({
+        id: `csv_${now}_${i}`,
+        name: c.name,
+        title: c.title || '',
+        company: c.company,
+        email: c.email || '',
+        phone: c.phone || '',
+        city: c.city || '',
+        county,
+        state: c.state || 'FL',
+        zip: '',
+        segment: icp.segment,
+        icpStatus: icp.status,
+        titleAltitude: titleClass.altitude,
+        status: icp.status === 'in' ? 'Ready' : icp.status === 'unknown' ? 'Review Needed' : 'Out of ICP',
+        source: 'CSV Import',
+        priority: 90 + (icp.status === 'in' ? 5 : 0) + (c.email ? 5 : 0),
+        linkedinUrl: c.linkedinUrl || '',
+      });
+      stats.added++;
+    });
+
+    setProspects(prev => [...newOnes, ...prev]);
+    return stats;
   };
 
   // === Manual add ===
@@ -1101,7 +1166,15 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       showToast(`Found ${annotated.length} peer${annotated.length === 1 ? '' : 's'} at ${prospect.company}${newCount < annotated.length ? ` (${annotated.length - newCount} already in pool)` : ''}`);
     } catch (err) {
       console.error('[shp] multiThreadAccount failed:', err);
-      showToast(`Peer search failed: ${err.message}`, 'error');
+      const isPlanLimit = err?.status === 403 || /apollo_plan_required|invalid access credentials/i.test(err?.message || '');
+      if (isPlanLimit) {
+        showToast(
+          `"Find peers" needs Apollo paid plan. Try Find → Import CSV instead.`,
+          'info',
+        );
+      } else {
+        showToast(`Peer search failed: ${err.message}`, 'error');
+      }
       setFindPeersResults([]);
     } finally {
       setIsFindingPeers(false);
@@ -1203,6 +1276,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     setBulkCrossThreadResults([]);
 
     const results = [];
+    let abortedDueToPlanLimit = false;
     for (let i = 0; i < scored.length; i++) {
       // Read latest cancel flag via a state-bypass closure trick — we can't
       // read state directly in a loop, so use a local mutable ref via the setter.
@@ -1227,6 +1301,8 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           titles,
           limit: 10,
         }, { retries: 1, timeoutMs: 20_000 });
+
+        // First success — implicitly confirms plan tier is OK. Continue.
 
         const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
 
@@ -1256,6 +1332,13 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           candidates: annotated,
         });
       } catch (err) {
+        const isPlanLimit = err?.status === 403 || /apollo_plan_required|invalid access credentials/i.test(err?.message || '');
+        if (isPlanLimit && results.length === 0) {
+          // First request failed with the plan-tier error — short-circuit the
+          // entire loop rather than wasting 60 throttled round-trips.
+          abortedDueToPlanLimit = true;
+          break;
+        }
         results.push({
           orgKey: item.key,
           orgName: item.displayName,
@@ -1273,6 +1356,15 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     setBulkCrossThreadResults(results);
     setBulkCrossThreadProgress({ done: scored.length, total: scored.length, currentOrg: '' });
     setBulkCrossThreadRunning(false);
+
+    if (abortedDueToPlanLimit) {
+      setBulkCrossThreadOpen(false);
+      showToast(
+        `Cross-threading needs Apollo paid plan. Use Find → Import CSV to bulk-add from Apollo's web UI export.`,
+        'info',
+      );
+      return;
+    }
 
     const totalCandidates = results.reduce((sum, r) => sum + (r.candidates?.length || 0), 0);
     const errored = results.filter(r => r.error).length;
@@ -1368,6 +1460,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
 
     // Phase 1 — fire all three segment searches.
     const orgsBySegment = [];
+    let abortedDueToPlanLimit = false;
     for (let i = 0; i < segmentSearches.length; i++) {
       let cancelled = false;
       setNewAccountsCancel(c => { cancelled = c; return c; });
@@ -1386,9 +1479,25 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         orgsBySegment.push({ segment: s.segment, orgs: data.organizations || [] });
       } catch (err) {
         console.error('[shp] org-search failed for', s.segment, err);
+        const isPlanLimit = err?.status === 403 || /apollo_plan_required|invalid access credentials/i.test(err?.message || '');
+        if (isPlanLimit) {
+          abortedDueToPlanLimit = true;
+          break;
+        }
         orgsBySegment.push({ segment: s.segment, orgs: [], error: err.message });
       }
       if (i < segmentSearches.length - 1) await new Promise(r => setTimeout(r, 220));
+    }
+
+    if (abortedDueToPlanLimit) {
+      setNewAccountsRunning(false);
+      setNewAccountsOpen(false);
+      setNewAccountsResults([]);
+      showToast(
+        `Finding new accounts needs Apollo paid plan. Use Find → Import CSV instead.`,
+        'info',
+      );
+      return;
     }
 
     // Dedup against existing pool + collapse cross-segment duplicates.
@@ -1833,7 +1942,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       />
       <div className="shp-main" style={styles.main}>
         {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
-        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} />}
+        {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
@@ -2367,7 +2476,7 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
 // =================================================================
 // === FIND VIEW ===
 // =================================================================
-function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount }) {
+function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount }) {
   const [findTab, setFindTab] = useState('pool');
 
   return (
@@ -2375,17 +2484,22 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
       <div className="shp-page-title" style={styles.pageTitle}>Find Prospects</div>
       <div style={styles.pageSubtitle}>{totalProspects} prospects in pool · {prospects.length} matching filters</div>
 
-      <div style={{ ...styles.nav, marginBottom: '20px', display: 'inline-flex' }}>
+      <div style={{ ...styles.nav, marginBottom: '20px', display: 'inline-flex', flexWrap: 'wrap' }}>
         {[
           { id: 'pool', label: 'Browse Pool', count: totalProspects },
           { id: 'apollo', label: 'Apollo Search' },
           { id: 'manual', label: 'Manual Add' },
+          { id: 'csv', label: 'Import CSV' },
         ].map(t => (
           <button key={t.id} style={styles.navBtn(findTab === t.id)} onClick={() => setFindTab(t.id)}>
             {t.label}{t.count !== undefined ? ` (${t.count})` : ''}
           </button>
         ))}
       </div>
+
+      {findTab === 'csv' && (
+        <CSVImportTab styles={styles} importCsvRows={importCsvRows} showToast={showToast} />
+      )}
 
       {findTab === 'apollo' && (
         <div style={styles.card}>
@@ -2522,6 +2636,208 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
         </>
       )}
     </>
+  );
+}
+
+// =================================================================
+// === CSV IMPORT TAB ==============================================
+// =================================================================
+// Self-contained tab inside FindView. File pick → column mapping →
+// preview → bulk import. All state is local; the import call goes through
+// the parent's importCsvRows handler which adds to the global pool.
+function CSVImportTab({ styles, importCsvRows, showToast }) {
+  const [fileName, setFileName] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [mapping, setMapping] = useState({});
+  const [importedStats, setImportedStats] = useState(null);
+
+  const onFile = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setImportedStats(null);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      const { headers: hs, rows: rs } = parseCsv(text);
+      if (hs.length === 0) {
+        showToast('Could not parse CSV — make sure the first row contains column names', 'error');
+        return;
+      }
+      setFileName(f.name);
+      setHeaders(hs);
+      setRows(rs);
+      setMapping(autoMapCsvColumns(hs));
+    };
+    reader.onerror = () => showToast('Failed to read file', 'error');
+    reader.readAsText(f);
+  };
+
+  // Live-derive parsed prospects and import preview stats from the mapping.
+  const parsedCandidates = useMemo(() => {
+    if (rows.length === 0) return [];
+    const out = [];
+    rows.forEach((r, idx) => {
+      const p = csvRowToProspect(r, mapping, idx);
+      if (p) out.push(p);
+    });
+    return out;
+  }, [rows, mapping]);
+
+  const previewStats = useMemo(() => {
+    const total = rows.length;
+    const valid = parsedCandidates.length;
+    const inTerritory = parsedCandidates.filter(p => classifyCounty(p.city)).length;
+    return { total, valid, inTerritory, dropped: total - valid };
+  }, [rows.length, parsedCandidates]);
+
+  const requiredMissing = !mapping.company;
+  const nameMissing = !mapping.name && !(mapping.firstName && mapping.lastName);
+
+  const doImport = () => {
+    if (requiredMissing || nameMissing) {
+      showToast('Map Company and Name (or First+Last) before importing', 'error');
+      return;
+    }
+    const stats = importCsvRows(parsedCandidates);
+    setImportedStats(stats);
+    const msg = `Imported ${stats.added}${stats.skippedDup ? ` · ${stats.skippedDup} dup` : ''}${stats.skippedOutOfTerritory ? ` · ${stats.skippedOutOfTerritory} out-of-territory` : ''}`;
+    showToast(msg);
+  };
+
+  const reset = () => {
+    setFileName(null);
+    setHeaders([]);
+    setRows([]);
+    setMapping({});
+    setImportedStats(null);
+  };
+
+  return (
+    <div style={styles.card}>
+      <div style={styles.sectionTitle}><Plus size={14} /> Import CSV</div>
+      <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-2)', marginBottom: 'var(--space-4)', lineHeight: 1.6 }}>
+        Search in Apollo's web UI (free), export to CSV, drop the file here. The agent classifies each row by ICP and county, drops duplicates, and adds the rest to your pool.
+      </div>
+
+      {/* File picker */}
+      {!fileName && (
+        <label
+          style={{
+            display: 'block',
+            padding: 'var(--space-7) var(--space-5)',
+            border: '2px dashed var(--border-strong)',
+            borderRadius: 'var(--r-lg)',
+            background: 'var(--bg-sunk)',
+            textAlign: 'center',
+            cursor: 'pointer',
+          }}
+        >
+          <Plus size={28} style={{ color: 'var(--text-3)', marginBottom: 'var(--space-3)' }} />
+          <div style={{ fontSize: 'var(--fs-15)', fontWeight: 600, marginBottom: '4px' }}>Choose a CSV file</div>
+          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
+            Apollo exports work directly · any CSV with First/Last/Company columns will parse
+          </div>
+          <input type="file" accept=".csv,text/csv" onChange={onFile} style={{ display: 'none' }} />
+        </label>
+      )}
+
+      {/* Mapping + preview */}
+      {fileName && (
+        <>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
+            <div>
+              <div style={{ fontSize: 'var(--fs-14)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{fileName}</div>
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
+                {previewStats.total} rows · {previewStats.valid} with required fields · {previewStats.inTerritory} in CFL North
+              </div>
+            </div>
+            <button style={styles.secondaryBtn} onClick={reset}>
+              <X size={13} /> Clear
+            </button>
+          </div>
+
+          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600, marginBottom: 'var(--space-3)' }}>
+            Column Mapping
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 'var(--space-2) var(--space-3)', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
+            {CSV_FIELDS.map(f => (
+              <React.Fragment key={f.key}>
+                <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text)' }}>
+                  {f.label}
+                  {!f.optional && <span style={{ color: 'var(--shp-red)', marginLeft: 4 }}>*</span>}
+                  {f.notes && <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>{f.notes}</div>}
+                </div>
+                <select
+                  style={styles.input}
+                  value={mapping[f.key] || ''}
+                  onChange={e => setMapping({ ...mapping, [f.key]: e.target.value || null })}
+                >
+                  <option value="">— not mapped —</option>
+                  {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                </select>
+              </React.Fragment>
+            ))}
+          </div>
+
+          {/* Sample preview */}
+          {parsedCandidates.length > 0 && (
+            <>
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600, marginBottom: 'var(--space-3)' }}>
+                Preview (first 5)
+              </div>
+              <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-md)', overflow: 'hidden', marginBottom: 'var(--space-4)' }}>
+                {parsedCandidates.slice(0, 5).map((p, i) => {
+                  const county = classifyCounty(p.city);
+                  const icp = classifyICP(p.company, p.title);
+                  return (
+                    <div key={i} style={{
+                      padding: 'var(--space-3) var(--space-4)',
+                      borderBottom: i < 4 ? '1px solid var(--border-subtle)' : 'none',
+                      fontSize: 'var(--fs-13)',
+                    }}>
+                      <div style={{ fontWeight: 600 }}>{p.name}</div>
+                      <div style={{ color: 'var(--text-2)' }}>
+                        {p.title || '(no title)'} · {p.company}
+                      </div>
+                      <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
+                        {p.city || '?'}, {county || 'out-of-territory'} · {icp.segment} · {p.email || 'no email'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {/* Import button */}
+          {!importedStats && (
+            <button
+              style={{ ...styles.primaryBtn, opacity: (requiredMissing || nameMissing || previewStats.valid === 0) ? 0.5 : 1 }}
+              disabled={requiredMissing || nameMissing || previewStats.valid === 0}
+              onClick={doImport}
+            >
+              <Plus size={14} /> Import {previewStats.inTerritory} prospect{previewStats.inTerritory === 1 ? '' : 's'} to pool
+            </button>
+          )}
+
+          {/* Post-import summary */}
+          {importedStats && (
+            <div style={{ padding: 'var(--space-4)', background: 'var(--ok-soft)', borderRadius: 'var(--r-md)', fontSize: 'var(--fs-13)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--ok)', marginBottom: '4px' }}>
+                <CheckCircle2 size={14} style={{ verticalAlign: 'middle' }} /> Import complete
+              </div>
+              <div style={{ color: 'var(--text-2)' }}>
+                Added <strong>{importedStats.added}</strong> · Skipped <strong>{importedStats.skippedDup}</strong> duplicates · Skipped <strong>{importedStats.skippedOutOfTerritory}</strong> out-of-territory
+              </div>
+              <button style={{ ...styles.secondaryBtn, marginTop: 'var(--space-3)' }} onClick={reset}>
+                Import another CSV
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -4483,6 +4799,116 @@ function GlobalStyles() {
 // =================================================================
 // === HELPERS ===
 // =================================================================
+// =================================================================
+// === CSV IMPORT HELPERS ==========================================
+// =================================================================
+// Minimal CSV parser. Handles RFC-4180 essentials:
+//   - quoted fields containing commas, newlines, and escaped quotes ("")
+//   - mixed line endings (\r\n, \n)
+//   - empty trailing rows
+// Not for arbitrary streaming — fine for the few-hundred-row Apollo exports
+// users typically import here.
+function parseCsv(text) {
+  const rows = [];
+  let cur = [''];
+  let inQuotes = false;
+  let i = 0;
+  const src = text.replace(/\r\n/g, '\n');
+
+  while (i < src.length) {
+    const ch = src[i];
+    if (inQuotes) {
+      if (ch === '"' && src[i + 1] === '"') { cur[cur.length - 1] += '"'; i += 2; continue; }
+      if (ch === '"') { inQuotes = false; i++; continue; }
+      cur[cur.length - 1] += ch; i++; continue;
+    }
+    if (ch === '"') { inQuotes = true; i++; continue; }
+    if (ch === ',') { cur.push(''); i++; continue; }
+    if (ch === '\n') { rows.push(cur); cur = ['']; i++; continue; }
+    cur[cur.length - 1] += ch; i++;
+  }
+  if (cur.length > 1 || cur[0] !== '') rows.push(cur);
+
+  if (rows.length === 0) return { headers: [], rows: [] };
+
+  const headers = rows[0].map(h => (h || '').trim());
+  const data = rows.slice(1)
+    .filter(r => r.some(v => (v || '').trim() !== ''))
+    .map(r => {
+      const obj = {};
+      headers.forEach((h, idx) => { obj[h] = (r[idx] ?? '').trim(); });
+      return obj;
+    });
+  return { headers, rows: data };
+}
+
+// The fields a Prospect entry needs. Each maps to one CSV column (or two for name).
+const CSV_FIELDS = [
+  { key: 'firstName',   label: 'First Name',  optional: true,  notes: 'Combined with Last Name if "Name" isn\'t mapped' },
+  { key: 'lastName',    label: 'Last Name',   optional: true },
+  { key: 'name',        label: 'Full Name',   optional: true,  notes: 'Overrides First+Last if mapped' },
+  { key: 'title',       label: 'Job Title',   optional: true },
+  { key: 'company',     label: 'Company',     optional: false, notes: 'Required' },
+  { key: 'email',       label: 'Work Email',  optional: true },
+  { key: 'phone',       label: 'Phone',       optional: true },
+  { key: 'city',        label: 'City',        optional: true,  notes: 'Used to classify county' },
+  { key: 'state',       label: 'State',       optional: true },
+  { key: 'linkedinUrl', label: 'LinkedIn URL', optional: true },
+];
+
+// Guess which CSV header maps to each Prospect field based on common Apollo /
+// CRM column names. Returns { [fieldKey]: csvHeaderName | null }.
+function autoMapCsvColumns(headers) {
+  const patterns = {
+    firstName:   [/^first\s*name$/i, /^firstname$/i, /^given\s*name$/i],
+    lastName:    [/^last\s*name$/i, /^lastname$/i, /^surname$/i, /^family\s*name$/i],
+    name:        [/^full\s*name$/i, /^name$/i, /^contact\s*name$/i, /^person\s*name$/i],
+    title:       [/^(job\s*)?title$/i, /^position$/i, /^role$/i],
+    company:     [/^company( name)?$/i, /^organization$/i, /^account( name)?$/i, /^employer$/i],
+    email:       [/^(work[ _-]+)?email([ _-]+address)?$/i, /^e[ _-]?mail$/i, /^primary email$/i],
+    phone:       [/^(work[ _-]+)?(direct[ _-]+)?phone( number)?$/i, /^mobile( phone)?$/i, /^cell( phone)?$/i],
+    city:        [/^city$/i, /^location$/i],
+    state:       [/^state$/i, /^state\/province$/i, /^region$/i],
+    linkedinUrl: [/^linkedin([ _-]+url)?$/i, /^linkedin[ _-]+profile$/i],
+  };
+  const out = {};
+  for (const field of Object.keys(patterns)) {
+    const found = headers.find(h => patterns[field].some(re => re.test(h.trim())));
+    out[field] = found || null;
+  }
+  return out;
+}
+
+// Project a single CSV row through the mapping into a candidate Prospect shape.
+// Returns null if the row is missing a required field (name or company).
+function csvRowToProspect(row, mapping, idx) {
+  const get = (field) => {
+    const col = mapping[field];
+    return col ? (row[col] || '').trim() : '';
+  };
+  // Name: prefer the "Full Name" mapping; otherwise combine First + Last.
+  let name = get('name');
+  if (!name) {
+    const fn = get('firstName');
+    const ln = get('lastName');
+    name = [fn, ln].filter(Boolean).join(' ').trim();
+  }
+  const company = get('company');
+  if (!name || !company) return null;
+
+  return {
+    name,
+    title: get('title'),
+    company,
+    email: get('email').toLowerCase(),
+    phone: get('phone'),
+    city: get('city'),
+    state: get('state') || 'FL',
+    linkedinUrl: get('linkedinUrl'),
+    _csvRow: idx,
+  };
+}
+
 // Guarantee the user's physical postal address appears in the signature
 // (CAN-SPAM compliance). If the signature already mentions the address text
 // somewhere, returns it untouched. Otherwise appends it on its own line.
