@@ -158,6 +158,11 @@ export default function SHPProspectingAgent() {
   const [selectedProspect, setSelectedProspect] = useState(null);
   const [researchData, setResearchData] = useState({});
   const [isResearching, setIsResearching] = useState(false);
+  // Per-prospect drafts — keyed by prospect ID, persisted to localStorage.
+  // Populated whenever draftEmail is set for a prospect; loaded back when that
+  // prospect is selected again. Means "Draft" is a one-time operation per prospect,
+  // not something that re-runs every time you return to the compose view.
+  const [drafts, setDrafts] = useState({});
   const [draftEmail, setDraftEmail] = useState({ subject: '', body: '', subjectAlts: [], linkedinMsg: '', followUps: {} });
   const [isDrafting, setIsDrafting] = useState(false);
   const [draftDiagnostic, setDraftDiagnostic] = useState(null);
@@ -246,6 +251,18 @@ export default function SHPProspectingAgent() {
       try { setPdRecords(JSON.parse(savedPdRecords)); }
       catch (e) { console.warn('[shp] failed to parse saved pd records:', e); }
     }
+    // Hydrate cached research so prospects don't get re-researched on every reload.
+    const savedResearch = localStorage.getItem('shp_research_v1');
+    if (savedResearch) {
+      try { setResearchData(JSON.parse(savedResearch)); }
+      catch (e) { console.warn('[shp] failed to parse saved research:', e); }
+    }
+    // Hydrate per-prospect drafts so compose state survives reloads.
+    const savedDrafts = localStorage.getItem('shp_drafts_v1');
+    if (savedDrafts) {
+      try { setDrafts(JSON.parse(savedDrafts)); }
+      catch (e) { console.warn('[shp] failed to parse saved drafts:', e); }
+    }
 
     // 2. If a server-side config exists (Vercel KV), let it override the
     //    localStorage copy — the server is the source of truth across devices.
@@ -278,6 +295,36 @@ export default function SHPProspectingAgent() {
       localStorage.setItem('shp_pd_records_v1', JSON.stringify(pdRecords));
     }
   }, [pdRecords]);
+
+  // Persist research cache — so prospects aren't re-researched on every reload.
+  useEffect(() => {
+    if (Object.keys(researchData).length > 0) {
+      try { localStorage.setItem('shp_research_v1', JSON.stringify(researchData)); }
+      catch (e) { console.warn('[shp] research cache too large for localStorage:', e); }
+    }
+  }, [researchData]);
+
+  // Persist per-prospect drafts.
+  useEffect(() => {
+    if (Object.keys(drafts).length > 0) {
+      try { localStorage.setItem('shp_drafts_v1', JSON.stringify(drafts)); }
+      catch (e) { console.warn('[shp] draft cache too large for localStorage:', e); }
+    }
+  }, [drafts]);
+
+  // When the active prospect changes, restore their stored draft (or clear the
+  // compose area so the previous prospect's copy doesn't bleed through).
+  useEffect(() => {
+    if (!selectedProspect?.id) return;
+    const stored = drafts[selectedProspect.id];
+    setDraftEmail(stored ?? { subject: '', body: '', subjectAlts: [], linkedinMsg: '', followUps: {} });
+  }, [selectedProspect?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Mirror draftEmail back to the drafts map whenever it changes and has content.
+  useEffect(() => {
+    if (!selectedProspect?.id || !draftEmail.subject) return;
+    setDrafts(prev => ({ ...prev, [selectedProspect.id]: draftEmail }));
+  }, [draftEmail]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist Apollo cycle on every update (including auto-rotate at month boundary)
   useEffect(() => { saveApolloCycle(apolloCycle); }, [apolloCycle]);
@@ -708,7 +755,7 @@ export default function SHPProspectingAgent() {
   };
 
   // === Research ===
-  const researchProspect = async (prospect) => {
+  const researchProspect = async (prospect, { force = false } = {}) => {
     // Defensive guard — shouldn't be reachable from UI for Customer/Dead but protects bypassed entry points
     const status = overrides[prospect.id]?.outreachStatus;
     if (status === 'Customer') {
@@ -719,6 +766,15 @@ export default function SHPProspectingAgent() {
       showToast('This prospect is marked Dead — restore to Active first', 'info');
       return;
     }
+
+    // Cache hit — skip the API call and navigate straight to the research view.
+    // Pass { force: true } (e.g. from the Re-research button) to bypass the cache.
+    if (!force && researchData[prospect.id]) {
+      setSelectedProspect(prospect);
+      setView('research');
+      return;
+    }
+
     setSelectedProspect(prospect);
     setIsResearching(true);
     setView('research');
@@ -2273,7 +2329,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
-        {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
+        {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} reresearch={() => { setResearchData(prev => { const next = {...prev}; delete next[selectedProspect.id]; return next; }); researchProspect(selectedProspect, { force: true }); }} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
@@ -3527,7 +3583,7 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
 // =================================================================
 // === RESEARCH VIEW ===
 // =================================================================
-function ResearchView({ styles, prospect, research, isResearching, setView, draftOutreach }) {
+function ResearchView({ styles, prospect, research, isResearching, setView, draftOutreach, reresearch }) {
   const [diagOpen, setDiagOpen] = useState(false);
   const diag = research?._diagnostic;
   const specificity = research?.specificityRating || 'unknown';
@@ -3671,9 +3727,18 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
               <div style={{ fontSize: '14px', lineHeight: '1.6' }}>"{research.openingHook}"</div>
             </div>
           </div>
-          <button style={styles.primaryBtn} onClick={draftOutreach}>
-            <Edit3 size={16} /> Draft Cold Email
-          </button>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <button style={styles.primaryBtn} onClick={draftOutreach}>
+              <Edit3 size={16} /> Draft Cold Email
+            </button>
+            <button
+              style={{ ...styles.secondaryBtn, fontSize: '12px' }}
+              onClick={reresearch}
+              title="Clears cached research and runs fresh web searches"
+            >
+              <RefreshCw size={13} /> Re-research
+            </button>
+          </div>
         </>
       )}
     </>
