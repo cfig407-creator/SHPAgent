@@ -178,6 +178,7 @@ export default function SHPProspectingAgent() {
   const [stageDeals, setStageDeals] = useState({});
   const [isPushing, setIsPushing] = useState(false);
   const [isSendingPD, setIsSendingPD] = useState(false);
+  const [isSchedulingFollowUps, setIsSchedulingFollowUps] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
   // Apollo enrichment — track which prospect is currently being enriched + the proposed result.
@@ -1073,6 +1074,62 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       showToast(`Pipedrive push failed: ${err.message}`, 'error');
     } finally {
       setIsPushing(false);
+    }
+  };
+
+  // === Schedule follow-up email tasks in Pipedrive ===
+  // Creates one activity per follow-up day (3, 7, 14) attached to the existing lead/deal.
+  // Each activity gets: subject, due_date, type=email, and the draft body in the note field
+  // so Anthony sees exactly what to send when the task pops up.
+  const scheduleFollowUps = async (followUps) => {
+    if (!selectedProspect) return;
+    const rec = pdRecords[selectedProspect.id] || {};
+    if (!rec.leadId && !rec.dealId) {
+      showToast('Push to Pipedrive first — activities need a lead to attach to', 'info');
+      return;
+    }
+
+    setIsSchedulingFollowUps(true);
+    const followUpHour = config.followUpHour ?? 9;
+    let scheduled = 0;
+
+    try {
+      for (const [key, dayOffset] of [['day3', 3], ['day7', 7], ['day14', 14]]) {
+        const fu = followUps?.[key];
+        if (!fu) continue;
+
+        const fuSubject = typeof fu === 'string'
+          ? `Day ${dayOffset} follow-up — ${selectedProspect.name}`
+          : (fu.subject || `Day ${dayOffset} follow-up — ${selectedProspect.name}`);
+        const fuBody = typeof fu === 'string' ? fu : (fu.body || '');
+
+        const due = new Date();
+        due.setDate(due.getDate() + dayOffset);
+        due.setHours(followUpHour, 0, 0, 0);
+        const dueDate = due.toISOString().split('T')[0];
+        const dueTime = `${String(due.getUTCHours()).padStart(2, '0')}:${String(due.getUTCMinutes()).padStart(2, '0')}`;
+
+        const payload = {
+          subject: fuSubject,
+          type: 'email',
+          due_date: dueDate,
+          due_time: dueTime,
+          user_id: pdMeta.userId,
+          note: fuBody ? `Draft:\n\n${fuBody}` : undefined,
+        };
+        if (rec.leadId)   payload.lead_id   = rec.leadId;
+        if (rec.dealId)   payload.deal_id   = rec.dealId;
+        if (rec.personId) payload.person_id = rec.personId;
+        if (rec.orgId)    payload.org_id    = rec.orgId;
+
+        await pdRequest('POST', '/activities', payload);
+        scheduled++;
+      }
+      showToast(`${scheduled} follow-up task${scheduled === 1 ? '' : 's'} scheduled in Pipedrive`);
+    } catch (err) {
+      showToast(`Failed to schedule follow-ups: ${err.message}`, 'error');
+    } finally {
+      setIsSchedulingFollowUps(false);
     }
   };
 
@@ -2217,7 +2274,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
-        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
+        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
         {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} />}
@@ -3639,7 +3696,7 @@ function SectionLabel({ children }) {
 // =================================================================
 // === COMPOSE VIEW ===
 // =================================================================
-function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, draftDiagnostic, pushToPipedrive, sendViaPipedrive, isSendingPD, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, config, setView, followUpDays }) {
+function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, draftDiagnostic, pushToPipedrive, sendViaPipedrive, isSendingPD, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, scheduleFollowUps, isSchedulingFollowUps, config, setView, followUpDays }) {
   const isAiDraft = draftDiagnostic?.composer === 'ai' && !draftDiagnostic?.fallback;
   const [linkedinOpen, setLinkedinOpen] = useState(false);
   const [followUpOpen, setFollowUpOpen] = useState(false);
@@ -3755,15 +3812,27 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
           {/* ── Follow-up sequence ── */}
           {isAiDraft && draftEmail.followUps && Object.keys(draftEmail.followUps).length > 0 && (
             <div style={styles.card}>
-              <div
-                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
-                onClick={() => setFollowUpOpen(!followUpOpen)}
-              >
-                <div style={styles.sectionTitle} onClick={e => e.stopPropagation()}>
-                  <Calendar size={14} /> Follow-up sequence
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
+                <div
+                  style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, cursor: 'pointer' }}
+                  onClick={() => setFollowUpOpen(!followUpOpen)}
+                >
+                  <div style={styles.sectionTitle}>
+                    <Calendar size={14} /> Follow-up sequence
+                  </div>
+                  <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>
+                    {followUpOpen ? '▲' : '▼'}
+                  </span>
                 </div>
-                <button style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 6px', fontSize: '11px' }}>
-                  {followUpOpen ? 'Hide ▲' : 'Show ▼'}
+                <button
+                  style={{ ...styles.secondaryBtn, fontSize: '12px', padding: '5px 10px', flexShrink: 0 }}
+                  onClick={() => scheduleFollowUps(draftEmail.followUps)}
+                  disabled={isSchedulingFollowUps || (!pdRecords[prospect.id]?.leadId && !pdRecords[prospect.id]?.dealId)}
+                  title={!pdRecords[prospect.id]?.leadId && !pdRecords[prospect.id]?.dealId ? 'Push to Pipedrive first (Step 1)' : 'Create Day 3, 7, 14 email tasks in Pipedrive'}
+                >
+                  {isSchedulingFollowUps
+                    ? <><Loader2 size={12} className="spin" /> Scheduling…</>
+                    : <><Briefcase size={12} /> Schedule in Pipedrive</>}
                 </button>
               </div>
               {followUpOpen && (
