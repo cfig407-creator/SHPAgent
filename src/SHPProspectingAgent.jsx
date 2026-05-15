@@ -915,8 +915,16 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
   // Sends the prospect, research (incl. openingHook), proof points, voice guide, and
   // real email examples to Claude. Returns { subject, body }.
   // Falls back to the deterministic composer if the API call fails for any reason.
-  const draftOutreach = async () => {
+  const draftOutreach = async ({ force = false } = {}) => {
     if (!selectedProspect) return;
+
+    // Return cached draft immediately if one exists and force-regenerate wasn't requested.
+    if (!force && drafts[selectedProspect.id]?.subject) {
+      setDraftEmail(drafts[selectedProspect.id]);
+      setView('compose');
+      return;
+    }
+
     setIsDrafting(true);
     setView('compose');
 
@@ -3461,6 +3469,16 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
                 >
                   + save
                 </button>
+                {!proposedEnrichment?.[prospect.id] && (
+                  <button
+                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--info)', fontSize: '11px', padding: 0, textDecoration: 'underline dotted', display: 'inline-flex', alignItems: 'center', gap: '2px' }}
+                    onClick={e => { e.stopPropagation(); enrichProspect(prospect); }}
+                    disabled={!!isEnriching}
+                    title="Look up LinkedIn URL (and email/phone) via Apollo · 1 credit if found"
+                  >
+                    {isEnriching === prospect.id ? <><Loader2 size={10} className="spin" /> looking…</> : <><Sparkles size={10} /> via Apollo</>}
+                  </button>
+                )}
               </span>
             )}
             <span style={{ color: 'var(--text-3)' }}>· source: {prospect.source}</span>
@@ -3879,7 +3897,7 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
               <label style={styles.label}>Body (review and edit before sending)</label>
               <textarea style={{ ...styles.input, minHeight: '380px', fontFamily: 'inherit', lineHeight: '1.6', resize: 'vertical' }} value={draftEmail.body} onChange={e => setDraftEmail({ ...draftEmail, body: e.target.value })} />
             </div>
-            <button style={styles.secondaryBtn} onClick={() => draftOutreach()}>
+            <button style={styles.secondaryBtn} onClick={() => draftOutreach({ force: true })}>
               <Sparkles size={13} /> Regenerate
             </button>
           </div>
@@ -3932,7 +3950,9 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
                     >
                       {copiedKey === 'linkedin' ? <><CheckCircle2 size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
                     </button>
-                    <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>{draftEmail.linkedinMsg.length} / 300 chars</span>
+                    <span style={{ fontSize: '11px', color: draftEmail.linkedinMsg.length > 200 ? 'var(--danger)' : 'var(--text-3)' }}>
+                      {draftEmail.linkedinMsg.length} / 200 chars{draftEmail.linkedinMsg.length > 200 ? ' — too long, regenerate' : ''}
+                    </span>
                   </div>
                 </div>
               )}

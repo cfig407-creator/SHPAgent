@@ -1544,7 +1544,7 @@ Return ONLY this JSON object, no preamble, no markdown fences:
     "alternative subject line 2",
     "alternative subject line 3"
   ],
-  "linkedinMsg": "LinkedIn connection request under 300 chars — no pitch, just introduce yourself as a local hardware resource worth knowing. Plain text, conversational.",
+  "linkedinMsg": "LinkedIn connection request under 200 chars — no pitch, just introduce yourself as a local hardware resource worth knowing. Plain text, conversational.",
   "followUps": {
     "day3": {
       "subject": "...",
