@@ -807,24 +807,35 @@ Organization: ${prospect.company}
 Location: ${prospect.city}, ${prospect.county || 'Florida'}
 ICP segment: ${prospect.segment}
 
-YOUR TASK: Use web_search to find SPECIFIC, CONCRETE information about THIS organization. Don't return generic segment-level pain points. Search for:
-1. Their facilities footprint — number of buildings, square footage, recent construction or renovation news
-2. Recent news, board meeting items, or budget discussions about facilities/maintenance/security
-3. Capital improvement plans, master plans, RFPs related to doors/hardware/access control
-4. Anything specific that suggests a current or upcoming facility need
+YOUR TASK: Use web_search to find SPECIFIC, CONCRETE information about THIS organization. Don't return generic segment-level pain points. You MUST run at least 3 searches, and one of them MUST target LinkedIn.
 
-If you can't find specifics about the organization, search broader (the school district, the city's CIP, etc.). Try at least 2 different search queries before giving up.
+MANDATORY SEARCHES (do all three):
+1. LinkedIn for the organization AND the named contact:
+   - Query: site:linkedin.com "${prospect.company}" (find the org's company page)
+   - Query: site:linkedin.com "${prospect.name || prospect.title}" "${prospect.company}" (find the contact's profile)
+   Extract: org's LinkedIn URL, employee count band, recent hires/role changes, the contact's LinkedIn URL and tenure, any signal about how they describe themselves.
+2. Facilities/operations footprint — number of buildings, square footage, recent construction or renovation news
+3. Capital improvement plans, board meeting agendas, RFPs related to doors/hardware/access control, or budget discussions about facilities/maintenance/security
+
+If you can't find specifics about the organization, search broader (the school district, the city's CIP, etc.). The LinkedIn search is NOT optional — always run it.
 
 Return ONLY a JSON object (no preamble, no markdown). Be honest about specificity:
 {
   "companySnapshot": "1-2 sentences about the org. Reference specific facts when found.",
   "facilityProfile": "1-2 sentences on facility footprint. Use real numbers when found, otherwise say 'inferred from segment'.",
+  "linkedinFindings": {
+    "orgLinkedinUrl": "https://linkedin.com/company/... or empty string",
+    "orgSize": "employee count band from LinkedIn (e.g. '51-200 employees') or empty string",
+    "prospectLinkedinUrl": "https://linkedin.com/in/... or empty string",
+    "prospectTenure": "how long they've been in the role per LinkedIn, or empty string",
+    "notableSignals": "1-2 sentences on anything interesting from LinkedIn — recent hires, role changes, posts about facilities/operations, growth signals. Empty string if nothing notable."
+  },
   "painSignals": ["3 specific pain points. Mark with [SPECIFIC] if grounded in research, [INFERRED] if from segment defaults."],
   "openingHook": "ONE assumptive question that applies BROADLY to the segment (K-12 / Higher Ed / Local Gov), not narrowly to this specific org. Research informs WHICH segment-universal pain to pick — never reveal what you researched. AVOID category-level disclosures that only apply to a subset of the segment: 'donor-driven', 'tax-funded', 'union-staffed', 'recently-renovated', '5-year CIP', 'aging buildings', 'new construction', etc. Stay segment-universal. Good patterns: K-12 → 'managing facilities across multiple campuses', 'coordinating door work between school years', 'balancing summer-window repairs with year-round operations'. Higher Ed → 'balancing residential, athletic, and academic facilities', 'coordinating hardware specs across the campus mix'. Local Gov → 'across departments with different access needs', 'mixing older infrastructure with newer builds'. The question must work for ANY org in this segment — if you couldn't send it to a peer at a different school district, it's too specific. NEVER quote numbers, building names, news items, dates, project codes, or fiscal years.",
   "fitScore": 85,
   "fitReasoning": "1 sentence on SHP fit",
   "specificityRating": "high | medium | low",
-  "specificityNote": "1 sentence explaining what you found vs. couldn't find"
+  "specificityNote": "1 sentence explaining what you found vs. couldn't find — including whether LinkedIn returned useful results"
 }`
           }],
           tools: [{ type: 'web_search_20250305', name: 'web_search' }],
@@ -877,6 +888,15 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       // Guarantee shape so downstream UI doesn't crash on a malformed response
       parsed.painSignals = Array.isArray(parsed.painSignals) ? parsed.painSignals : [];
       parsed.fitScore = Number.isFinite(parsed.fitScore) ? parsed.fitScore : 70;
+      parsed.linkedinFindings = parsed.linkedinFindings && typeof parsed.linkedinFindings === 'object'
+        ? parsed.linkedinFindings
+        : { orgLinkedinUrl: '', orgSize: '', prospectLinkedinUrl: '', prospectTenure: '', notableSignals: '' };
+
+      // Auto-save the prospect's LinkedIn URL if research surfaced one and we don't have it yet
+      const foundLinkedin = parsed.linkedinFindings.prospectLinkedinUrl;
+      if (foundLinkedin && /^https?:\/\/(www\.)?linkedin\.com\/in\//i.test(foundLinkedin) && !prospect.linkedinUrl) {
+        saveLinkedInUrl(prospect.id, foundLinkedin);
+      }
 
       // Attach diagnostic data to research object so it's visible in the UI
       const enriched = { ...parsed, _diagnostic: diagnostic };
@@ -3882,6 +3902,51 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
 
             <Section label="Company">{research.companySnapshot}</Section>
             <Section label="Facility Profile">{research.facilityProfile}</Section>
+
+            {/* LinkedIn findings — mandatory step in research, surfaced as its own block */}
+            {research.linkedinFindings && (
+              (research.linkedinFindings.orgLinkedinUrl ||
+                research.linkedinFindings.prospectLinkedinUrl ||
+                research.linkedinFindings.orgSize ||
+                research.linkedinFindings.prospectTenure ||
+                research.linkedinFindings.notableSignals) ? (
+                <div style={{ marginBottom: '20px' }}>
+                  <SectionLabel>LinkedIn</SectionLabel>
+                  <div style={{ display: 'grid', gap: '8px', fontSize: '13px', color: 'var(--text-2)', padding: '12px 14px', background: 'var(--bg-sunk)', borderRadius: '6px', border: '1px solid var(--border)' }}>
+                    {research.linkedinFindings.orgLinkedinUrl && (
+                      <div>
+                        <strong>Org:</strong>{' '}
+                        <a href={research.linkedinFindings.orgLinkedinUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--info)', display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                          <Linkedin size={11} /> company page ↗
+                        </a>
+                        {research.linkedinFindings.orgSize && <span style={{ color: 'var(--text-3)', marginLeft: '8px' }}>· {research.linkedinFindings.orgSize}</span>}
+                      </div>
+                    )}
+                    {research.linkedinFindings.prospectLinkedinUrl && (
+                      <div>
+                        <strong>{prospect.name || 'Contact'}:</strong>{' '}
+                        <a href={research.linkedinFindings.prospectLinkedinUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--info)', display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                          <Linkedin size={11} /> profile ↗
+                        </a>
+                        {research.linkedinFindings.prospectTenure && <span style={{ color: 'var(--text-3)', marginLeft: '8px' }}>· {research.linkedinFindings.prospectTenure}</span>}
+                      </div>
+                    )}
+                    {research.linkedinFindings.notableSignals && (
+                      <div style={{ marginTop: '4px', fontStyle: 'italic', color: 'var(--text-2)' }}>
+                        {research.linkedinFindings.notableSignals}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginBottom: '20px' }}>
+                  <SectionLabel>LinkedIn</SectionLabel>
+                  <div style={{ fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic', padding: '8px 14px', background: 'var(--bg-sunk)', borderRadius: '6px', border: '1px solid var(--border)' }}>
+                    LinkedIn search ran but returned no usable profile/company match.
+                  </div>
+                </div>
+              )
+            )}
 
             <div style={{ marginBottom: '20px' }}>
               <SectionLabel>Pain Signals</SectionLabel>
