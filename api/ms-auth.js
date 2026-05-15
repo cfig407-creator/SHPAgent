@@ -62,7 +62,9 @@ function getAppBase(req) {
 }
 
 function getRedirectUri(req) {
-  return `${getAppBase(req)}/api/ms-auth?action=callback`;
+  // Dedicated callback endpoint — no query string, so Azure's portal UI
+  // accepts it without manifest editing.
+  return `${getAppBase(req)}/api/ms-auth-callback`;
 }
 
 export default async function handler(req, res) {
