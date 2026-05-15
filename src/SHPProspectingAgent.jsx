@@ -74,6 +74,12 @@ export default function SHPProspectingAgent() {
   // Last connection-attempt error — only surfaced when a connect actually failed.
   // Prevents the "stale disconnected" banner from showing while a reconnect is in flight.
   const [pdConnectError, setPdConnectError] = useState(null);
+
+  // Microsoft 365 (Graph API) — for one-click tracked sends
+  const [msConnection, setMsConnection] = useState({ connected: false, account: null, connectedAt: null });
+  const [isSendingM365, setIsSendingM365] = useState(null); // prospect id currently sending
+  // Open-tracking events keyed by prospect id: { [prospectId]: [{ trackingId, meta, opens }, ...] }
+  const [opensByProspect, setOpensByProspect] = useState({});
   const [hasAttemptedConnect, setHasAttemptedConnect] = useState(false);
 
   // Apollo quota — { creditsUsed, creditsTotal, creditsRemaining, planName }
@@ -355,6 +361,69 @@ export default function SHPProspectingAgent() {
 
   // Persist Apollo cycle on every update (including auto-rotate at month boundary)
   useEffect(() => { saveApolloCycle(apolloCycle); }, [apolloCycle]);
+
+  // ── Microsoft 365 connection status — check on mount + after OAuth redirect ──
+  // Vercel redirects back with ?ms_connected=1 or ?ms_error=... after the
+  // OAuth round-trip. We surface those once, then strip them from the URL so
+  // a reload doesn't keep showing them.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch('/api/ms-auth?action=status');
+        if (r.ok && !cancelled) {
+          const data = await r.json();
+          setMsConnection(data);
+        }
+      } catch (e) {
+        // Non-fatal: app still works without M365
+      }
+    })();
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('ms_connected') === '1') {
+      showToast('Microsoft 365 connected — ready for one-click tracked sends');
+      params.delete('ms_connected');
+      const cleanUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+      window.history.replaceState(null, '', cleanUrl);
+    } else if (params.get('ms_error')) {
+      showToast(`Microsoft 365 connect failed: ${params.get('ms_error')}`, 'error');
+      params.delete('ms_error');
+      const cleanUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+      window.history.replaceState(null, '', cleanUrl);
+    }
+
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Poll opens for prospects that have been sent to via M365 ──
+  // Fetches every 2 min while the tab is visible. Only queries prospects with
+  // at least one recorded touch — saves KV round-trips on the cold pool.
+  useEffect(() => {
+    if (!msConnection.connected) return;
+    let cancelled = false;
+
+    const fetchOpens = async () => {
+      const ids = Object.keys(pdRecords).filter(id => pdRecords[id]?.sentAt);
+      if (ids.length === 0) return;
+      try {
+        const r = await fetch(`/api/opens?prospectIds=${ids.slice(0, 200).join(',')}`);
+        if (r.ok && !cancelled) {
+          const data = await r.json();
+          if (data?.byProspect) setOpensByProspect(data.byProspect);
+        }
+      } catch (e) {
+        // Non-fatal
+      }
+    };
+
+    fetchOpens(); // immediate on connect
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') fetchOpens();
+    }, 120_000);
+
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [msConnection.connected, pdRecords]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-check cycle every time the tab becomes visible — catches month rollovers on
   // long-open tabs without requiring a full reload.
@@ -2414,6 +2483,96 @@ Rules:
   // Backwards-compatible alias for any UI still calling sendViaGmail
   const sendViaGmail = sendViaOutlook;
 
+  // === One-click tracked send via Microsoft Graph ===
+  // Programmatically sends from the connected Microsoft 365 mailbox with a
+  // tracking pixel embedded. Records the touch + a trackingId in pdRecords
+  // so we can correlate with /api/opens polling later.
+  const sendViaM365 = async () => {
+    if (!msConnection.connected) {
+      showToast('Microsoft 365 not connected — connect in Settings first', 'info');
+      return;
+    }
+    if (!selectedProspect?.email) {
+      showToast('No email address — add one first', 'error');
+      return;
+    }
+
+    // Touch cap guard (same logic as the other send paths)
+    const rec = pdRecords[selectedProspect.id] || {};
+    const prevHistory = Array.isArray(rec.sentHistory) ? rec.sentHistory : (rec.sentAt ? [rec.sentAt] : []);
+    const currentCount = prevHistory.length;
+    const cap = Number.isFinite(config.maxTouches) ? config.maxTouches : DEFAULT_MAX_TOUCHES;
+    if (currentCount >= cap) {
+      const ok = window.confirm(
+        `This prospect has already received ${currentCount} email${currentCount === 1 ? '' : 's'} from you ` +
+        `(your cap is ${cap}).\n\nContinuing risks domain-reputation damage from spam complaints. Send anyway?`
+      );
+      if (!ok) {
+        showToast(`Held back — ${currentCount} prior touch${currentCount === 1 ? '' : 'es'} already`, 'info');
+        return;
+      }
+    }
+
+    setIsSendingM365(selectedProspect.id);
+    try {
+      const data = await postJson('/api/ms-send', {
+        to: [{ address: selectedProspect.email, name: selectedProspect.name || '' }],
+        subject: draftEmail.subject,
+        body: draftEmail.body,
+        prospectId: selectedProspect.id,
+        bcc: config.smartBcc || undefined,
+      }, { retries: 1, timeoutMs: 30_000 });
+
+      if (!data?.ok) {
+        throw new Error(data?.error || data?.message || 'Unknown error');
+      }
+
+      const now = new Date().toISOString();
+      const nextHistory = [...prevHistory, now];
+      const nextTracking = Array.isArray(rec.trackingIds) ? [...rec.trackingIds, data.trackingId] : [data.trackingId];
+      setPdRecords(prev => ({
+        ...prev,
+        [selectedProspect.id]: {
+          ...prev[selectedProspect.id],
+          sentAt: now,
+          sentHistory: nextHistory,
+          touchCount: nextHistory.length,
+          trackingIds: nextTracking,
+          lastSendMethod: 'm365',
+        },
+      }));
+      showToast(`Sent via M365 with tracking · touch #${nextHistory.length} of ${cap}`);
+    } catch (err) {
+      // Common case: token expired and refresh failed → user needs to reconnect
+      const msg = err.message || String(err);
+      if (/not connected|reconnect/i.test(msg)) {
+        setMsConnection({ connected: false, account: null });
+        showToast(`M365 send failed — reconnect in Settings (${msg})`, 'error');
+      } else {
+        showToast(`M365 send failed: ${msg}`, 'error');
+      }
+    } finally {
+      setIsSendingM365(null);
+    }
+  };
+
+  // Trigger the OAuth flow — opens the Microsoft consent screen in the current tab
+  const connectM365 = () => {
+    window.location.href = '/api/ms-auth?action=start';
+  };
+
+  // Disconnect: clear server-side tokens, then update local state
+  const disconnectM365 = async () => {
+    if (!window.confirm('Disconnect Microsoft 365? You\'ll need to re-authorize to send tracked emails again.')) return;
+    try {
+      await fetch('/api/ms-auth?action=logout');
+      setMsConnection({ connected: false, account: null });
+      showToast('Microsoft 365 disconnected');
+    } catch (err) {
+      showToast(`Disconnect failed: ${err.message}`, 'error');
+    }
+  };
+
   // === Batch Draft Queue ===
   // Research + AI-draft N selected prospects sequentially.
   // Re-uses cached research when available (same research that was already done
@@ -2700,10 +2859,10 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         {view === 'find' && <FindView styles={styles} saveLinkedInUrl={saveLinkedInUrl} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} reresearch={() => { setResearchData(prev => { const next = {...prev}; delete next[selectedProspect.id]; return next; }); researchProspect(selectedProspect, { force: true }); }} />}
-        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
+        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} msConnection={msConnection} sendViaM365={sendViaM365} isSendingM365={isSendingM365 === selectedProspect.id} opensForProspect={opensByProspect[selectedProspect.id] || []} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
-        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} />}
+        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} msConnection={msConnection} connectM365={connectM365} disconnectM365={disconnectM365} />}
       </div>
       {toast && <Toast styles={styles} toast={toast} />}
       {pursueLaterFor && <PursueLaterModal styles={styles} date={pursueLaterDate} setDate={setPursueLaterDate} onSave={savePursueLater} onCancel={() => setPursueLaterFor(null)} />}
@@ -4235,7 +4394,7 @@ function SectionLabel({ children }) {
 // =================================================================
 // === COMPOSE VIEW ===
 // =================================================================
-function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, draftDiagnostic, pushToPipedrive, sendViaPipedrive, isSendingPD, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, scheduleFollowUps, isSchedulingFollowUps, config, setView, followUpDays }) {
+function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, draftDiagnostic, pushToPipedrive, sendViaPipedrive, isSendingPD, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, scheduleFollowUps, isSchedulingFollowUps, config, setView, followUpDays, msConnection, sendViaM365, isSendingM365, opensForProspect }) {
   const isAiDraft = draftDiagnostic?.composer === 'ai' && !draftDiagnostic?.fallback;
   const [linkedinOpen, setLinkedinOpen] = useState(false);
   const [followUpOpen, setFollowUpOpen] = useState(false);
@@ -4411,7 +4570,54 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
           <div style={styles.card}>
             <div style={styles.sectionTitle}><Briefcase size={14} /> Two-Step Send</div>
             <SendStep styles={styles} num="1" title="Push to Pipedrive (as Lead)" sub={`Creates Person + Org + Lead in Lead Inbox + Day ${followUpDays} resource follow-up activity. Convert to Deal in Pipedrive when site walk is scheduled.`} done={!!pdRecords[prospect.id]?.leadId || !!pdRecords[prospect.id]?.dealId} disabled={!pdConnected} loading={isPushing} onClick={pushToPipedrive} btnLabel={pdRecords[prospect.id]?.leadId ? 'View Lead' : pdRecords[prospect.id]?.dealId ? 'View Deal' : 'Push to PD'} icon={Briefcase} />
-            <SendStep styles={styles} num="2" title="Compose in Pipedrive" sub="Copies the draft to clipboard and opens the lead. Click the Email tab → Compose, paste, toggle open tracking, send. Open tracking requires Pipedrive's compose UI (their API has no send endpoint)." done={!!pdRecords[prospect.id]?.sentAt} disabled={!prospect.email || (!pdRecords[prospect.id]?.leadId && !pdRecords[prospect.id]?.dealId)} loading={isSendingPD} onClick={sendViaPipedrive} btnLabel="Open + Copy" icon={ExternalLink} />
+            {msConnection?.connected ? (
+              <SendStep
+                styles={styles}
+                num="2"
+                title="Send & Track via Microsoft 365"
+                sub={`One-click send from ${msConnection.account?.email || 'your M365 mailbox'} with an embedded tracking pixel. Opens are recorded automatically and shown on this card.`}
+                done={!!pdRecords[prospect.id]?.sentAt && pdRecords[prospect.id]?.lastSendMethod === 'm365'}
+                disabled={!prospect.email}
+                loading={isSendingM365}
+                onClick={sendViaM365}
+                btnLabel="Send & Track"
+                icon={Send}
+              />
+            ) : (
+              <SendStep
+                styles={styles}
+                num="2"
+                title="Compose in Pipedrive"
+                sub="Copies the draft and opens the lead in Pipedrive. Paste + send from there for open tracking. (Connect Microsoft 365 in Settings for true one-click tracked send.)"
+                done={!!pdRecords[prospect.id]?.sentAt}
+                disabled={!prospect.email || (!pdRecords[prospect.id]?.leadId && !pdRecords[prospect.id]?.dealId)}
+                loading={isSendingPD}
+                onClick={sendViaPipedrive}
+                btnLabel="Open + Copy"
+                icon={ExternalLink}
+              />
+            )}
+
+            {/* Open-tracking summary — visible when at least one tracked send exists for this prospect */}
+            {opensForProspect && opensForProspect.length > 0 && (() => {
+              const allOpens = opensForProspect.flatMap(s => s.opens || []);
+              const totalSends = opensForProspect.length;
+              const totalOpens = allOpens.length;
+              const lastOpenAt = allOpens.length > 0 ? allOpens.map(o => o.at).sort().slice(-1)[0] : null;
+              return (
+                <div style={{ marginTop: '12px', padding: '10px 14px', background: totalOpens > 0 ? 'var(--ok-soft)' : 'var(--bg-sunk)', border: `1px solid ${totalOpens > 0 ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : 'var(--border)'}`, borderRadius: '8px', fontSize: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, color: totalOpens > 0 ? 'var(--ok)' : 'var(--text-2)' }}>
+                    {totalOpens > 0 ? <CheckCircle2 size={13} /> : <Send size={13} />}
+                    <span>{totalSends} tracked send{totalSends === 1 ? '' : 's'} · {totalOpens} open{totalOpens === 1 ? '' : 's'} recorded</span>
+                  </div>
+                  {lastOpenAt && (
+                    <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '4px' }}>
+                      Last opened: {new Date(lastOpenAt).toLocaleString()}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(232, 236, 243, 0.06)' }}>
               <div style={{ fontSize: '11px', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Fallback options</div>
@@ -4641,7 +4847,7 @@ function CoachView({ styles, coachTab, setCoachTab, coachSelectedSegment, setCoa
 // =================================================================
 // === SETTINGS VIEW ===
 // =================================================================
-function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdConnectError, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing, apolloQuota, fetchApolloQuota, prospects, overrides, pdRecords, researchData, showToast }) {
+function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdConnectError, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing, apolloQuota, fetchApolloQuota, prospects, overrides, pdRecords, researchData, showToast, msConnection, connectM365, disconnectM365 }) {
   const exportAllData = () => {
     const payload = {
       exportedAt: new Date().toISOString(),
@@ -4698,6 +4904,38 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
             <button style={styles.secondaryBtn} onClick={syncPipeline} disabled={isSyncing}>
               {isSyncing ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />} Sync Deals
             </button>
+          )}
+        </div>
+      </div>
+
+      {/* ── Microsoft 365 connection (one-click tracked send via Graph API) ── */}
+      <div style={styles.card}>
+        <div style={styles.sectionTitle}><Send size={14} /> Microsoft 365 (one-click tracked send)</div>
+        <div style={{ padding: '14px', background: msConnection?.connected ? 'var(--ok-soft)' : 'var(--bg-sunk)', border: `1px solid ${msConnection?.connected ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : 'var(--border)'}`, borderRadius: '10px', fontSize: '13px', marginBottom: '12px' }}>
+          {msConnection?.connected ? (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: 'var(--ok)', fontWeight: 600 }}>
+                <CheckCircle2 size={14} /> Connected as {msConnection.account?.name || msConnection.account?.email || 'M365 user'}
+              </div>
+              {msConnection.account?.email && <div style={{ fontSize: '12px', color: 'var(--text-2)' }}>{msConnection.account.email}</div>}
+              {msConnection.connectedAt && <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '4px' }}>Connected {new Date(msConnection.connectedAt).toLocaleDateString()}</div>}
+              <button style={{ ...styles.secondaryBtn, marginTop: '10px', fontSize: '12px' }} onClick={disconnectM365}>
+                Disconnect
+              </button>
+            </>
+          ) : (
+            <>
+              <div style={{ marginBottom: '8px', fontWeight: 600 }}>Not connected</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-2)', marginBottom: '10px', lineHeight: '1.5' }}>
+                Connect your Microsoft 365 account to enable one-click sending with embedded open-tracking pixels. Emails send directly from your real mailbox — no copy/paste, no extra tabs.
+              </div>
+              <button style={styles.primaryBtn} onClick={connectM365}>
+                <Send size={13} /> Connect Microsoft 365
+              </button>
+              <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '10px' }}>
+                Requires Azure App Registration env vars (MS_CLIENT_ID, MS_TENANT_ID, MS_CLIENT_SECRET) to be set on the Vercel deployment.
+              </div>
+            </>
           )}
         </div>
       </div>
