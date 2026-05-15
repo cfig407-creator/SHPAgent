@@ -4,7 +4,7 @@ import {
   ExternalLink, Filter, ArrowRight, Send, Edit3, Zap, TrendingUp,
   MapPin, Users, AlertCircle, Briefcase, Hash, Settings, Key,
   RefreshCw, X, Plus, Compass, BookOpen, MessageCircle, Copy,
-  ChevronRight, ChevronDown, Download, UserPlus, Calendar,
+  ChevronRight, ChevronDown, Download, UserPlus, Calendar, Linkedin,
 } from 'lucide-react';
 import {
   SHP_IDENTITY, DEFAULT_SIGNATURE, DEFAULT_SOFT_OPT_OUT, DEFAULT_MAX_TOUCHES,
@@ -158,7 +158,7 @@ export default function SHPProspectingAgent() {
   const [selectedProspect, setSelectedProspect] = useState(null);
   const [researchData, setResearchData] = useState({});
   const [isResearching, setIsResearching] = useState(false);
-  const [draftEmail, setDraftEmail] = useState({ subject: '', body: '' });
+  const [draftEmail, setDraftEmail] = useState({ subject: '', body: '', subjectAlts: [], linkedinMsg: '', followUps: {} });
   const [isDrafting, setIsDrafting] = useState(false);
   const [draftDiagnostic, setDraftDiagnostic] = useState(null);
   // Track recently-used variant IDs so the composer rotates rather than repeats
@@ -905,7 +905,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
 
       const data = await postJson('/api/anthropic', {
         model: ANTHROPIC_MODEL,
-        max_tokens: 1500,
+        max_tokens: 2500,
         messages: [{ role: 'user', content: prompt }],
       }, { retries: 1, timeoutMs: 60_000 });
 
@@ -936,7 +936,13 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         return fallbackCompose('Claude response missing subject/body');
       }
 
-      setDraftEmail({ subject: parsed.subject, body: parsed.body });
+      setDraftEmail({
+        subject: parsed.subject,
+        body: parsed.body,
+        subjectAlts: Array.isArray(parsed.subjectAlts) ? parsed.subjectAlts : [],
+        linkedinMsg: typeof parsed.linkedinMsg === 'string' ? parsed.linkedinMsg : '',
+        followUps: parsed.followUps && typeof parsed.followUps === 'object' ? parsed.followUps : {},
+      });
       setDraftDiagnostic({
         composer: 'ai',
         model: ANTHROPIC_MODEL,
@@ -3635,6 +3641,15 @@ function SectionLabel({ children }) {
 // =================================================================
 function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, draftDiagnostic, pushToPipedrive, sendViaPipedrive, isSendingPD, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, config, setView, followUpDays }) {
   const isAiDraft = draftDiagnostic?.composer === 'ai' && !draftDiagnostic?.fallback;
+  const [linkedinOpen, setLinkedinOpen] = useState(false);
+  const [followUpOpen, setFollowUpOpen] = useState(false);
+  const [copiedKey, setCopiedKey] = useState(null);
+
+  const copyText = (text, key) => {
+    navigator.clipboard?.writeText(text).catch(() => {});
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1800);
+  };
   return (
     <>
       <button style={{ ...styles.secondaryBtn, marginBottom: '16px' }} onClick={() => setView('research')}>← Back</button>
@@ -3681,6 +3696,107 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
               <Sparkles size={13} /> Regenerate
             </button>
           </div>
+
+          {/* ── Subject alternatives ── */}
+          {isAiDraft && draftEmail.subjectAlts?.length > 0 && (
+            <div style={styles.card}>
+              <div style={styles.sectionTitle}><Sparkles size={14} /> Subject line alternatives</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {draftEmail.subjectAlts.map((alt, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ flex: 1, fontSize: '13px', padding: '8px 10px', background: 'var(--bg-sunk)', borderRadius: '6px', border: '1px solid var(--border)' }}>
+                      {alt}
+                    </div>
+                    <button
+                      style={{ ...styles.secondaryBtn, padding: '5px 10px', fontSize: '11px', flexShrink: 0 }}
+                      onClick={() => setDraftEmail({ ...draftEmail, subject: alt })}
+                    >
+                      Use
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── LinkedIn message ── */}
+          {isAiDraft && draftEmail.linkedinMsg && (
+            <div style={styles.card}>
+              <div
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+                onClick={() => setLinkedinOpen(!linkedinOpen)}
+              >
+                <div style={styles.sectionTitle} onClick={e => e.stopPropagation()}>
+                  <Linkedin size={14} /> LinkedIn connection request
+                </div>
+                <button style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 6px', fontSize: '11px' }}>
+                  {linkedinOpen ? 'Hide ▲' : 'Show ▼'}
+                </button>
+              </div>
+              {linkedinOpen && (
+                <div style={{ marginTop: '10px' }}>
+                  <div style={{ fontSize: '13px', lineHeight: '1.6', padding: '10px 12px', background: 'var(--bg-sunk)', borderRadius: '6px', border: '1px solid var(--border)', marginBottom: '8px' }}>
+                    {draftEmail.linkedinMsg}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <button
+                      style={{ ...styles.secondaryBtn, fontSize: '12px' }}
+                      onClick={() => copyText(draftEmail.linkedinMsg, 'linkedin')}
+                    >
+                      {copiedKey === 'linkedin' ? <><CheckCircle2 size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
+                    </button>
+                    <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>{draftEmail.linkedinMsg.length} / 300 chars</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Follow-up sequence ── */}
+          {isAiDraft && draftEmail.followUps && Object.keys(draftEmail.followUps).length > 0 && (
+            <div style={styles.card}>
+              <div
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+                onClick={() => setFollowUpOpen(!followUpOpen)}
+              >
+                <div style={styles.sectionTitle} onClick={e => e.stopPropagation()}>
+                  <Calendar size={14} /> Follow-up sequence
+                </div>
+                <button style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 6px', fontSize: '11px' }}>
+                  {followUpOpen ? 'Hide ▲' : 'Show ▼'}
+                </button>
+              </div>
+              {followUpOpen && (
+                <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  {[['day3', 'Day 3'], ['day7', 'Day 7'], ['day14', 'Day 14 — break-up']].map(([key, label]) => {
+                    const fu = draftEmail.followUps[key];
+                    if (!fu) return null;
+                    const fuBody = typeof fu === 'string' ? fu : fu.body || '';
+                    const fuSubject = typeof fu === 'string' ? '' : fu.subject || '';
+                    return (
+                      <div key={key}>
+                        <div style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-3)', marginBottom: '6px' }}>{label}</div>
+                        {fuSubject && (
+                          <div style={{ fontSize: '12px', color: 'var(--text-2)', marginBottom: '4px' }}>
+                            <span style={{ color: 'var(--text-3)' }}>Subject:</span> {fuSubject}
+                          </div>
+                        )}
+                        <div style={{ fontSize: '13px', lineHeight: '1.6', padding: '8px 10px', background: 'var(--bg-sunk)', borderRadius: '6px', border: '1px solid var(--border)', whiteSpace: 'pre-wrap', marginBottom: '6px' }}>
+                          {fuBody}
+                        </div>
+                        <button
+                          style={{ ...styles.secondaryBtn, fontSize: '11px', padding: '4px 10px' }}
+                          onClick={() => copyText((fuSubject ? `Subject: ${fuSubject}\n\n` : '') + fuBody, key)}
+                        >
+                          {copiedKey === key ? <><CheckCircle2 size={11} /> Copied</> : <><Copy size={11} /> Copy</>}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           <div style={styles.card}>
             <div style={styles.sectionTitle}><Briefcase size={14} /> Two-Step Send</div>

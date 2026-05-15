@@ -1447,8 +1447,30 @@ End the body with this exact signature block:
 ${signature || DEFAULT_SIGNATURE}
 
 ═════ OUTPUT ═════
-Return ONLY this JSON, no preamble, no markdown:
-{"subject":"...","body":"full body with \\n line breaks, including the signature"}`;
+Return ONLY this JSON object, no preamble, no markdown fences:
+{
+  "subject": "primary subject line",
+  "body": "full body with \\n line breaks, including the signature",
+  "subjectAlts": [
+    "alternative subject line 2",
+    "alternative subject line 3"
+  ],
+  "linkedinMsg": "LinkedIn connection request under 300 chars — no pitch, just introduce yourself as a local hardware resource worth knowing. Plain text, conversational.",
+  "followUps": {
+    "day3": {
+      "subject": "...",
+      "body": "Short plain-text follow-up. Different angle from the cold email. No signature needed — keep it under 60 words."
+    },
+    "day7": {
+      "subject": "...",
+      "body": "New value prop or a different proof point. Still short. Under 60 words."
+    },
+    "day14": {
+      "subject": "...",
+      "body": "Break-up email. Acknowledge they may not need this now. Leave the door open. Under 50 words."
+    }
+  }
+}`;
 }
 
 // === FOLLOW-UP CADENCE ===
