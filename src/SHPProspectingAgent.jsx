@@ -177,6 +177,7 @@ export default function SHPProspectingAgent() {
   const [pdRecords, setPdRecords] = useState({});
   const [stageDeals, setStageDeals] = useState({});
   const [isPushing, setIsPushing] = useState(false);
+  const [isSendingPD, setIsSendingPD] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
   // Apollo enrichment — track which prospect is currently being enriched + the proposed result.
@@ -1805,6 +1806,124 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     showToast('Opened in Pipedrive — click Email in the panel to compose');
   };
 
+  // === Send email directly through Pipedrive (primary send path) ===
+  // Pipedrive's connected email routes the message so open tracking works natively.
+  // Requires: (a) a lead/deal already pushed to PD, (b) email connected in Pipedrive settings.
+  // On failure: surfaces the error + leaves Outlook as a fallback the user can click manually.
+  const sendViaPipedrive = async () => {
+    if (!selectedProspect?.email) {
+      showToast('No email address — add one first', 'error');
+      return;
+    }
+    const rec = pdRecords[selectedProspect.id] || {};
+    if (!rec.leadId && !rec.dealId) {
+      showToast('Push to Pipedrive first (Step 1) — the email must be linked to a lead', 'info');
+      return;
+    }
+
+    // Touch cap guard (same logic as sendViaOutlook)
+    const prevHistory = Array.isArray(rec.sentHistory) ? rec.sentHistory : (rec.sentAt ? [rec.sentAt] : []);
+    const currentCount = prevHistory.length;
+    const cap = Number.isFinite(config.maxTouches) ? config.maxTouches : DEFAULT_MAX_TOUCHES;
+    if (currentCount >= cap) {
+      const ok = window.confirm(
+        `This prospect has already received ${currentCount} email${currentCount === 1 ? '' : 's'} from you ` +
+        `(your cap is ${cap}).\n\n` +
+        `Continuing risks domain-reputation damage from spam complaints. ` +
+        `Consider marking them "Pursue Later" or "Dead" instead.\n\nSend anyway?`
+      );
+      if (!ok) {
+        showToast(`Held back — ${currentCount} prior touch${currentCount === 1 ? '' : 'es'} already`, 'info');
+        return;
+      }
+    }
+
+    setIsSendingPD(true);
+    try {
+      // Convert plain-text body to minimal HTML paragraphs so PD renders it cleanly
+      const htmlBody = draftEmail.body
+        .split(/\n\n+/)
+        .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+        .join('');
+
+      const payload = {
+        subject: draftEmail.subject,
+        body: htmlBody,
+        to: [{ email: selectedProspect.email, name: selectedProspect.name || '' }],
+        from: {
+          email: config.fromEmail || 'anthony@superiorhardwareproducts.com',
+          name: config.fromName || 'Anthony Koscielecki',
+        },
+        sent_flag: true,
+      };
+      if (rec.leadId)   payload.lead_id   = rec.leadId;
+      if (rec.dealId)   payload.deal_id   = rec.dealId;
+      if (rec.personId) payload.person_id = rec.personId;
+      if (rec.orgId)    payload.org_id    = rec.orgId;
+
+      await pdRequest('POST', '/mailbox/mailMessages', payload);
+
+      const now = new Date().toISOString();
+      const nextHistory = [...prevHistory, now];
+      setPdRecords(prev => ({
+        ...prev,
+        [selectedProspect.id]: {
+          ...prev[selectedProspect.id],
+          sentAt: now,
+          sentHistory: nextHistory,
+          touchCount: nextHistory.length,
+        },
+      }));
+      showToast(`Sent via Pipedrive · touch #${nextHistory.length} of ${cap}`);
+    } catch (err) {
+      showToast(`Pipedrive send failed: ${err.message} — use Outlook fallback below`, 'error');
+    } finally {
+      setIsSendingPD(false);
+    }
+  };
+
+  // Batch variant — called by BatchDraftModal with explicit prospect/subject/body args.
+  // Does NOT enforce touch cap (batch users pre-screened the list).
+  const sendViaPipedriveForBatch = async (prospect, subject, body) => {
+    if (!prospect?.email) throw new Error('No email address');
+    const rec = pdRecords[prospect.id] || {};
+
+    const htmlBody = body
+      .split(/\n\n+/)
+      .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+      .join('');
+
+    const payload = {
+      subject,
+      body: htmlBody,
+      to: [{ email: prospect.email, name: prospect.name || '' }],
+      from: {
+        email: config.fromEmail || 'anthony@superiorhardwareproducts.com',
+        name: config.fromName || 'Anthony Koscielecki',
+      },
+      sent_flag: true,
+    };
+    if (rec.leadId)   payload.lead_id   = rec.leadId;
+    if (rec.dealId)   payload.deal_id   = rec.dealId;
+    if (rec.personId) payload.person_id = rec.personId;
+    if (rec.orgId)    payload.org_id    = rec.orgId;
+
+    await pdRequest('POST', '/mailbox/mailMessages', payload);
+
+    const now = new Date().toISOString();
+    const prevHistory = Array.isArray(rec.sentHistory) ? rec.sentHistory : (rec.sentAt ? [rec.sentAt] : []);
+    const nextHistory = [...prevHistory, now];
+    setPdRecords(prev => ({
+      ...prev,
+      [prospect.id]: {
+        ...prev[prospect.id],
+        sentAt: now,
+        sentHistory: nextHistory,
+        touchCount: nextHistory.length,
+      },
+    }));
+  };
+
   // Backwards-compatible alias for any UI still calling sendViaGmail
   const sendViaGmail = sendViaOutlook;
 
@@ -2092,7 +2211,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} />}
-        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
+        {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
         {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} />}
@@ -2109,6 +2228,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           prospects={prospectsWithOverrides}
           config={config}
           pdRecords={pdRecords}
+          onSendViaPipedrive={sendViaPipedriveForBatch}
           onCancel={() => {
             if (batchDraftRunning) setBatchDraftCancel(true);
             else setBatchDraftOpen(false);
@@ -3513,7 +3633,7 @@ function SectionLabel({ children }) {
 // =================================================================
 // === COMPOSE VIEW ===
 // =================================================================
-function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, draftDiagnostic, pushToPipedrive, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, config, setView, followUpDays }) {
+function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail, isDrafting, draftOutreach, draftDiagnostic, pushToPipedrive, sendViaPipedrive, isSendingPD, sendViaOutlook, openInPipedrive, pdRecords, pdConnected, isPushing, config, setView, followUpDays }) {
   const isAiDraft = draftDiagnostic?.composer === 'ai' && !draftDiagnostic?.fallback;
   return (
     <>
@@ -3565,21 +3685,26 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
           <div style={styles.card}>
             <div style={styles.sectionTitle}><Briefcase size={14} /> Two-Step Send</div>
             <SendStep styles={styles} num="1" title="Push to Pipedrive (as Lead)" sub={`Creates Person + Org + Lead in Lead Inbox + Day ${followUpDays} resource follow-up activity. Convert to Deal in Pipedrive when site walk is scheduled.`} done={!!pdRecords[prospect.id]?.leadId || !!pdRecords[prospect.id]?.dealId} disabled={!pdConnected} loading={isPushing} onClick={pushToPipedrive} btnLabel={pdRecords[prospect.id]?.leadId ? 'View Lead' : pdRecords[prospect.id]?.dealId ? 'View Deal' : 'Push to PD'} icon={Briefcase} />
-            <SendStep styles={styles} num="2" title="Open in Outlook to send" sub="Pre-fills Outlook web compose with this draft. Review one more time, click Send. M365↔Pipedrive sync auto-logs the email to the lead." done={!!pdRecords[prospect.id]?.sentAt} disabled={!prospect.email} loading={false} onClick={sendViaOutlook} btnLabel="Open in Outlook" icon={Send} />
+            <SendStep styles={styles} num="2" title="Send via Pipedrive" sub="Routes through Pipedrive's connected email — open tracking records when they read it. Requires Step 1 first." done={!!pdRecords[prospect.id]?.sentAt} disabled={!prospect.email || (!pdRecords[prospect.id]?.leadId && !pdRecords[prospect.id]?.dealId)} loading={isSendingPD} onClick={sendViaPipedrive} btnLabel="Send" icon={Send} />
 
-            {(pdRecords[prospect.id]?.leadId || pdRecords[prospect.id]?.dealId) && (
-              <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(232, 236, 243, 0.06)' }}>
-                <div style={{ fontSize: '11px', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Alternative</div>
-                <button style={{ ...styles.secondaryBtn, fontSize: '12px' }} onClick={openInPipedrive}>
-                  <ExternalLink size={12} /> Open {pdRecords[prospect.id]?.leadId ? 'lead' : 'deal'} in Pipedrive (compose there instead)
+            <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(232, 236, 243, 0.06)' }}>
+              <div style={{ fontSize: '11px', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Fallback options</div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button style={{ ...styles.secondaryBtn, fontSize: '12px' }} onClick={sendViaOutlook} disabled={!prospect.email}>
+                  <Send size={12} /> Open in Outlook
                 </button>
+                {(pdRecords[prospect.id]?.leadId || pdRecords[prospect.id]?.dealId) && (
+                  <button style={{ ...styles.secondaryBtn, fontSize: '12px' }} onClick={openInPipedrive}>
+                    <ExternalLink size={12} /> Open {pdRecords[prospect.id]?.leadId ? 'lead' : 'deal'} in Pipedrive
+                  </button>
+                )}
               </div>
-            )}
+            </div>
 
             <div style={{ marginTop: '14px', padding: '10px 12px', background: 'var(--ok-soft)', borderRadius: '8px', fontSize: '12px', color: 'var(--ok)', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
               <CheckCircle2 size={13} style={{ flexShrink: 0, marginTop: '2px' }} />
               <div>
-                <strong>M365↔Pipedrive sync handles logging.</strong> Once you send from Outlook, the email auto-appears in the deal timeline. No Smart BCC required.
+                <strong>Open tracking is on.</strong> Pipedrive logs the send and records opens in the lead timeline. Enable in Pipedrive → Settings → Email Sync if not already active.
               </div>
             </div>
           </div>
@@ -4170,10 +4295,16 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
 //   2. Review: list of all drafted emails — edit subject/body inline,
 //      open each in Outlook, or open all at once. Fallback drafts
 //      are flagged so Anthony knows which ones to double-check.
-function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config, pdRecords, onCancel, onClose }) {
+function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config, pdRecords, onSendViaPipedrive, onCancel, onClose }) {
   const [expandedId, setExpandedId] = useState(null);
   // Local edits to subject/body — keyed by prospect id
   const [localEdits, setLocalEdits] = useState({});
+  // Track which ids are currently being sent via PD (per-row loading state)
+  const [sendingIds, setSendingIds] = useState(new Set());
+  // Track which ids have been successfully sent via PD this session
+  const [sentIds, setSentIds] = useState(new Set());
+  // Toast-like feedback inside the modal
+  const [modalToast, setModalToast] = useState(null);
 
   const entries = Object.entries(queue);
   const readyEntries = entries.filter(([, v]) => v.status === 'ready');
@@ -4181,6 +4312,38 @@ function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config
   const pendingCount = entries.filter(([, v]) => ['pending', 'researching', 'drafting'].includes(v.status)).length;
 
   const getProspect = (id) => prospects.find(p => p.id === id);
+
+  const showModalToast = (msg, type = 'ok') => {
+    setModalToast({ msg, type });
+    setTimeout(() => setModalToast(null), 3500);
+  };
+
+  const sendViaPD = async (id) => {
+    const prospect = getProspect(id);
+    if (!prospect?.email) { showModalToast('No email address', 'error'); return; }
+    const item = queue[id];
+    const edit = localEdits[id];
+    const subject = edit?.subject ?? item?.draft?.subject ?? '';
+    const body = edit?.body ?? item?.draft?.body ?? '';
+
+    setSendingIds(prev => new Set([...prev, id]));
+    try {
+      await onSendViaPipedrive(prospect, subject, body);
+      setSentIds(prev => new Set([...prev, id]));
+      showModalToast(`Sent to ${prospect.name || prospect.email}`);
+    } catch (err) {
+      showModalToast(`Failed: ${err.message} — use Outlook fallback`, 'error');
+    } finally {
+      setSendingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
+    }
+  };
+
+  const sendAllViaPD = async () => {
+    const eligible = readyEntries.filter(([id]) => getProspect(id)?.email);
+    for (const [id] of eligible) {
+      await sendViaPD(id);
+    }
+  };
 
   const openInOutlook = (id) => {
     const prospect = getProspect(id);
@@ -4193,13 +4356,6 @@ function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config
     const parts = [`to=${enc(prospect.email)}`, `subject=${enc(subject)}`, `body=${enc(body)}`];
     if (config?.smartBcc) parts.push(`bcc=${enc(config.smartBcc)}`);
     window.open(`https://outlook.office.com/mail/deeplink/compose?${parts.join('&')}`, '_blank', 'noopener,noreferrer');
-  };
-
-  const openAllInOutlook = () => {
-    readyEntries.forEach(([id]) => {
-      const prospect = getProspect(id);
-      if (prospect?.email) openInOutlook(id);
-    });
   };
 
   const progressPct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
@@ -4283,13 +4439,26 @@ function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config
         {/* Review phase — shown when not running */}
         {!isRunning && entries.length > 0 && (
           <>
+            {/* Modal-level toast feedback */}
+            {modalToast && (
+              <div style={{
+                padding: '8px 14px',
+                marginBottom: 'var(--space-3)',
+                borderRadius: 'var(--r-md)',
+                fontSize: 'var(--fs-12)',
+                background: modalToast.type === 'error' ? 'var(--danger-soft)' : 'var(--ok-soft)',
+                color: modalToast.type === 'error' ? 'var(--danger)' : 'var(--ok)',
+              }}>
+                {modalToast.msg}
+              </div>
+            )}
             {readyEntries.length > 0 && (
               <div style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', flexWrap: 'wrap' }}>
                 <button
                   style={{ ...styles.primaryBtn }}
-                  onClick={openAllInOutlook}
+                  onClick={sendAllViaPD}
                 >
-                  <Send size={14} /> Open all in Outlook ({readyEntries.filter(([id]) => getProspect(id)?.email).length} with email)
+                  <Send size={14} /> Send all via Pipedrive ({readyEntries.filter(([id]) => getProspect(id)?.email).length} with email)
                 </button>
               </div>
             )}
@@ -4357,13 +4526,18 @@ function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config
                             fontSize: 'var(--fs-12)',
                             padding: '5px 12px',
                             flexShrink: 0,
-                            opacity: hasEmail ? 1 : 0.4,
-                            cursor: hasEmail ? 'pointer' : 'not-allowed',
+                            opacity: hasEmail && !sentIds.has(id) ? 1 : 0.4,
+                            cursor: hasEmail && !sentIds.has(id) ? 'pointer' : 'not-allowed',
                           }}
-                          onClick={(e) => { e.stopPropagation(); hasEmail && openInOutlook(id); }}
-                          title={hasEmail ? 'Open in Outlook' : 'No email address — enrich this prospect first'}
+                          onClick={(e) => { e.stopPropagation(); hasEmail && !sentIds.has(id) && sendViaPD(id); }}
+                          disabled={sendingIds.has(id) || sentIds.has(id)}
+                          title={!hasEmail ? 'No email address — enrich this prospect first' : sentIds.has(id) ? 'Already sent' : 'Send via Pipedrive'}
                         >
-                          <Send size={12} /> Open in Outlook
+                          {sendingIds.has(id)
+                            ? <><Loader2 size={12} className="spin" /> Sending…</>
+                            : sentIds.has(id)
+                            ? <><CheckCircle2 size={12} /> Sent</>
+                            : <><Send size={12} /> Send</>}
                         </button>
                       )}
                     </div>
@@ -4392,6 +4566,16 @@ function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config
                             Deterministic fallback — AI draft failed. Review before sending.
                           </div>
                         )}
+                        <div style={{ marginTop: 'var(--space-3)', paddingTop: 'var(--space-3)', borderTop: '1px solid var(--border-subtle)', display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+                          <span style={{ fontSize: 'var(--fs-11)', color: 'var(--text-3)' }}>Fallback:</span>
+                          <button
+                            style={{ ...styles.secondaryBtn, fontSize: 'var(--fs-12)', padding: '4px 10px' }}
+                            onClick={() => openInOutlook(id)}
+                            disabled={!hasEmail}
+                          >
+                            <Send size={11} /> Open in Outlook
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
