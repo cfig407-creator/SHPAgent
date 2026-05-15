@@ -2274,6 +2274,15 @@ Rules:
   // Pipedrive's connected email routes the message so open tracking works natively.
   // Requires: (a) a lead/deal already pushed to PD, (b) email connected in Pipedrive settings.
   // On failure: surfaces the error + leaves Outlook as a fallback the user can click manually.
+  // === Send via Pipedrive ===
+  // Pipedrive's REST API has NO public "send email" endpoint — POST /mailbox/mailMessages
+  // returns 404 because that path is GET-only for reading already-synced messages.
+  // Open tracking only works when emails are composed inside Pipedrive's web UI
+  // (the tracking-pixel toggle lives in their Compose dialog).
+  //
+  // So "Send via Pipedrive" now opens the lead in Pipedrive's UI, copies the draft
+  // to the clipboard, and records the touch optimistically. The user finishes by
+  // clicking the Email tab → Compose → paste → toggle Open Tracking → Send.
   const sendViaPipedrive = async () => {
     if (!selectedProspect?.email) {
       showToast('No email address — add one first', 'error');
@@ -2285,7 +2294,7 @@ Rules:
       return;
     }
 
-    // Touch cap guard (same logic as sendViaOutlook)
+    // Touch cap guard
     const prevHistory = Array.isArray(rec.sentHistory) ? rec.sentHistory : (rec.sentAt ? [rec.sentAt] : []);
     const currentCount = prevHistory.length;
     const cap = Number.isFinite(config.maxTouches) ? config.maxTouches : DEFAULT_MAX_TOUCHES;
@@ -2304,29 +2313,21 @@ Rules:
 
     setIsSendingPD(true);
     try {
-      // Convert plain-text body to minimal HTML paragraphs so PD renders it cleanly
-      const htmlBody = draftEmail.body
-        .split(/\n\n+/)
-        .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
-        .join('');
+      // Copy subject + body to clipboard so the user only has to paste in Pipedrive
+      const clipboardText = `Subject: ${draftEmail.subject}\n\n${draftEmail.body}`;
+      try {
+        await navigator.clipboard.writeText(clipboardText);
+      } catch {
+        // Clipboard may be blocked in some contexts; not fatal
+      }
 
-      const payload = {
-        subject: draftEmail.subject,
-        body: htmlBody,
-        to: [{ email: selectedProspect.email, name: selectedProspect.name || '' }],
-        from: {
-          email: config.fromEmail || 'anthony@superiorhardwareproducts.com',
-          name: config.fromName || 'Anthony Koscielecki',
-        },
-        sent_flag: true,
-      };
-      if (rec.leadId)   payload.lead_id   = rec.leadId;
-      if (rec.dealId)   payload.deal_id   = rec.dealId;
-      if (rec.personId) payload.person_id = rec.personId;
-      if (rec.orgId)    payload.org_id    = rec.orgId;
+      // Open the lead/deal in Pipedrive's UI — user clicks the Email tab → Compose
+      const url = rec.leadId
+        ? `https://app.pipedrive.com/leads/inbox/${rec.leadId}`
+        : `https://app.pipedrive.com/deal/${rec.dealId}`;
+      window.open(url, '_blank', 'noopener,noreferrer');
 
-      await pdRequest('POST', '/mailbox/mailMessages', payload);
-
+      // Record the touch optimistically (user is committing to send)
       const now = new Date().toISOString();
       const nextHistory = [...prevHistory, now];
       setPdRecords(prev => ({
@@ -2338,41 +2339,36 @@ Rules:
           touchCount: nextHistory.length,
         },
       }));
-      showToast(`Sent via Pipedrive · touch #${nextHistory.length} of ${cap}`);
+      showToast(`Opened in Pipedrive · subject + body copied to clipboard · touch #${nextHistory.length} of ${cap}`);
     } catch (err) {
-      showToast(`Pipedrive send failed: ${err.message} — use Outlook fallback below`, 'error');
+      showToast(`Failed to open Pipedrive: ${err.message}`, 'error');
     } finally {
       setIsSendingPD(false);
     }
   };
 
-  // Batch variant — called by BatchDraftModal with explicit prospect/subject/body args.
-  // Does NOT enforce touch cap (batch users pre-screened the list).
+  // Batch variant — called by BatchDraftModal.
+  // Pipedrive has no send-email API. Copies the draft to clipboard, opens the lead
+  // in Pipedrive's UI for the user to paste + send with open tracking, and records
+  // the touch optimistically.
   const sendViaPipedriveForBatch = async (prospect, subject, body) => {
     if (!prospect?.email) throw new Error('No email address');
     const rec = pdRecords[prospect.id] || {};
+    if (!rec.leadId && !rec.dealId) {
+      throw new Error('Push to Pipedrive first');
+    }
 
-    const htmlBody = body
-      .split(/\n\n+/)
-      .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
-      .join('');
+    const clipboardText = `Subject: ${subject}\n\n${body}`;
+    try {
+      await navigator.clipboard.writeText(clipboardText);
+    } catch {
+      // non-fatal
+    }
 
-    const payload = {
-      subject,
-      body: htmlBody,
-      to: [{ email: prospect.email, name: prospect.name || '' }],
-      from: {
-        email: config.fromEmail || 'anthony@superiorhardwareproducts.com',
-        name: config.fromName || 'Anthony Koscielecki',
-      },
-      sent_flag: true,
-    };
-    if (rec.leadId)   payload.lead_id   = rec.leadId;
-    if (rec.dealId)   payload.deal_id   = rec.dealId;
-    if (rec.personId) payload.person_id = rec.personId;
-    if (rec.orgId)    payload.org_id    = rec.orgId;
-
-    await pdRequest('POST', '/mailbox/mailMessages', payload);
+    const url = rec.leadId
+      ? `https://app.pipedrive.com/leads/inbox/${rec.leadId}`
+      : `https://app.pipedrive.com/deal/${rec.dealId}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
 
     const now = new Date().toISOString();
     const prevHistory = Array.isArray(rec.sentHistory) ? rec.sentHistory : (rec.sentAt ? [rec.sentAt] : []);
@@ -4388,7 +4384,7 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
           <div style={styles.card}>
             <div style={styles.sectionTitle}><Briefcase size={14} /> Two-Step Send</div>
             <SendStep styles={styles} num="1" title="Push to Pipedrive (as Lead)" sub={`Creates Person + Org + Lead in Lead Inbox + Day ${followUpDays} resource follow-up activity. Convert to Deal in Pipedrive when site walk is scheduled.`} done={!!pdRecords[prospect.id]?.leadId || !!pdRecords[prospect.id]?.dealId} disabled={!pdConnected} loading={isPushing} onClick={pushToPipedrive} btnLabel={pdRecords[prospect.id]?.leadId ? 'View Lead' : pdRecords[prospect.id]?.dealId ? 'View Deal' : 'Push to PD'} icon={Briefcase} />
-            <SendStep styles={styles} num="2" title="Send via Pipedrive" sub="Routes through Pipedrive's connected email — open tracking records when they read it. Requires Step 1 first." done={!!pdRecords[prospect.id]?.sentAt} disabled={!prospect.email || (!pdRecords[prospect.id]?.leadId && !pdRecords[prospect.id]?.dealId)} loading={isSendingPD} onClick={sendViaPipedrive} btnLabel="Send" icon={Send} />
+            <SendStep styles={styles} num="2" title="Compose in Pipedrive" sub="Copies the draft to clipboard and opens the lead. Click the Email tab → Compose, paste, toggle open tracking, send. Open tracking requires Pipedrive's compose UI (their API has no send endpoint)." done={!!pdRecords[prospect.id]?.sentAt} disabled={!prospect.email || (!pdRecords[prospect.id]?.leadId && !pdRecords[prospect.id]?.dealId)} loading={isSendingPD} onClick={sendViaPipedrive} btnLabel="Open + Copy" icon={ExternalLink} />
 
             <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(232, 236, 243, 0.06)' }}>
               <div style={{ fontSize: '11px', color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Fallback options</div>
@@ -5071,7 +5067,7 @@ function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config
     try {
       await onSendViaPipedrive(prospect, subject, body);
       setSentIds(prev => new Set([...prev, id]));
-      showModalToast(`Sent to ${prospect.name || prospect.email}`);
+      showModalToast(`Opened in Pipedrive for ${prospect.name || prospect.email} — paste + send there`);
     } catch (err) {
       showModalToast(`Failed: ${err.message} — use Outlook fallback`, 'error');
     } finally {
@@ -5272,13 +5268,13 @@ function BatchDraftModal({ styles, isRunning, progress, queue, prospects, config
                           }}
                           onClick={(e) => { e.stopPropagation(); hasEmail && !sentIds.has(id) && sendViaPD(id); }}
                           disabled={sendingIds.has(id) || sentIds.has(id)}
-                          title={!hasEmail ? 'No email address — enrich this prospect first' : sentIds.has(id) ? 'Already sent' : 'Send via Pipedrive'}
+                          title={!hasEmail ? 'No email address — enrich this prospect first' : sentIds.has(id) ? 'Already opened in Pipedrive' : 'Open in Pipedrive + copy draft to clipboard'}
                         >
                           {sendingIds.has(id)
-                            ? <><Loader2 size={12} className="spin" /> Sending…</>
+                            ? <><Loader2 size={12} className="spin" /> Opening…</>
                             : sentIds.has(id)
-                            ? <><CheckCircle2 size={12} /> Sent</>
-                            : <><Send size={12} /> Send</>}
+                            ? <><CheckCircle2 size={12} /> Opened</>
+                            : <><ExternalLink size={12} /> Open in PD</>}
                         </button>
                       )}
                     </div>
