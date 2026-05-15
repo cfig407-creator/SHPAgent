@@ -14,7 +14,7 @@ import {
   customerCheck, detectEnrichmentNeeds,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
   buildColdEmailPrompt, buildDealTitle, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
-  composeEmail,
+  composeEmail, stripEmDashes,
   getMultiThreadTitles, classifyTier, scoreUnenrichedCandidate,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
@@ -1026,12 +1026,28 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         return fallbackCompose('Claude response missing subject/body');
       }
 
+      // Strip em/en dashes from every prospect-facing field before storing.
+      // Claude leans on em dashes even when told not to; this is the safety net.
+      const cleanFollowUps = {};
+      if (parsed.followUps && typeof parsed.followUps === 'object') {
+        for (const key of Object.keys(parsed.followUps)) {
+          const fu = parsed.followUps[key];
+          if (fu && typeof fu === 'object') {
+            cleanFollowUps[key] = {
+              subject: stripEmDashes(fu.subject || ''),
+              body: stripEmDashes(fu.body || ''),
+            };
+          }
+        }
+      }
       setDraftEmail({
-        subject: parsed.subject,
-        body: parsed.body,
-        subjectAlts: Array.isArray(parsed.subjectAlts) ? parsed.subjectAlts : [],
-        linkedinMsg: typeof parsed.linkedinMsg === 'string' ? parsed.linkedinMsg : '',
-        followUps: parsed.followUps && typeof parsed.followUps === 'object' ? parsed.followUps : {},
+        subject: stripEmDashes(parsed.subject),
+        body: stripEmDashes(parsed.body),
+        subjectAlts: Array.isArray(parsed.subjectAlts)
+          ? parsed.subjectAlts.map(s => stripEmDashes(s))
+          : [],
+        linkedinMsg: typeof parsed.linkedinMsg === 'string' ? stripEmDashes(parsed.linkedinMsg) : '',
+        followUps: cleanFollowUps,
       });
       setDraftDiagnostic({
         composer: 'ai',
@@ -2488,7 +2504,8 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
           if (parsed?.subject && parsed?.body) {
-            draft = { subject: parsed.subject, body: parsed.body };
+            // Strip em/en dashes from Claude's output before storing
+            draft = { subject: stripEmDashes(parsed.subject), body: stripEmDashes(parsed.body) };
           }
         }
       } catch { /* fall through to deterministic below */ }

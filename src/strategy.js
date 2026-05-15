@@ -625,6 +625,23 @@ export const SUBJECT_BANK = [
   'SHP — door and hardware support in {county}',
 ];
 
+// === EM-DASH SCRUBBER ===
+// Removes em (—) and en (–) dashes from prospect-facing text. Em dashes are a
+// well-known AI tell and we don't want them in any outbound writing — replace
+// them with comma+space which reads naturally in 99% of contexts.
+// Applied to: cold email subject/body, follow-up emails, LinkedIn message,
+// subject alternatives, and the deterministic fallback composer output.
+export function stripEmDashes(text) {
+  if (typeof text !== 'string') return text;
+  return text
+    .replace(/\s*—\s*/g, ', ')   // em dash with any surrounding whitespace
+    .replace(/\s*–\s*/g, ', ')   // en dash with any surrounding whitespace
+    .replace(/, +\n/g, ',\n')    // clean trailing space before newline
+    .replace(/, ,/g, ',')        // collapse accidental doubled commas
+    .replace(/ , /g, ', ')       // normalize spacing
+    .replace(/  +/g, ' ');       // collapse runs of spaces
+}
+
 // === COMPOSER ===
 // Picks pieces from each bank based on prospect context, fills placeholders,
 // returns a complete email. Pure JavaScript — no API calls.
@@ -681,8 +698,8 @@ Best,
 ${signature || DEFAULT_SIGNATURE}`;
 
     return {
-      subject,
-      body: fullBody,
+      subject: stripEmDashes(subject),
+      body: stripEmDashes(fullBody),
       diagnostic: {
         composer: 'deterministic',
         variantId: fullVariant.id,
@@ -721,8 +738,8 @@ Best,
 ${signature || DEFAULT_SIGNATURE}`;
 
   return {
-    subject,
-    body: fullBody,
+    subject: stripEmDashes(subject),
+    body: stripEmDashes(fullBody),
     diagnostic: {
       composer: 'deterministic',
       openerId: opener.id,
