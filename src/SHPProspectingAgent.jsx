@@ -1832,10 +1832,19 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       if (apollo.phone && !p.phone) update.phone = apollo.phone;
       if (apollo.title && (!p.title || p.title.toLowerCase() === 'student')) update.title = apollo.title;
       if (apollo.linkedinUrl) update.linkedinUrl = apollo.linkedinUrl;
+      // linkedinUrl also saved to overrides below so it survives page reloads
       update.enrichedAt = new Date().toISOString();
       update.enrichedBy = 'apollo';
       return update;
     }));
+
+    // Persist linkedinUrl to overrides so it survives page reloads
+    if (apollo.linkedinUrl) {
+      setOverrides(prev => ({
+        ...prev,
+        [prospectId]: { ...prev[prospectId], linkedinUrl: apollo.linkedinUrl },
+      }));
+    }
 
     // Clear the proposal
     setProposedEnrichment(prev => {
@@ -1845,6 +1854,21 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     });
 
     showToast('Enrichment applied');
+  };
+
+  // Save a LinkedIn URL directly to overrides — persists across reloads.
+  // Called when the user pastes a URL found manually, or when enrichment provides one.
+  const saveLinkedInUrl = (prospectId, url) => {
+    if (!url || !url.startsWith('http')) return;
+    setOverrides(prev => ({
+      ...prev,
+      [prospectId]: { ...prev[prospectId], linkedinUrl: url.trim() },
+    }));
+    // Also update the in-memory prospect so the card reflects it immediately
+    setProspects(prev => prev.map(p =>
+      p.id === prospectId ? { ...p, linkedinUrl: url.trim() } : p
+    ));
+    showToast('LinkedIn URL saved');
   };
 
   // Reject Apollo's findings — clears the proposal so the user can decide what to do
@@ -2215,6 +2239,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         ...p,
         outreachStatus: computedStatus,
         revisitDate: o?.revisitDate || null,
+        linkedinUrl: o?.linkedinUrl || p.linkedinUrl || '',  // override survives reloads
         customerMatch, // present when org auto-matched a customer
         needsEnrichment: enrichment.needsEnrichment,
         enrichmentReasons: enrichment.reasons,
@@ -2331,9 +2356,9 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         userName={pdMeta.userName}
       />
       <div className="shp-main" style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />}
         {view === 'find' && <FindView styles={styles} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} />}
-        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />}
+        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} reresearch={() => { setResearchData(prev => { const next = {...prev}; delete next[selectedProspect.id]; return next; }); researchProspect(selectedProspect, { force: true }); }} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
@@ -2586,7 +2611,7 @@ function MoreSheet({ styles, view, setView, onClose }) {
 // =================================================================
 // === DASHBOARD ===
 // =================================================================
-function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, crossThreadPool, bulkCrossThreadRunning, findNewAccounts, newAccountsRunning, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
+function DashboardView({ styles, stats, saveLinkedInUrl, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, crossThreadPool, bulkCrossThreadRunning, findNewAccounts, newAccountsRunning, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
   const topClusters = clusters.slice(0, 5);
   const firstName = (fromName || 'Anthony').split(' ')[0];
 
@@ -2678,7 +2703,7 @@ function DashboardView({ styles, stats, pdConnected, pdConnectError, hasAttempte
             {pursueLaterDue.length} prospect{pursueLaterDue.length === 1 ? '' : 's'} {pursueLaterDue.length === 1 ? 'is' : 'are'} ready to revisit. Review and decide: re-activate, push the date, or mark dead.
           </div>
           {pursueLaterDue.slice(0, 5).map(p => (
-            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />
+            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />
           ))}
           {pursueLaterDue.length > 5 && (
             <button style={{ ...styles.secondaryBtn, marginTop: '8px' }} onClick={() => setView('find')}>
@@ -3112,7 +3137,7 @@ function FindView({ styles, apolloCriteria, setApolloCriteria, runApolloSearch, 
             )}
 
             {prospects.slice(0, 50).map(p => (
-              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} selected={selectedProspectIds.has(p.id)} onToggleSelect={() => onToggleSelect && onToggleSelect(p.id)} />
+              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} selected={selectedProspectIds.has(p.id)} onToggleSelect={() => onToggleSelect && onToggleSelect(p.id)} saveLinkedInUrl={saveLinkedInUrl} />
             ))}
             {prospects.length > 50 && (
               <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic' }}>
@@ -3333,7 +3358,7 @@ function CSVImportTab({ styles, importCsvRows, showToast }) {
   );
 }
 
-function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, selected, onToggleSelect }) {
+function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, selected, onToggleSelect, saveLinkedInUrl }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const research = researchData[prospect.id];
   const rec = pdRecords[prospect.id];
@@ -3400,9 +3425,44 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
           <div style={{ fontSize: '12px', color: 'var(--text-2)', marginBottom: '4px' }}>
             {prospect.title || <span style={{ fontStyle: 'italic' }}>(no title)</span>} · {prospect.company}
           </div>
-          <div style={{ fontSize: '11px', color: 'var(--text-3)', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+          <div style={{ fontSize: '11px', color: 'var(--text-3)', display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
             <span><MapPin size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {prospect.city || '?'}, {prospect.county || '?'}</span>
             {prospect.email && <span><Mail size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {prospect.email}</span>}
+            {prospect.linkedinUrl ? (
+              <a
+                href={prospect.linkedinUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={e => e.stopPropagation()}
+                style={{ color: 'var(--info)', display: 'inline-flex', alignItems: 'center', gap: '3px', textDecoration: 'none' }}
+              >
+                <Linkedin size={10} /> LinkedIn ↗
+              </a>
+            ) : (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <a
+                  href={`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent((prospect.name || '') + ' ' + (prospect.company || ''))}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  style={{ color: 'var(--text-3)', display: 'inline-flex', alignItems: 'center', gap: '3px', textDecoration: 'none' }}
+                  title="Search LinkedIn for this person"
+                >
+                  <Linkedin size={10} /> Find ↗
+                </a>
+                <button
+                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-3)', fontSize: '11px', padding: 0, textDecoration: 'underline dotted' }}
+                  onClick={e => {
+                    e.stopPropagation();
+                    const url = window.prompt(`Paste LinkedIn profile URL for ${prospect.name || prospect.company}:`);
+                    if (url) saveLinkedInUrl(prospect.id, url);
+                  }}
+                  title="Paste a LinkedIn URL to save it to this prospect"
+                >
+                  + save
+                </button>
+              </span>
+            )}
             <span style={{ color: 'var(--text-3)' }}>· source: {prospect.source}</span>
           </div>
           {prospect.needsEnrichment && (prospect.enrichmentReasons || []).length > 0 && (
@@ -3535,7 +3595,7 @@ function segmentBadgeColor(seg) {
 // =================================================================
 // === CLUSTERS VIEW ===
 // =================================================================
-function ClustersView({ styles, clusters, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
+function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
   const [expanded, setExpanded] = useState({});
 
   return (
@@ -3569,7 +3629,7 @@ function ClustersView({ styles, clusters, researchProspect, researchData, pdReco
             {isOpen && (
               <div style={{ marginTop: '16px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', paddingTop: '16px' }}>
                 {cluster.prospects.slice(0, 20).map(p => (
-                  <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} />
+                  <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />
                 ))}
                 {cluster.prospects.length > 20 && (
                   <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic' }}>
