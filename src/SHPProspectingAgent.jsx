@@ -1247,44 +1247,99 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       const [firstName, ...rest] = (prospect.name || '').trim().split(/\s+/);
       const lastName = rest.join(' ');
 
-      let data;
-      try {
-        data = await postJson('/api/apollo-enrich', {
+      // Run Apollo enrich + website directory scrape in parallel.
+      // If the org's directory has the named person with an email, we may not
+      // need Apollo's verified email at all — free, straight from the source.
+      const [apolloResult, webResult] = await Promise.allSettled([
+        postJson('/api/apollo-enrich', {
           firstName,
           lastName,
           name: prospect.name,
           organizationName: prospect.company,
-        }, { retries: 2, timeoutMs: 30_000 });
-      } catch (e) {
-        showToast(`Apollo error: ${e.message}`, 'error');
-        return;
+        }, { retries: 2, timeoutMs: 30_000 }),
+        scrapeOrgDirectory(prospect),
+      ]);
+
+      // Parse Apollo response
+      let apolloPerson = null;
+      let apolloError = null;
+      if (apolloResult.status === 'fulfilled') {
+        const data = apolloResult.value;
+        if (data?.error) apolloError = data.error;
+        else if (data?.matched && data.person) apolloPerson = data.person;
+      } else {
+        apolloError = apolloResult.reason?.message || 'Apollo call failed';
       }
 
-      if (!data || data.error) {
-        showToast(`Apollo error: ${data?.error || 'unknown'}`, 'error');
-        return;
+      // Parse website scrape — find the named person in the directory
+      let webPerson = null;
+      let webSourceUrl = null;
+      if (webResult.status === 'fulfilled' && webResult.value?.found) {
+        webPerson = matchPersonInDirectory(webResult.value.contacts, prospect.name);
+        webSourceUrl = webResult.value.sourceUrl;
       }
 
-      if (!data.matched) {
-        showToast(`Apollo: no match for ${prospect.name} (0 credits used)`, 'info');
+      // No match from either source
+      if (!apolloPerson && !webPerson) {
+        if (apolloError) showToast(`No match · Apollo error: ${apolloError}`, 'info');
+        else showToast(`No match in Apollo or ${prospect.company}'s directory (0 credits used)`, 'info');
         setProposedEnrichment(prev => ({
           ...prev,
-          [prospect.id]: { matched: false, message: data.message || 'No match found' },
+          [prospect.id]: { matched: false, message: 'No match in Apollo or website directory' },
         }));
         return;
       }
 
-      if (!data.person) {
-        showToast('Apollo response missing person data', 'error');
-        return;
+      // Merge data from both sources. Email selection:
+      //   1. Apollo verified email (highest confidence)
+      //   2. Website directory email (free, straight from the org)
+      //   3. Apollo unverified email (fallback)
+      const merged = {
+        name: apolloPerson?.name || webPerson?.name || prospect.name,
+        title: apolloPerson?.title || webPerson?.title || prospect.title,
+        email: '',
+        emailStatus: '',
+        emailSource: '',
+        phone: apolloPerson?.phone || webPerson?.phone || '',
+        linkedinUrl: apolloPerson?.linkedinUrl || '',
+        organizationName: apolloPerson?.organizationName || '',
+      };
+      if (apolloPerson?.email && apolloPerson?.emailStatus === 'verified') {
+        merged.email = apolloPerson.email;
+        merged.emailStatus = 'verified';
+        merged.emailSource = 'apollo';
+      } else if (webPerson?.email) {
+        merged.email = webPerson.email;
+        merged.emailStatus = 'directory';
+        merged.emailSource = 'website';
+      } else if (apolloPerson?.email) {
+        merged.email = apolloPerson.email;
+        merged.emailStatus = apolloPerson.emailStatus || 'guess';
+        merged.emailSource = 'apollo';
       }
 
-      // Apollo found a match — store proposed enrichment for user to review
+      // Store proposal with source attribution for the review panel
       setProposedEnrichment(prev => ({
         ...prev,
-        [prospect.id]: { matched: true, person: data.person },
+        [prospect.id]: {
+          matched: true,
+          person: merged,
+          sources: {
+            apollo: !!apolloPerson,
+            website: !!webPerson,
+            websiteUrl: webSourceUrl,
+          },
+        },
       }));
-      showToast(`Apollo found ${data.person.name || prospect.name} — review and apply`);
+
+      // Toast reflects which source(s) contributed
+      if (apolloPerson && webPerson) {
+        showToast(`Apollo + website both matched ${merged.name} — review and apply`);
+      } else if (webPerson && !apolloPerson) {
+        showToast(`Website directory matched ${merged.name} (0 Apollo credits used) — review and apply`);
+      } else {
+        showToast(`Apollo found ${merged.name} — review and apply`);
+      }
       // Refresh quota in the background so the warning ticker stays accurate
       fetchApolloQuota();
     } catch (err) {
@@ -1374,6 +1429,28 @@ Rules:
     } catch {
       return { found: false, contacts: [], sourceUrl: null };
     }
+  };
+
+  // Match a named person against scraped directory contacts.
+  // Tries exact name match first, then first+last fallback.
+  const matchPersonInDirectory = (contacts, fullName) => {
+    if (!Array.isArray(contacts) || !fullName) return null;
+    const norm = (s) => (s || '').toLowerCase().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
+    const target = norm(fullName);
+    if (!target) return null;
+    // Exact normalized match first
+    const exact = contacts.find(c => norm(c.name) === target);
+    if (exact) return exact;
+    // First + last name match (handles middle initials, suffixes)
+    const targetParts = target.split(' ');
+    if (targetParts.length < 2) return null;
+    const tFirst = targetParts[0];
+    const tLast = targetParts[targetParts.length - 1];
+    return contacts.find(c => {
+      const parts = norm(c.name).split(' ');
+      if (parts.length < 2) return false;
+      return parts[0] === tFirst && parts[parts.length - 1] === tLast;
+    }) || null;
   };
 
   // === Multi-thread: find peers at the same org ===
@@ -1579,22 +1656,55 @@ Rules:
       const titles = getMultiThreadTitles(representative.title, representative.segment);
 
       try {
-        const data = await postJson('/api/apollo-people-search', {
-          organizationName: item.displayName,
-          titles,
-          limit: 10,
-        }, { retries: 1, timeoutMs: 20_000 });
+        // Run Apollo people-search + org website directory scrape in parallel
+        const [apolloRes, webRes] = await Promise.allSettled([
+          postJson('/api/apollo-people-search', {
+            organizationName: item.displayName,
+            titles,
+            limit: 10,
+          }, { retries: 1, timeoutMs: 20_000 }),
+          scrapeOrgDirectory(representative),
+        ]);
+
+        // If Apollo failed with a plan-limit error, that's the short-circuit signal.
+        // Website-only mode is still useful, but the user explicitly enabled cross-thread.
+        if (apolloRes.status === 'rejected') {
+          throw apolloRes.reason;
+        }
+
+        const data = apolloRes.value;
 
         // First success — implicitly confirms plan tier is OK. Continue.
 
-        const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+        const apolloCandidates = (Array.isArray(data?.candidates) ? data.candidates : [])
+          .filter(c => c.name)
+          .map(c => ({
+            candidateId: c.apolloId || `apollo_${Math.random()}`,
+            ...c,
+            source: 'apollo',
+          }));
+
+        // Website candidates (only those whose titles look relevant)
+        const webCandidates = (webRes.status === 'fulfilled' && webRes.value?.found)
+          ? (webRes.value.contacts || [])
+          : [];
+        const webSourceUrl = (webRes.status === 'fulfilled' && webRes.value?.sourceUrl) || null;
 
         // Annotate with already-in-pool flag and a per-candidate priority score.
         const normName = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
         const existingNames = new Set(prospects.map(p => normName(p.name)).filter(Boolean));
+        const apolloNames = new Set(apolloCandidates.map(c => normName(c.name)));
 
-        const annotated = candidates
-          .filter(c => c.name) // drop anything Apollo couldn't name
+        // Merge: Apollo first (richer for enrichment), then dedup web additions
+        const dedupedWeb = webCandidates
+          .filter(c => c.name && !apolloNames.has(normName(c.name)))
+          .map(c => ({
+            ...c,
+            source: 'website',
+            sourceUrl: webSourceUrl,
+          }));
+
+        const merged = [...apolloCandidates, ...dedupedWeb]
           .map(c => {
             const tier = classifyTier(c.title);
             return {
@@ -1602,7 +1712,8 @@ Rules:
               tier,
               alreadyInPool: existingNames.has(normName(c.name)),
               // Per-candidate score: tier-3/4 > others; bonus if org is small.
-              candScore: tier * 2 + (item.parents.length === 1 ? 2 : 0),
+              // Website candidates with email get +2 (ready to outreach, no credit)
+              candScore: tier * 2 + (item.parents.length === 1 ? 2 : 0) + (c.source === 'website' && c.email ? 2 : 0),
             };
           });
 
@@ -1612,7 +1723,8 @@ Rules:
           parents: item.parents,
           county: representative.county,
           segment: representative.segment,
-          candidates: annotated,
+          candidates: merged,
+          webSourceUrl,
         });
       } catch (err) {
         const isPlanLimit = err?.status === 403 || /apollo_plan_required|invalid access credentials/i.test(err?.message || '');
@@ -1667,13 +1779,17 @@ Rules:
       const parent = result.parents[0];
       const icp = classifyICP(result.orgName, candidate.title);
       const titleClass = classifyTitle(candidate.title);
+      const isWebSource = candidate.source === 'website';
+      const sourceLabel = isWebSource
+        ? `Website directory (cross-thread of ${result.orgName})`
+        : `Apollo (cross-thread of ${result.orgName})`;
       return {
         id: `peer_${now}_${i}`,
         name: candidate.name,
         title: candidate.title || '',
         company: result.orgName,
-        email: '',
-        phone: '',
+        email: candidate.email || '',
+        phone: candidate.phone || '',
         city: parent?.city || candidate.city || '',
         county: parent?.county || result.county || '',
         state: parent?.state || candidate.state || 'FL',
@@ -1682,16 +1798,17 @@ Rules:
         icpStatus: icp.status,
         titleAltitude: titleClass.altitude,
         status: 'Ready',
-        source: `Apollo (cross-thread of ${result.orgName})`,
+        source: sourceLabel,
         priority: 85,
         parentProspectId: parent?.id || null,
-        apolloId: candidate.apolloId,
-        linkedinUrl: candidate.linkedinUrl,
-        photoUrl: candidate.photoUrl,
+        apolloId: isWebSource ? undefined : candidate.apolloId,
+        linkedinUrl: candidate.linkedinUrl || '',
+        photoUrl: candidate.photoUrl || '',
       };
     });
     setProspects(prev => [...newProspects, ...prev]);
-    showToast(`Added ${newProspects.length} cross-thread peer${newProspects.length === 1 ? '' : 's'} — enrich them with leftover credits`);
+    const webReady = newProspects.filter(p => p.email).length;
+    showToast(`Added ${newProspects.length} cross-thread peer${newProspects.length === 1 ? '' : 's'}${webReady > 0 ? ` · ${webReady} ready to outreach (website email)` : ' — enrich them with leftover credits'}`);
     setBulkCrossThreadOpen(false);
     setBulkCrossThreadResults([]);
   };
@@ -1902,8 +2019,14 @@ Rules:
     setBatchEnrichProgress({ done: 0, total: prospectIds.length });
 
     let success = 0;
+    let websiteOnly = 0; // matched via directory without spending Apollo credit
     let misses = 0;
     let errors = 0;
+
+    // Cache website scrapes by normalized company name so each org is scraped once
+    // even when multiple prospects in the batch share an org.
+    const scrapeCache = new Map(); // companyKey -> { contacts, sourceUrl } | null
+    const companyKey = (c) => (c || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
     for (let i = 0; i < prospectIds.length; i++) {
       const target = prospects.find(p => p.id === prospectIds[i]);
@@ -1912,6 +2035,22 @@ Rules:
       try {
         const [firstName, ...rest] = (target.name || '').trim().split(/\s+/);
         const lastName = rest.join(' ');
+
+        // Look up or fetch the org's directory scrape
+        const ck = companyKey(target.company);
+        let webData = scrapeCache.get(ck);
+        if (webData === undefined) {
+          try {
+            const res = await scrapeOrgDirectory(target);
+            webData = res?.found ? res : null;
+          } catch {
+            webData = null;
+          }
+          scrapeCache.set(ck, webData);
+        }
+        const webPerson = webData ? matchPersonInDirectory(webData.contacts, target.name) : null;
+
+        // Apollo enrich
         const data = await postJson('/api/apollo-enrich', {
           firstName,
           lastName,
@@ -1919,23 +2058,42 @@ Rules:
           organizationName: target.company,
         }, { retries: 1, timeoutMs: 30_000 });
 
-        if (data?.matched && data.person) {
-          // Apply enrichment immediately (no review step in batch mode)
+        const apolloPerson = (data?.matched && data.person) ? data.person : null;
+
+        if (!apolloPerson && !webPerson) {
+          misses++;
+        } else {
+          // Apply merged enrichment immediately (no review step in batch mode)
           setProspects(prev => prev.map(p => {
             if (p.id !== target.id) return p;
             const update = { ...p };
-            const apollo = data.person;
-            if (apollo.email) update.email = apollo.email;
-            if (apollo.phone && !p.phone) update.phone = apollo.phone;
-            if (apollo.title && (!p.title || p.title.toLowerCase() === 'student')) update.title = apollo.title;
-            if (apollo.linkedinUrl) update.linkedinUrl = apollo.linkedinUrl;
+            // Email preference: verified Apollo > directory > unverified Apollo
+            if (apolloPerson?.email && apolloPerson.emailStatus === 'verified') {
+              update.email = apolloPerson.email;
+            } else if (webPerson?.email) {
+              update.email = webPerson.email;
+            } else if (apolloPerson?.email) {
+              update.email = apolloPerson.email;
+            }
+            const phone = apolloPerson?.phone || webPerson?.phone;
+            if (phone && !p.phone) update.phone = phone;
+            const title = apolloPerson?.title || webPerson?.title;
+            if (title && (!p.title || p.title.toLowerCase() === 'student')) update.title = title;
+            if (apolloPerson?.linkedinUrl) update.linkedinUrl = apolloPerson.linkedinUrl;
             update.enrichedAt = new Date().toISOString();
-            update.enrichedBy = 'apollo-batch';
+            update.enrichedBy = apolloPerson && webPerson ? 'apollo+website-batch'
+              : webPerson ? 'website-batch'
+              : 'apollo-batch';
             return update;
           }));
-          success++;
-        } else {
-          misses++;
+          // Persist linkedinUrl override so it survives reloads
+          if (apolloPerson?.linkedinUrl) {
+            setOverrides(prev => ({
+              ...prev,
+              [target.id]: { ...prev[target.id], linkedinUrl: apolloPerson.linkedinUrl },
+            }));
+          }
+          if (apolloPerson) success++; else websiteOnly++;
         }
       } catch (e) {
         console.warn('[shp] batch enrich error for', target.name, e.message);
@@ -1950,7 +2108,7 @@ Rules:
     fetchApolloQuota(); // refresh quota after the batch
     setBatchEnrichRunning(false);
     setBatchEnrichOpen(false);
-    showToast(`Batch enrich complete · ${success} matched · ${misses} no-match · ${errors} error${errors === 1 ? '' : 's'}`);
+    showToast(`Batch enrich complete · ${success} Apollo · ${websiteOnly} website-only (no credit) · ${misses} no-match · ${errors} error${errors === 1 ? '' : 's'}`);
   };
 
   // Apply Apollo's findings to the prospect record (updates email, phone, title in-place)
@@ -1961,11 +2119,11 @@ Rules:
 
     setProspects(prev => prev.map(p => {
       if (p.id !== prospectId) return p;
-      // Update fields where Apollo has data — but never overwrite a non-empty existing value
-      // unless Apollo's email is "verified" and the existing one is personal
+      // Update fields where the proposal has data — but never overwrite a non-empty existing value
+      // unless the proposed email is "verified" (Apollo) or "directory" (org website)
       const update = { ...p };
-      if (apollo.email && apollo.emailStatus === 'verified') {
-        // Always prefer Apollo's verified email
+      if (apollo.email && (apollo.emailStatus === 'verified' || apollo.emailStatus === 'directory')) {
+        // Always prefer a verified Apollo email or a website-directory email
         update.email = apollo.email;
       } else if (apollo.email && (!p.email || /(gmail|yahoo|hotmail|aol|comcast)/i.test(p.email))) {
         // Use Apollo email if existing is personal/missing, even if not "verified"
@@ -1976,7 +2134,7 @@ Rules:
       if (apollo.linkedinUrl) update.linkedinUrl = apollo.linkedinUrl;
       // linkedinUrl also saved to overrides below so it survives page reloads
       update.enrichedAt = new Date().toISOString();
-      update.enrichedBy = 'apollo';
+      update.enrichedBy = proposal.sources?.website && !proposal.sources?.apollo ? 'website' : 'apollo';
       return update;
     }));
 
@@ -3622,31 +3780,44 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
               ⚠ {prospect.enrichmentReasons.join(' · ')}
             </div>
           )}
-          {/* Apollo enrichment proposal — shown when Apollo returned data awaiting user approval */}
-          {proposedEnrichment?.[prospect.id]?.matched && (
+          {/* Enrichment proposal — shown when Apollo and/or the org website returned data awaiting user approval */}
+          {proposedEnrichment?.[prospect.id]?.matched && (() => {
+            const proposal = proposedEnrichment[prospect.id];
+            const srcs = proposal.sources || {};
+            const headerLabel = srcs.apollo && srcs.website
+              ? 'Apollo + website match'
+              : srcs.website && !srcs.apollo
+              ? 'Website directory match (0 credits)'
+              : 'Apollo match';
+            return (
             <div style={{ marginTop: '12px', padding: '12px 14px', background: 'color-mix(in oklch, var(--info) 30%, transparent)', border: '1px solid rgba(99, 130, 175, 0.3)', borderRadius: '8px' }}>
-              <div style={{ fontSize: '11px', color: 'var(--info)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600, marginBottom: '8px' }}>
-                Apollo found a match
+              <div style={{ fontSize: '11px', color: 'var(--info)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <span>{headerLabel}</span>
+                {srcs.websiteUrl && (
+                  <a href={srcs.websiteUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: '10px', color: 'var(--text-3)', fontWeight: 400, textTransform: 'none' }}>
+                    source ↗
+                  </a>
+                )}
               </div>
               <div style={{ fontSize: '12px', color: 'var(--text)', display: 'grid', gap: '4px' }}>
-                <div><strong>Name:</strong> {proposedEnrichment[prospect.id].person.name}</div>
-                {proposedEnrichment[prospect.id].person.title && <div><strong>Title:</strong> {proposedEnrichment[prospect.id].person.title}</div>}
-                {proposedEnrichment[prospect.id].person.email && (
+                <div><strong>Name:</strong> {proposal.person.name}</div>
+                {proposal.person.title && <div><strong>Title:</strong> {proposal.person.title}</div>}
+                {proposal.person.email && (
                   <div>
-                    <strong>Email:</strong> {proposedEnrichment[prospect.id].person.email}
-                    {proposedEnrichment[prospect.id].person.emailStatus && (
-                      <span style={{ marginLeft: '8px', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: proposedEnrichment[prospect.id].person.emailStatus === 'verified' ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : 'color-mix(in oklch, var(--warn) 30%, transparent)', color: proposedEnrichment[prospect.id].person.emailStatus === 'verified' ? 'var(--ok)' : 'var(--warn)' }}>
-                        {proposedEnrichment[prospect.id].person.emailStatus}
+                    <strong>Email:</strong> {proposal.person.email}
+                    {proposal.person.emailStatus && (
+                      <span style={{ marginLeft: '8px', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: proposal.person.emailStatus === 'verified' ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : proposal.person.emailStatus === 'directory' ? 'color-mix(in oklch, var(--ok) 20%, transparent)' : 'color-mix(in oklch, var(--warn) 30%, transparent)', color: proposal.person.emailStatus === 'verified' || proposal.person.emailStatus === 'directory' ? 'var(--ok)' : 'var(--warn)' }}>
+                        {proposal.person.emailStatus}{proposal.person.emailSource ? ` · ${proposal.person.emailSource}` : ''}
                       </span>
                     )}
                   </div>
                 )}
-                {proposedEnrichment[prospect.id].person.phone && <div><strong>Phone:</strong> {proposedEnrichment[prospect.id].person.phone}</div>}
-                {proposedEnrichment[prospect.id].person.linkedinUrl && (
-                  <div><strong>LinkedIn:</strong> <a href={proposedEnrichment[prospect.id].person.linkedinUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--info)' }}>profile</a></div>
+                {proposal.person.phone && <div><strong>Phone:</strong> {proposal.person.phone}</div>}
+                {proposal.person.linkedinUrl && (
+                  <div><strong>LinkedIn:</strong> <a href={proposal.person.linkedinUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--info)' }}>profile</a></div>
                 )}
-                {proposedEnrichment[prospect.id].person.organizationName && (
-                  <div style={{ fontSize: '11px', color: 'var(--text-3)' }}>Apollo says they work at: {proposedEnrichment[prospect.id].person.organizationName}</div>
+                {proposal.person.organizationName && (
+                  <div style={{ fontSize: '11px', color: 'var(--text-3)' }}>Apollo says they work at: {proposal.person.organizationName}</div>
                 )}
               </div>
               <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
@@ -3658,7 +3829,8 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
                 </button>
               </div>
             </div>
-          )}
+            );
+          })()}
           {proposedEnrichment?.[prospect.id]?.matched === false && (
             <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-3)', fontStyle: 'italic' }}>
               Apollo: no match found · {proposedEnrichment[prospect.id].message}
@@ -5228,7 +5400,7 @@ function BulkCrossThreadModal({ styles, isRunning, progress, results, onAdd, onC
           </div>
           <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-3)' }}>
             {isRunning
-              ? 'Running free Apollo people-searches — no credits spent yet.'
+              ? 'Running Apollo people-search + scraping each org\'s website — no credits spent yet.'
               : `${orgsWithCandidates} of ${results.length} orgs returned candidates${orgsErrored ? ` · ${orgsErrored} errors` : ''}`}
           </div>
         </div>
@@ -5322,13 +5494,26 @@ function BulkCrossThreadModal({ styles, isRunning, progress, results, onAdd, onC
                         onChange={() => togglePick(row.key)}
                       />
                       <div>
-                        <div style={{ fontSize: 'var(--fs-14)', fontWeight: 600 }}>
-                          {c.name}
-                          {c.alreadyInPool && <span style={{ marginLeft: 'var(--space-2)', fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontWeight: 400 }}>(already in pool)</span>}
+                        <div style={{ fontSize: 'var(--fs-14)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                          <span>{c.name}</span>
+                          {c.source === 'website' && (
+                            <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'color-mix(in oklch, var(--ok) 15%, transparent)', color: 'var(--ok)', fontWeight: 500 }}>
+                              🌐 website
+                            </span>
+                          )}
+                          {c.email && (
+                            <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'color-mix(in oklch, var(--ok) 15%, transparent)', color: 'var(--ok)', fontWeight: 500 }}>
+                              ✓ has email
+                            </span>
+                          )}
+                          {c.alreadyInPool && <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontWeight: 400 }}>(already in pool)</span>}
                         </div>
                         <div style={{ fontSize: 'var(--fs-13)', color: 'var(--text-2)' }}>
                           {c.title || '(no title)'} · {row.result.orgName}
                         </div>
+                        {c.email && (
+                          <div style={{ fontSize: 'var(--fs-11)', color: 'var(--text-3)' }}>{c.email}</div>
+                        )}
                       </div>
                       <span style={styles.badge(
                         c.tier === 4 ? 'red' :
@@ -5346,8 +5531,7 @@ function BulkCrossThreadModal({ styles, isRunning, progress, results, onAdd, onC
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 'var(--space-4)', gap: 'var(--space-3)' }}>
               <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)' }}>
-                Adding {selectedCount} costs <strong>0 credits</strong> — they enter the pool flagged "Needs Enrichment".
-                Enrich them later via the Batch Enrich wizard to spend remaining credits.
+                Adding {selectedCount} costs <strong>0 credits</strong>. Apollo candidates enter flagged "Needs Enrichment"; website candidates with emails are ready to outreach immediately.
               </div>
               <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
                 <button style={styles.secondaryBtn} onClick={onCancel}>Close</button>
