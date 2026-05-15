@@ -1275,10 +1275,91 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     }
   };
 
+  // === Scrape org website for staff/faculty directory contacts ===
+  // Uses Anthropic web_search to find the org's directory page and extract
+  // names, titles, emails, phones. Free (no Apollo credits). Returns an array
+  // of candidate objects with source: 'website'.
+  const scrapeOrgDirectory = async (prospect) => {
+    const segmentHint = prospect.segment === 'K-12'
+      ? 'private school — look for: director of facilities, director of plant operations, business manager, CFO, principal, head of school, director of operations, maintenance director'
+      : prospect.segment === 'Higher Ed'
+      ? 'college or university — look for: director of facilities, VP of operations, director of plant operations, facilities manager, CFO, business manager'
+      : prospect.segment === 'Local Gov'
+      ? 'local government — look for: city manager, director of public works, facilities director, director of operations, maintenance superintendent'
+      : 'look for: director of facilities, director of operations, business manager, maintenance director';
+
+    const prompt = `You are helping a sales rep find the right contacts at an organization.
+
+Organization: "${prospect.company}"
+City: ${prospect.city || ''}, ${prospect.state || 'FL'}
+Type: ${segmentHint}
+
+Task:
+1. Search the web for "${prospect.company} staff directory" OR "${prospect.company} faculty directory" OR "${prospect.company} employee directory" OR "${prospect.company} administration team"
+2. If you find a directory page, extract every person whose title matches facilities, operations, maintenance, plant, business manager, CFO, principal, superintendent, or director roles.
+3. Also look for a general "Contact Us" or "About" page if no directory exists.
+
+Return ONLY a JSON object (no markdown fences, no explanation) in this exact format:
+{
+  "found": true,
+  "sourceUrl": "https://...",
+  "contacts": [
+    { "name": "Jane Smith", "title": "Director of Facilities", "email": "jsmith@school.org", "phone": "407-555-1234" }
+  ]
+}
+
+If no relevant contacts found, return: { "found": false, "sourceUrl": null, "contacts": [] }
+
+Rules:
+- Only include people whose titles are relevant to facilities, operations, maintenance, or purchasing decisions
+- Email and phone are optional — only include if clearly stated on the page
+- Maximum 12 contacts`;
+
+    const data = await postJson('/api/anthropic', {
+      model: ANTHROPIC_MODEL,
+      max_tokens: 1200,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }],
+      messages: [{ role: 'user', content: prompt }],
+    }, { retries: 1, timeoutMs: 50_000 });
+
+    const blocks = Array.isArray(data?.content) ? data.content : [];
+    const text = blocks
+      .filter(b => b?.type === 'text' && typeof b.text === 'string')
+      .map(b => b.text)
+      .join('');
+
+    // Extract JSON from the response
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { found: false, contacts: [], sourceUrl: null };
+
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const contacts = Array.isArray(parsed.contacts) ? parsed.contacts : [];
+      return {
+        found: parsed.found && contacts.length > 0,
+        sourceUrl: parsed.sourceUrl || null,
+        contacts: contacts
+          .filter(c => c?.name)
+          .map((c, i) => ({
+            candidateId: `web_${Date.now()}_${i}`,
+            name: c.name,
+            title: c.title || '',
+            email: c.email || '',
+            phone: c.phone || '',
+            linkedinUrl: '',
+            source: 'website',
+            sourceUrl: parsed.sourceUrl || null,
+          })),
+      };
+    } catch {
+      return { found: false, contacts: [], sourceUrl: null };
+    }
+  };
+
   // === Multi-thread: find peers at the same org ===
-  // Free Apollo search (no credit cost). Returns candidates for user review.
-  // User then picks which to add to the pool (also free); enrichment happens
-  // separately when they want a verified email (1 credit each).
+  // Runs Apollo people-search (free, no credits) AND website directory scrape
+  // (Anthropic web_search) in parallel. Merges + dedups by name.
+  // Adding to the pool is free; enrichment (verified email) costs 1 Apollo credit each.
   const multiThreadAccount = async (prospect) => {
     if (!prospect?.company) {
       showToast('No organization on this prospect', 'error');
@@ -1289,45 +1370,73 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     setIsFindingPeers(true);
 
     const titles = getMultiThreadTitles(prospect.title, prospect.segment);
+    const normalize = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
-    try {
-      const data = await postJson('/api/apollo-people-search', {
+    // Run Apollo + website scrape in parallel
+    const [apolloResult, webResult] = await Promise.allSettled([
+      postJson('/api/apollo-people-search', {
         organizationName: prospect.company,
         titles,
         limit: 15,
-      }, { retries: 1, timeoutMs: 30_000 });
+      }, { retries: 1, timeoutMs: 30_000 }),
+      scrapeOrgDirectory(prospect),
+    ]);
 
-      const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
-
-      // Mark candidates that are already in the pool so the modal can disable them.
-      const normalize = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      const existingNames = new Set(
-        prospects.map(p => normalize(p.name)).filter(Boolean)
-      );
-      const annotated = candidates.map(c => ({
-        ...c,
-        alreadyInPool: existingNames.has(normalize(c.name)),
-      }));
-
-      setFindPeersResults(annotated);
-
-      const newCount = annotated.filter(c => !c.alreadyInPool).length;
-      showToast(`Found ${annotated.length} peer${annotated.length === 1 ? '' : 's'} at ${prospect.company}${newCount < annotated.length ? ` (${annotated.length - newCount} already in pool)` : ''}`);
-    } catch (err) {
-      console.error('[shp] multiThreadAccount failed:', err);
+    // Apollo candidates
+    let apolloCandidates = [];
+    if (apolloResult.status === 'fulfilled') {
+      apolloCandidates = (Array.isArray(apolloResult.value?.candidates) ? apolloResult.value.candidates : [])
+        .map(c => ({ ...c, candidateId: c.apolloId || `apollo_${Math.random()}`, source: 'apollo' }));
+    } else {
+      const err = apolloResult.reason;
       const isPlanLimit = err?.status === 403 || /apollo_plan_required|invalid access credentials/i.test(err?.message || '');
       if (isPlanLimit) {
-        showToast(
-          `"Find peers" needs Apollo paid plan. Try Find → Import CSV instead.`,
-          'info',
-        );
+        showToast('"Find peers" Apollo search needs paid plan — showing website results only', 'info');
       } else {
-        showToast(`Peer search failed: ${err.message}`, 'error');
+        console.warn('[shp] Apollo peer search failed:', err?.message);
       }
-      setFindPeersResults([]);
-    } finally {
-      setIsFindingPeers(false);
     }
+
+    // Website candidates
+    let webCandidates = [];
+    let webSourceUrl = null;
+    if (webResult.status === 'fulfilled' && webResult.value?.found) {
+      webCandidates = webResult.value.contacts || [];
+      webSourceUrl = webResult.value.sourceUrl;
+    } else if (webResult.status === 'rejected') {
+      console.warn('[shp] Website scrape failed:', webResult.reason?.message);
+    }
+
+    // Dedup: if a name appears in both, keep the Apollo record (has apolloId for enrichment)
+    // and annotate it with any email found on the website
+    const apolloNames = new Set(apolloCandidates.map(c => normalize(c.name)));
+    const dedupedWeb = webCandidates.filter(c => !apolloNames.has(normalize(c.name)));
+
+    // Merge: Apollo first (richer for enrichment), then web-only additions
+    const merged = [...apolloCandidates, ...dedupedWeb];
+
+    // Mark candidates already in the pool
+    const existingNames = new Set(prospects.map(p => normalize(p.name)).filter(Boolean));
+    const annotated = merged.map(c => ({
+      ...c,
+      alreadyInPool: existingNames.has(normalize(c.name)),
+    }));
+
+    setFindPeersResults(annotated);
+
+    if (annotated.length === 0) {
+      showToast(`No peers found at ${prospect.company} via Apollo or website`, 'info');
+    } else {
+      const newCount = annotated.filter(c => !c.alreadyInPool).length;
+      const webCount = dedupedWeb.length;
+      const apolloCount = apolloCandidates.length;
+      const parts = [];
+      if (apolloCount > 0) parts.push(`${apolloCount} from Apollo`);
+      if (webCount > 0) parts.push(`${webCount} from website${webSourceUrl ? ` (${new URL(webSourceUrl).hostname})` : ''}`);
+      showToast(`Found ${annotated.length} peer${annotated.length === 1 ? '' : 's'} at ${prospect.company} · ${parts.join(' + ')}${newCount < annotated.length ? ` · ${annotated.length - newCount} already in pool` : ''}`);
+    }
+
+    setIsFindingPeers(false);
   };
 
   // Add selected peers to the pool. Each new prospect inherits geography from the
@@ -1338,13 +1447,18 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     const newProspects = picked.map((c, i) => {
       const icp = classifyICP(parent.company, c.title);
       const titleClass = classifyTitle(c.title);
+      const isWebSource = c.source === 'website';
+      const sourceLabel = isWebSource
+        ? `Website directory (peer of ${parent.name || parent.company})`
+        : `Apollo (peer of ${parent.name || parent.company})`;
       return {
         id: `peer_${now}_${i}`,
         name: c.name,
         title: c.title || '',
         company: parent.company,
-        email: '', // Apollo search doesn't return verified emails — must enrich
-        phone: '',
+        // Web-scraped contacts may already have an email; Apollo search never does
+        email: c.email || '',
+        phone: c.phone || '',
         city: parent.city || c.city || '',
         county: parent.county || '',
         state: parent.state || c.state || 'FL',
@@ -1353,12 +1467,12 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         icpStatus: icp.status,
         titleAltitude: titleClass.altitude,
         status: 'Ready',
-        source: `Apollo (peer of ${parent.name || parent.company})`,
+        source: sourceLabel,
         priority: 80,
         parentProspectId: parent.id,
-        apolloId: c.apolloId,
-        linkedinUrl: c.linkedinUrl,
-        photoUrl: c.photoUrl,
+        apolloId: isWebSource ? undefined : c.apolloId,
+        linkedinUrl: c.linkedinUrl || '',
+        photoUrl: c.photoUrl || '',
       };
     });
     setProspects(prev => [...newProspects, ...prev]);
@@ -4517,19 +4631,22 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel }) {
   const [picked, setPicked] = useState({});
 
-  const togglePick = (apolloId) => {
-    setPicked(prev => ({ ...prev, [apolloId]: !prev[apolloId] }));
+  const togglePick = (candidateId) => {
+    setPicked(prev => ({ ...prev, [candidateId]: !prev[candidateId] }));
   };
 
   const candidates = results || [];
   const newOnes = candidates.filter(c => !c.alreadyInPool);
-  const pickedCount = newOnes.filter(c => picked[c.apolloId]).length;
+  const pickedCount = newOnes.filter(c => picked[c.candidateId]).length;
 
   const tierColor = (t) => t >= 4 ? 'var(--ok)' : t === 3 ? 'var(--warn)' : t === 2 ? 'var(--info)' : 'var(--text-3)';
   const tierLabel = (t) => t === 4 ? 'Strategic' : t === 3 ? 'Mgmt' : t === 2 ? 'Tactical' : t === 1 ? 'Frontline' : 'Adjacent';
 
+  const webCount = candidates.filter(c => c.source === 'website').length;
+  const apolloCount = candidates.filter(c => c.source === 'apollo').length;
+
   const handleAdd = () => {
-    const chosen = newOnes.filter(c => picked[c.apolloId]);
+    const chosen = newOnes.filter(c => picked[c.candidateId]);
     onAdd(chosen);
   };
 
@@ -4539,69 +4656,104 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
         <div style={{ marginBottom: '8px' }}>
           <div style={{ fontSize: '18px', fontWeight: 700 }}>Find peers at {parent.company}</div>
           <div style={{ fontSize: '12px', color: 'var(--text-3)', marginTop: '4px' }}>
-            Multi-threading from <strong>{parent.name || '(unnamed)'}</strong> ({parent.title || 'unknown title'}). Search is free — adding to the pool is free. Verified emails cost 1 Apollo credit each, applied later when you enrich.
+            Multi-threading from <strong>{parent.name || '(unnamed)'}</strong> ({parent.title || 'unknown title'}). Search is free — adding to the pool is free. Apollo contacts without emails cost 1 credit each to enrich later. Website contacts with emails are ready to go.
           </div>
         </div>
 
         {isLoading ? (
           <div style={{ textAlign: 'center', padding: '60px 0' }}>
             <Loader2 size={28} className="spin" style={{ color: 'var(--danger)' }} />
-            <div style={{ fontSize: '14px', marginTop: '12px' }}>Searching Apollo for peers…</div>
+            <div style={{ fontSize: '14px', marginTop: '12px' }}>Searching Apollo + org website for contacts…</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '6px' }}>This may take 15–30 seconds while the website is scanned.</div>
           </div>
         ) : candidates.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-3)' }}>
             <AlertCircle size={20} style={{ marginBottom: '8px' }} />
-            <div style={{ fontSize: '13px' }}>No peers found at this org. Apollo may not index them — try Manual Add.</div>
+            <div style={{ fontSize: '13px' }}>No contacts found via Apollo or the org's website — try Manual Add.</div>
           </div>
         ) : (
-          <div style={{ overflowY: 'auto', flex: 1, marginTop: '12px', borderTop: '1px solid rgba(232, 236, 243, 0.08)' }}>
-            {candidates.map(c => {
-              const tier = classifyTier(c.title);
-              const checked = !!picked[c.apolloId];
-              return (
-                <label
-                  key={c.apolloId}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: '12px',
-                    padding: '12px 0', borderBottom: '1px solid rgba(232, 236, 243, 0.04)',
-                    opacity: c.alreadyInPool ? 0.5 : 1,
-                    cursor: c.alreadyInPool ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    disabled={c.alreadyInPool}
-                    checked={checked}
-                    onChange={() => togglePick(c.apolloId)}
-                    style={{ width: '16px', height: '16px', accentColor: 'var(--danger)' }}
-                  />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                      <strong style={{ fontSize: '14px' }}>{c.name}</strong>
-                      {tier > 0 && (
-                        <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--bg-sunk)', color: tierColor(tier), fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                          {tierLabel(tier)}
+          <>
+            {(apolloCount > 0 || webCount > 0) && (
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
+                {apolloCount > 0 && (
+                  <span style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '4px', background: 'var(--bg-sunk)', color: 'var(--info)' }}>
+                    {apolloCount} from Apollo
+                  </span>
+                )}
+                {webCount > 0 && (
+                  <span style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '4px', background: 'var(--bg-sunk)', color: 'var(--ok)' }}>
+                    {webCount} from website directory
+                  </span>
+                )}
+              </div>
+            )}
+            <div style={{ overflowY: 'auto', flex: 1, borderTop: '1px solid rgba(232, 236, 243, 0.08)' }}>
+              {candidates.map(c => {
+                const tier = classifyTier(c.title);
+                const checked = !!picked[c.candidateId];
+                const isWeb = c.source === 'website';
+                return (
+                  <label
+                    key={c.candidateId}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '12px',
+                      padding: '12px 0', borderBottom: '1px solid rgba(232, 236, 243, 0.04)',
+                      opacity: c.alreadyInPool ? 0.5 : 1,
+                      cursor: c.alreadyInPool ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      disabled={c.alreadyInPool}
+                      checked={checked}
+                      onChange={() => togglePick(c.candidateId)}
+                      style={{ width: '16px', height: '16px', accentColor: 'var(--danger)' }}
+                    />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <strong style={{ fontSize: '14px' }}>{c.name}</strong>
+                        {tier > 0 && (
+                          <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--bg-sunk)', color: tierColor(tier), fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                            {tierLabel(tier)}
+                          </span>
+                        )}
+                        <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: isWeb ? 'color-mix(in oklch, var(--ok) 15%, transparent)' : 'color-mix(in oklch, var(--info) 15%, transparent)', color: isWeb ? 'var(--ok)' : 'var(--info)', fontWeight: 500 }}>
+                          {isWeb ? '🌐 website' : 'Apollo'}
                         </span>
-                      )}
-                      {c.alreadyInPool && <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>· already in pool</span>}
+                        {c.email && (
+                          <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'color-mix(in oklch, var(--ok) 15%, transparent)', color: 'var(--ok)', fontWeight: 500 }}>
+                            ✓ has email
+                          </span>
+                        )}
+                        {c.alreadyInPool && <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>· already in pool</span>}
+                      </div>
+                      <div style={{ fontSize: '12px', color: 'var(--text-2)' }}>{c.title || '(no title)'}</div>
+                      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '2px' }}>
+                        {c.email && <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>{c.email}</span>}
+                        {c.phone && <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>{c.phone}</span>}
+                        {c.linkedinUrl && (
+                          <a href={c.linkedinUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: '11px', color: 'var(--info)' }}>
+                            LinkedIn ↗
+                          </a>
+                        )}
+                        {isWeb && c.sourceUrl && (
+                          <a href={c.sourceUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: '11px', color: 'var(--text-3)', textDecoration: 'none' }}>
+                            source ↗
+                          </a>
+                        )}
+                      </div>
                     </div>
-                    <div style={{ fontSize: '12px', color: 'var(--text-2)' }}>{c.title || '(no title)'}</div>
-                    {c.linkedinUrl && (
-                      <a href={c.linkedinUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: '11px', color: 'var(--info)' }}>
-                        LinkedIn ↗
-                      </a>
-                    )}
-                  </div>
-                </label>
-              );
-            })}
-          </div>
+                  </label>
+                );
+              })}
+            </div>
+          </>
         )}
 
         <div style={{ display: 'flex', gap: '10px', marginTop: '20px', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ fontSize: '12px', color: 'var(--text-3)' }}>
             {newOnes.length > 0 && (
-              <>{pickedCount} of {newOnes.length} selected · 0 credits cost (enrich separately later)</>
+              <>{pickedCount} of {newOnes.length} selected · Apollo contacts without emails need enrichment (1 credit each)</>
             )}
           </div>
           <div style={{ display: 'flex', gap: '10px' }}>
