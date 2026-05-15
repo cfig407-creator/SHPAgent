@@ -4633,10 +4633,16 @@ function ComposeView({ styles, prospect, setProspect, draftEmail, setDraftEmail,
               </div>
             </div>
 
-            <div style={{ marginTop: '14px', padding: '10px 12px', background: 'var(--ok-soft)', borderRadius: '8px', fontSize: '12px', color: 'var(--ok)', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
-              <CheckCircle2 size={13} style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div style={{ marginTop: '14px', padding: '10px 12px', background: msConnection?.connected ? 'var(--ok-soft)' : 'var(--warn-soft)', borderRadius: '8px', fontSize: '12px', color: msConnection?.connected ? 'var(--ok)' : 'var(--warn)', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+              {msConnection?.connected
+                ? <CheckCircle2 size={13} style={{ flexShrink: 0, marginTop: '2px' }} />
+                : <AlertCircle size={13} style={{ flexShrink: 0, marginTop: '2px' }} />}
               <div>
-                <strong>Open tracking is on.</strong> Pipedrive logs the send and records opens in the lead timeline. Enable in Pipedrive → Settings → Email Sync if not already active.
+                {msConnection?.connected ? (
+                  <><strong>Open tracking is on.</strong> Sends go through Microsoft 365 with an embedded pixel — opens appear automatically on this card within ~2 minutes of being opened.</>
+                ) : (
+                  <><strong>Open tracking off.</strong> Connect Microsoft 365 in Settings for one-click tracked send. Without it, you can still send via Outlook or paste into Pipedrive's Compose — Pipedrive only tracks opens when you send from inside its own UI.</>
+                )}
               </div>
             </div>
           </div>
