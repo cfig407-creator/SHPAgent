@@ -236,8 +236,16 @@ export default function SHPProspectingAgent() {
     // 1. Hydrate from localStorage immediately (fast, offline-friendly)
     const saved = localStorage.getItem('shp_config_v3');
     if (saved) {
-      try { setConfig(c => ({ ...c, ...JSON.parse(saved) })); }
-      catch (e) { console.warn('[shp] failed to parse saved config:', e); }
+      try {
+        const parsed = JSON.parse(saved);
+        // Migration: replace the old soft opt-out (singular "door & hardware isn't")
+        // with the corrected plural form. Only touches users who never edited it.
+        const OLD_OPT_OUT = `If door & hardware isn't on your radar, just let me know and I'll close the loop on my end.`;
+        if (parsed.softOptOut === OLD_OPT_OUT) {
+          parsed.softOptOut = DEFAULT_SOFT_OPT_OUT;
+        }
+        setConfig(c => ({ ...c, ...parsed }));
+      } catch (e) { console.warn('[shp] failed to parse saved config:', e); }
     }
     const savedOverrides = localStorage.getItem('shp_prospect_overrides_v3');
     if (savedOverrides) {
@@ -260,8 +268,27 @@ export default function SHPProspectingAgent() {
     // Hydrate per-prospect drafts so compose state survives reloads.
     const savedDrafts = localStorage.getItem('shp_drafts_v1');
     if (savedDrafts) {
-      try { setDrafts(JSON.parse(savedDrafts)); }
-      catch (e) { console.warn('[shp] failed to parse saved drafts:', e); }
+      try {
+        const parsedDrafts = JSON.parse(savedDrafts);
+        // Migration: rewrite the old singular soft opt-out wherever it appears
+        // in cached draft bodies / follow-ups so previously generated drafts
+        // don't keep showing the wrong grammar.
+        const OLD = `If door & hardware isn't on your radar, just let me know and I'll close the loop on my end.`;
+        const NEW = `If doors and hardware aren't on your radar, just let me know and I'll close the loop on my end.`;
+        const swap = (s) => typeof s === 'string' ? s.split(OLD).join(NEW) : s;
+        for (const id of Object.keys(parsedDrafts)) {
+          const d = parsedDrafts[id];
+          if (!d) continue;
+          if (d.body) d.body = swap(d.body);
+          if (d.followUps && typeof d.followUps === 'object') {
+            for (const k of Object.keys(d.followUps)) {
+              const fu = d.followUps[k];
+              if (fu?.body) fu.body = swap(fu.body);
+            }
+          }
+        }
+        setDrafts(parsedDrafts);
+      } catch (e) { console.warn('[shp] failed to parse saved drafts:', e); }
     }
 
     // 2. If a server-side config exists (Vercel KV), let it override the

@@ -49,7 +49,7 @@ Superior Hardware Products · Longwood, FL`;
 // included in cold emails so recipients have a frictionless way to say "no thanks"
 // instead of marking the email as spam (which damages domain reputation).
 export const DEFAULT_SOFT_OPT_OUT =
-  `If door & hardware isn't on your radar, just let me know and I'll close the loop on my end.`;
+  `If doors and hardware aren't on your radar, just let me know and I'll close the loop on my end.`;
 
 // Touch-cap defaults — guards against "harassment" complaints from
 // over-emailing the same prospect. After this many sends with no reply,
