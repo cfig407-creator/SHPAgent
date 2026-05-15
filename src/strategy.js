@@ -426,7 +426,7 @@ export const OPENER_BANK = [
   {
     id: 'A_workhorse',
     when: 'default — works for any cold outreach',
-    text: `I got your name while looking around for the right person at {company} to share some information with about Superior Hardware Products.`,
+    text: `I got your name while looking for the right facilities contact at {company}. Wanted to put Superior Hardware Products on your radar.`,
   },
   {
     id: 'B_quick_intro',
@@ -465,33 +465,33 @@ export const OPENER_BANK = [
 // `avoidWhen` flags let the composer skip variants in inappropriate contexts.
 export const BODY_BANK = [
   {
-    id: 'B1_arrow_in_quiver_default',
-    when: 'default — humble framing + capability summary, with optional proof drop',
-    text: `I know you likely have someone for what we do, but I wanted to get you some information in case you need another arrow in your quiver.
+    id: 'B1_humble_capability',
+    when: 'default — humble framing + capability, with optional proof drop',
+    text: `I know you likely have a vendor for this. Wanted to be another option in case something comes up — a broken closer mid-year, access control that needs hardware to match, or a bigger project where you want a second call.
 
-In short, we can handle everything related to your door openings — from mechanical to electrified to automatics. SHP can provide, service, and install anything related to doors or hardware.{proof}`,
+We handle everything from mechanical hardware and closers to electrified access control and automatic doors. One call, regardless of brand or age of the hardware.{proof}`,
   },
   {
-    id: 'B2_proud_to_support_partners',
-    when: 'fires when proof points exist for this prospect',
-    text: `Our team provides service and installation for everything in your doorways across your facilities.
+    id: 'B2_proof_anchor_natural',
+    when: 'fires when proof points exist — natural peer reference, no corporate-speak',
+    text: `We work with {proofList} across Central Florida, and I wanted to make sure {company} knew we were operating in the area.
 
-We're proud to work with {proofList} across Central Florida, bridging the gap between access control providers and locksmiths. Our successful partnerships speak to our capabilities, and we'd like the chance to bring your team the same level of service.`,
+On the door and hardware side, we handle it end to end — mechanical, electrified access control, automatics, and service when something fails. One number regardless of brand or age.`,
     requires: ['hasProofPoints'],
   },
   {
     id: 'B3_capability_focused',
     when: 'fires when proof points are weak or absent — leads with capability',
-    text: `In short, we specialize in the supply and installation of commercial doors, frames, hardware, and access control packages.
+    text: `We cover the full door opening — hollow metal and wood doors, closers, panic devices, access control hardware, and automatics. Everything we supply, we also install and service.
 
-We cover all of Central Florida, working primarily with public school systems, county and city governments, hospitals, and colleges. Our facility is in Longwood, just outside of Orlando.{proof}`,
+We're based in Longwood and work primarily with school systems, municipalities, colleges, and healthcare facilities across Central Florida.{proof}`,
   },
   {
-    id: 'B4_full_capability_list',
-    when: 'fires when prospect appears to need broad capability awareness (multi-segment or unclear)',
-    text: `I wanted to take a moment to introduce myself and see how I might assist with your door or hardware needs.
+    id: 'B4_forty_year_resource',
+    when: 'fires when prospect appears to need broad capability awareness',
+    text: `We're a 40-year family shop in Longwood. Commercial doors and hardware is all we do — mechanical, electrified access control, and automatics — and we handle installation and service ourselves.
 
-We specialize in a wide range of services including hollow metal and wood doors, automatics, access control, rekeying, and more. Best of all, we provide both installation and service for everything we offer.{proof}`,
+I know you likely have a vendor for this. Just wanted to be another name on your list in case you ever need a second option or your current vendor is tied up.{proof}`,
   },
   {
     id: 'B5_humble_resource',
@@ -510,8 +510,10 @@ Happy to share what we currently support and where we might be able to help furt
   },
   {
     id: 'B7_short_intro',
-    when: 'shortest variant — when you want minimal email volume. Avoid for high-altitude titles.',
-    text: `Wanted to introduce Superior Hardware Products. We handle commercial doors, frames, hardware, automatics, and access control across Central Florida.{proof}`,
+    when: 'shortest variant — minimal, punchy. Avoid for high-altitude titles.',
+    text: `We handle commercial doors and hardware across Central Florida — mechanical closers, access control hardware, automatic openers, and service. One call for any doorway issue, regardless of brand.{proof}
+
+I know you likely have someone for this. Wanted to be on your list in case it's ever useful.`,
     avoidWhen: ['strategicTitle'], // too thin for Directors/VPs
   },
 ];
@@ -545,6 +547,66 @@ export const CTA_BANK = [
     when: 'fires for higher-altitude titles where directness reads as respect',
     text: `If you need a reliable door and hardware partner, I'd appreciate the chance to connect briefly to discuss our capabilities.`,
     requires: ['strategicTitle'],
+  },
+];
+
+// === FULL EMAIL BANK ===
+// Complete 2–3 paragraph email bodies (greeting and signature are added by the
+// composer). These replace the 3-part opener/body/CTA assembly — each variant
+// reads as a coherent piece instead of three bolted-together sections.
+// The composer tries this bank first; falls back to the 3-part assembly only
+// if no FULL_EMAIL_BANK variant is context-eligible after avoid filtering.
+export const FULL_EMAIL_BANK = [
+  {
+    id: 'FE1_resource_frame',
+    when: 'default — 2 tight paragraphs, humble frame, no proof needed',
+    text: `I'm Anthony with Superior Hardware Products in Longwood. We handle commercial doors and hardware across Central Florida — mechanical closers, access control hardware, automatics, and service when something fails mid-year.
+
+I know you likely have a vendor for this. Wanted to be a name you know in case something comes up or it's worth having a second option. Happy to connect whenever it makes sense, or just file this away for later.`,
+  },
+  {
+    id: 'FE2_geography_anchor',
+    when: 'fires when there is a same-county customer to anchor on',
+    requires: ['sameCountyCustomer'],
+    text: `We've been working with a few clients in {county} County and came across {company} — figured it was worth a quick intro.
+
+Superior Hardware Products handles commercial doors and hardware from end to end: mechanical, electrified access control, automatics, and service when something goes down mid-year. One call regardless of brand or age of the hardware.
+
+I'm sure you already have someone for this. Wanted to be on your list in case it's ever useful.`,
+  },
+  {
+    id: 'FE3_proof_anchor',
+    when: 'fires when proof points exist — leads with the named peer reference',
+    requires: ['hasProofPoints'],
+    text: `I'm Anthony with Superior Hardware Products. We work with {proofList} in the area and wanted to reach out to {company} as well.
+
+On the door and hardware side, we cover it end to end — mechanical hardware, access control tie-ins, automatic openers, and service. One call handles it regardless of brand or age.
+
+I'm sure you already have a resource for this. Just wanted to make sure you knew we were in your area.`,
+  },
+  {
+    id: 'FE4_forty_year_punch',
+    when: 'default — 2 paragraphs, 40-year shop anchor, resource frame',
+    text: `Quick intro from Superior Hardware Products in Longwood. We're a 40-year shop that handles commercial doors and hardware across Central Florida — from a single broken closer to master key rebuilds across multi-building portfolios.
+
+I know you likely have a vendor for this. Wanted to be a name you know in case they're ever backed up or it's worth having options. Happy to connect whenever it makes sense, or just keep this around for when something comes up.`,
+  },
+  {
+    id: 'FE5_capability_first',
+    when: 'default — leads with capability breadth, 2 tight paragraphs',
+    text: `I'm Anthony with Superior Hardware Products, based in Longwood. We handle the full door opening for commercial facilities — hollow metal and wood doors, closers, panic devices, access control hardware, and automatics. Everything we supply, we also install and service.
+
+I know you likely have a vendor for this. Wanted to be another name on your list. If anything's active on the door or hardware side, happy to take a look.`,
+  },
+  {
+    id: 'FE6_proof_list_leads',
+    when: 'fires when proof points exist — proof list anchors the opening line',
+    requires: ['hasProofPoints'],
+    text: `SHP works with {proofList} across Central Florida. Wanted to reach out to {company} and make sure you knew we were in the area.
+
+We handle doors and hardware from end to end — mechanical closers, electrified access control, automatics, and service when something fails. One number regardless of brand or building age.
+
+I'm sure you already have someone for this. Just wanted to be on your list in case you need a second option.`,
   },
 ];
 
@@ -583,15 +645,6 @@ export function composeEmail({ prospect, signature, proofPoints = [], avoid = []
     hasExistingRelationship: false, // Future: lookup from Pipedrive
   };
 
-  // === PICK OPENER ===
-  const opener = pickVariant(OPENER_BANK, ctx, avoid) || OPENER_BANK[0];
-
-  // === PICK BODY ===
-  const body = pickVariant(BODY_BANK, ctx, avoid) || BODY_BANK[0];
-
-  // === PICK CTA ===
-  const cta = pickVariant(CTA_BANK, ctx, avoid) || CTA_BANK[0];
-
   // === PICK SUBJECT ===
   const subjectTemplate = SUBJECT_BANK[Math.floor(Math.random() * SUBJECT_BANK.length)];
 
@@ -611,14 +664,50 @@ export function composeEmail({ prospect, signature, proofPoints = [], avoid = []
   };
 
   const subject = fillTemplate(subjectTemplate, fillVars);
+  const optOutLine = softOptOut ? `\n\n${softOptOut}` : '';
+
+  // === TRY FULL EMAIL BANK FIRST ===
+  // These are pre-written 2–3 paragraph emails that flow naturally as a unit.
+  // Much better than the 3-part assembly for voice consistency.
+  const fullVariant = pickVariant(FULL_EMAIL_BANK, ctx, avoid);
+  if (fullVariant) {
+    const fullEmailText = fillTemplate(fullVariant.text, fillVars);
+    const fullBody = `Hi ${greetingName},
+
+${fullEmailText}${optOutLine}
+
+Best,
+
+${signature || DEFAULT_SIGNATURE}`;
+
+    return {
+      subject,
+      body: fullBody,
+      diagnostic: {
+        composer: 'deterministic',
+        variantId: fullVariant.id,
+        openerId: null,
+        bodyId: null,
+        ctaId: null,
+        subjectTemplate,
+        proofPointsUsed: proofPoints.map(p => p.name),
+        contextFlags: ctx,
+      },
+    };
+  }
+
+  // === FALLBACK: 3-PART ASSEMBLY ===
+  // Used only when no FULL_EMAIL_BANK variant matches context after avoid filtering.
+  const opener = pickVariant(OPENER_BANK, ctx, avoid) || OPENER_BANK[0];
+  const body = pickVariant(BODY_BANK, ctx, avoid) || BODY_BANK[0];
+  const cta = pickVariant(CTA_BANK, ctx, avoid) || CTA_BANK[0];
+
   const openerText = fillTemplate(opener.text, fillVars);
   const bodyText = fillTemplate(body.text, fillVars);
   const ctaText = fillTemplate(cta.text, fillVars);
 
-  // === ASSEMBLE ===
   // Soft opt-out always appears as its own paragraph between the CTA and the
   // sign-off so recipients can decline without filing a spam complaint.
-  const optOutLine = softOptOut ? `\n\n${softOptOut}` : '';
   const fullBody = `Hi ${greetingName},
 
 ${openerText}
@@ -627,7 +716,7 @@ ${bodyText}
 
 ${ctaText}${optOutLine}
 
-Best Regards,
+Best,
 
 ${signature || DEFAULT_SIGNATURE}`;
 

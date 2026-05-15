@@ -945,8 +945,13 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       setDraftEmail({ subject: result.subject, body: result.body });
       setDraftDiagnostic({ ...result.diagnostic, fallback: true, fallbackReason: reason });
       setRecentVariants(prev => {
-        const next = [...prev, result.diagnostic.openerId, result.diagnostic.bodyId, result.diagnostic.ctaId];
-        return next.slice(-6);
+        const ids = [
+          result.diagnostic.variantId,
+          result.diagnostic.openerId,
+          result.diagnostic.bodyId,
+          result.diagnostic.ctaId,
+        ].filter(Boolean);
+        return [...prev, ...ids].slice(-9);
       });
       showToast(`Draft composed (fallback) · ${reason}`, 'info');
     };
