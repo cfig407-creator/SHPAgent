@@ -1596,9 +1596,15 @@ City: ${prospect.city || ''}, ${prospect.state || 'FL'}
 Type: ${segmentHint}
 
 Task:
-1. Search the web for "${prospect.company} staff directory" OR "${prospect.company} faculty directory" OR "${prospect.company} employee directory" OR "${prospect.company} administration team"
-2. If you find a directory page, extract every person whose title matches facilities, operations, maintenance, plant, buildings & grounds, business manager, CFO, principal, superintendent, custodial, or director roles.
-3. Also look for a general "Contact Us" or "About" page if no directory exists.
+1. Search the web for the FACILITIES STAFF specifically. The org likely has many departments; we only care about facilities/maintenance/operations. Use targeted queries like:
+   - "${prospect.company} director of facilities"
+   - "${prospect.company} facilities manager"
+   - "${prospect.company} plant operations"
+   - "${prospect.company} maintenance director"
+   - "${prospect.company} staff directory facilities"
+   If the org's directory has a search/filter URL parameter, prefer that filtered view over the unfiltered directory.
+2. Extract every person whose title matches facilities, maintenance, plant operations, buildings & grounds, custodial, or grounds. ALSO include: business manager, CFO, COO, head of school, superintendent, director of operations — these are decision-makers who sign off on door/hardware purchases.
+3. SKIP everyone else. We do NOT want: admissions staff, communications/marketing, development/fundraising, instructors, coaches, registrars, IT directors, deans of academics. If the page is showing those, find a different page or use a search filter.
 4. ALSO: capture any sample employee email addresses visible on the page (e.g. in contact lists, faculty cards, or generic "email: jsmith@school.org" patterns). These help infer the org's email pattern.
 
 Return ONLY a JSON object (no markdown fences, no explanation) in this exact format:
@@ -1619,6 +1625,8 @@ If no relevant contacts found, return: { "found": false, "sourceUrl": null, "ema
 CRITICAL name extraction rules:
 - ALWAYS extract the FULL name: first AND last name together. If a tile shows only a first name, click into the bio/about page or look at adjacent text (bio link, alt text, image filename) to find the last name.
 - If after searching you genuinely cannot find a last name, OMIT that contact entirely. Do NOT include parenthetical annotations like "(last name not listed)" or "(unknown)" in the name field. The name field must be a clean "First Last" string.
+- INITIALS ARE NOT NAMES. If a page shows a name as initials only (e.g. "C. T.", "T. H.", "J.D.", or any single-letter + period combination), do NOT include that contact. Either look elsewhere on the site to find the full first AND last name, or omit the contact. Initial-only entries lead to garbage email guesses.
+- A real name has at least 2 alphabetic characters in BOTH the first AND last token. "John D. Smith" is valid (middle initial is fine). "J. D." is not.
 - Do not invent or guess names. Only include people whose names are clearly stated on the page.
 
 Other rules:
@@ -1630,7 +1638,7 @@ Other rules:
     const data = await postJson('/api/anthropic', {
       model: ANTHROPIC_MODEL,
       max_tokens: 1200,
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }],
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }],
       messages: [{ role: 'user', content: prompt }],
     }, { retries: 1, timeoutMs: 50_000 });
 
@@ -1648,14 +1656,21 @@ Other rules:
       const parsed = JSON.parse(jsonMatch[0]);
       const contacts = Array.isArray(parsed.contacts) ? parsed.contacts : [];
       const exampleEmails = Array.isArray(parsed.exampleEmails) ? parsed.exampleEmails : [];
-      // Skip names that are obvious placeholders or single-token-only — they'd
-      // poison the merge logic. The prompt forbids these but Claude sometimes
-      // sneaks them through anyway.
+      // Skip names that are obvious placeholders, single-token-only, OR just
+      // initials (e.g. "C. T." or "J. D."). Each first/last token must have
+      // at least 2 alphabetic characters — single-letter "names" can't be
+      // resolved to real people and they poison the email pattern guesser.
+      // (Real example from LMP: scraper returned "C. T." -> guessed email
+      // "c.t@lakemaryprep.com" which is obviously useless.)
       const isUsableName = (name) => {
         if (typeof name !== 'string') return false;
         if (/\(.*not\s+listed.*\)|\(.*unknown.*\)/i.test(name)) return false;
-        if (name.trim().split(/\s+/).length < 2) return false;
-        return true;
+        const tokens = name.trim().split(/\s+/).filter(Boolean);
+        if (tokens.length < 2) return false;
+        // Each first + last token must have ≥2 alphabetic chars (middle
+        // initial tokens are fine — we only check the first and last).
+        const realNameToken = (t) => t.replace(/[^a-zA-Z]/g, '').length >= 2;
+        return realNameToken(tokens[0]) && realNameToken(tokens[tokens.length - 1]);
       };
       return {
         found: parsed.found && contacts.length > 0,
