@@ -1320,36 +1320,90 @@ export function applyEmailPattern(name, patternInfo) {
 }
 
 // Given a list of (name, email) examples at the same org, find the dominant
-// pattern by majority vote. Returns { pattern, domain, confidence } where
-// confidence is the fraction of examples that agree on the pattern.
-// Returns null if no usable pattern can be inferred.
+// pattern. Returns { pattern, domain, confidence, sampleCount }.
+//
+// Three strategies, in order:
+//   1. Majority vote across the 12 standard patterns (firstlast, flast, etc.)
+//   2. Heuristic detection of unusual patterns where local part starts with
+//      first initial and ends with last name (e.g. "beryden" = b+?+ryden).
+//      Returns 'flast' as the best guess we can offer.
+//   3. Pure fallback: if at least one example has a valid email, extract its
+//      domain and return 'flast' with low confidence so the user gets SOMETHING
+//      to verify. Better than nothing.
+//
+// Returns null only if no example has a parseable email at all.
 export function inferEmailPatternFromExamples(examples) {
   if (!Array.isArray(examples) || examples.length === 0) return null;
+
+  // Try standard pattern detection first
   const detected = examples
     .map(e => detectEmailPattern(e.name, e.email))
     .filter(Boolean);
-  if (detected.length === 0) return null;
 
-  // Count occurrences keyed by `pattern@domain`
-  const counts = new Map();
-  for (const d of detected) {
-    const key = `${d.pattern}@${d.domain}`;
-    counts.set(key, (counts.get(key) || 0) + 1);
+  if (detected.length > 0) {
+    // Count occurrences keyed by `pattern@domain`
+    const counts = new Map();
+    for (const d of detected) {
+      const key = `${d.pattern}@${d.domain}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    let bestKey = null;
+    let bestCount = 0;
+    for (const [key, count] of counts.entries()) {
+      if (count > bestCount) { bestKey = key; bestCount = count; }
+    }
+    const [pattern, domain] = bestKey.split('@');
+    return {
+      pattern,
+      domain,
+      confidence: bestCount / detected.length,
+      sampleCount: detected.length,
+    };
   }
-  // Pick the most common
-  let bestKey = null;
-  let bestCount = 0;
-  for (const [key, count] of counts.entries()) {
-    if (count > bestCount) { bestKey = key; bestCount = count; }
+
+  // Standard detection failed. Try heuristic: pick the first example whose
+  // local part starts with the first-initial AND contains the last name.
+  // This catches patterns like "beryden" (Brad Ryden) where there's an
+  // unknown char between f-initial and last name — we can't replicate the
+  // exact pattern but 'flast' is the closest standard pattern.
+  for (const ex of examples) {
+    if (!ex?.name || !ex?.email || !ex.email.includes('@')) continue;
+    const [localPart, dom] = ex.email.toLowerCase().split('@');
+    const parts = ex.name.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (parts.length < 2) continue;
+    const first = parts[0].replace(/[^a-z]/g, '');
+    const last = parts[parts.length - 1].replace(/[^a-z]/g, '');
+    if (!first || !last) continue;
+    if (localPart.startsWith(first[0]) && localPart.includes(last)) {
+      return {
+        pattern: 'flast',
+        domain: dom,
+        confidence: 0.4,
+        sampleCount: examples.length,
+        fallback: true,
+        note: `Non-standard pattern detected at this org (e.g. "${ex.email}" for ${ex.name}). Best guess uses firstinitial+lastname — verify before sending.`,
+      };
+    }
   }
-  if (!bestKey) return null;
-  const [pattern, domain] = bestKey.split('@');
-  return {
-    pattern,
-    domain,
-    confidence: bestCount / detected.length,
-    sampleCount: detected.length,
-  };
+
+  // Pure fallback: just grab the domain from any example and use 'flast'
+  for (const ex of examples) {
+    if (ex?.email && ex.email.includes('@')) {
+      const dom = ex.email.toLowerCase().split('@')[1];
+      if (dom) {
+        return {
+          pattern: 'flast',
+          domain: dom,
+          confidence: 0.3,
+          sampleCount: examples.length,
+          fallback: true,
+          note: 'Pattern could not be detected. Best guess uses firstinitial+lastname (most common at K-12/Higher Ed orgs) — verify before sending.',
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 // High-level helper: given a target name + known emails at the same org,
