@@ -4697,6 +4697,9 @@ function segmentBadgeColor(seg) {
 // =================================================================
 function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
   const [expanded, setExpanded] = useState({});
+  // Per-cluster "show all" toggle — when true, render every prospect in the
+  // cluster instead of just the first 20.
+  const [showAllInCluster, setShowAllInCluster] = useState({});
 
   return (
     <>
@@ -4726,18 +4729,30 @@ function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, res
               </div>
               {isOpen ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
             </div>
-            {isOpen && (
-              <div style={{ marginTop: '16px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', paddingTop: '16px' }}>
-                {cluster.prospects.slice(0, 20).map(p => (
-                  <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />
-                ))}
-                {cluster.prospects.length > 20 && (
-                  <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic' }}>
-                    +{cluster.prospects.length - 20} more in this cluster
-                  </div>
-                )}
-              </div>
-            )}
+            {isOpen && (() => {
+              const showAll = !!showAllInCluster[cluster.county];
+              const visible = showAll ? cluster.prospects : cluster.prospects.slice(0, 20);
+              const hiddenCount = cluster.prospects.length - visible.length;
+              return (
+                <div style={{ marginTop: '16px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', paddingTop: '16px' }}>
+                  {visible.map(p => (
+                    <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />
+                  ))}
+                  {cluster.prospects.length > 20 && (
+                    <div style={{ textAlign: 'center', padding: '12px' }}>
+                      <button
+                        style={{ ...styles.secondaryBtn, fontSize: '12px', padding: '6px 14px' }}
+                        onClick={() => setShowAllInCluster(prev => ({ ...prev, [cluster.county]: !showAll }))}
+                      >
+                        {showAll
+                          ? `Show first 20 (hide ${cluster.prospects.length - 20})`
+                          : `Show all ${cluster.prospects.length} prospects (${hiddenCount} more)`}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         );
       })}
