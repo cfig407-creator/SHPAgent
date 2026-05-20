@@ -851,7 +851,14 @@ export default function SHPProspectingAgent() {
     };
     setProspects(prev => [newProspect, ...prev]);
     setManualForm({ name: '', title: '', company: '', email: '', phone: '', city: '', county: '', segment: 'auto' });
-    showToast(`Added ${newProspect.name} to your pool`);
+    // Drop restrictive filters so the new prospect is guaranteed to be visible
+    // when the user switches to the Find tab to act on it.
+    setFilterOutreach('Active');
+    setFilterStatus('all');
+    setFilterSegment('all');
+    setFilterCounty('all');
+    setSearch('');
+    showToast(`Added ${newProspect.name} to your pool — visible in Find`);
   };
 
   // === Research ===
@@ -2760,8 +2767,11 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         if (!p.needsEnrichment) return false;
       } else if (filterOutreach !== 'all') {
         if (p.outreachStatus !== filterOutreach) return false;
-        // When viewing Active (default), hide enrichment-needed prospects (they need data work first)
-        if (filterOutreach === 'Active' && p.needsEnrichment) return false;
+        // When viewing Active (default), hide enrichment-needed prospects EXCEPT
+        // manual adds — the user just typed them, they're trusted data even if
+        // some fields are blank. Surface them with the "Needs enrichment" badge
+        // so the user still sees data gaps, but don't make them invisible.
+        if (filterOutreach === 'Active' && p.needsEnrichment && p.source !== 'Manual') return false;
       }
       if (filterStatus !== 'all' && p.status !== filterStatus) return false;
       if (filterSegment !== 'all' && p.segment !== filterSegment) return false;
