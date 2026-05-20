@@ -469,6 +469,19 @@ export default function SHPProspectingAgent() {
   // Persist Apollo cycle on every update (including auto-rotate at month boundary)
   useEffect(() => { saveApolloCycle(apolloCycle); }, [apolloCycle]);
 
+  // ── Rate-limit retry notifications ──
+  // api-client.js fires "shp:rate-limit-retry" events when it hits a 429 and
+  // schedules a backoff retry. Surface a single short toast so the user knows
+  // the app is waiting, not frozen.
+  useEffect(() => {
+    const onRateLimit = (e) => {
+      const seconds = Math.round((e.detail?.waitMs || 45000) / 1000);
+      showToast(`Anthropic rate limit hit — auto-retrying in ${seconds}s. Spread out clicks to avoid this.`, 'info');
+    };
+    window.addEventListener('shp:rate-limit-retry', onRateLimit);
+    return () => window.removeEventListener('shp:rate-limit-retry', onRateLimit);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Microsoft 365 connection status — check on mount + after OAuth redirect ──
   // Vercel redirects back with ?ms_connected=1 or ?ms_error=... after the
   // OAuth round-trip. We surface those once, then strip them from the URL so
@@ -1170,6 +1183,32 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
     // there (CAN-SPAM compliance — the address must be in every commercial email).
     const sigWithAddress = ensureAddressInSignature(config.signature, config.companyAddress);
 
+    // Convert verbose API error messages into a one-line friendly summary.
+    // The raw Anthropic rate-limit error is a 500-character wall of text with
+    // links; the user just needs to know "rate limited, wait, retry."
+    const summarizeError = (raw) => {
+      if (!raw || typeof raw !== 'string') return 'Unknown error';
+      const r = raw.toLowerCase();
+      if (/rate.?limit|exceed.*rate|tokens per minute|tpm/i.test(r)) {
+        return 'Rate limit hit — wait ~60s and try again';
+      }
+      if (/overload|529|temporarily unavailable/i.test(r)) {
+        return 'Anthropic API overloaded — try again in a moment';
+      }
+      if (/timeout|timed out|aborted/i.test(r)) {
+        return 'Request timed out — retry';
+      }
+      if (/401|unauthorized|api[_\s-]?key/i.test(r)) {
+        return 'API key issue — check Vercel env vars';
+      }
+      if (/500|internal[_\s-]?error/i.test(r)) {
+        return 'API error — retry';
+      }
+      // Generic fallback: take the first sentence, cap at 100 chars
+      const firstSentence = raw.split(/[.!?]\s/)[0].trim();
+      return firstSentence.length > 100 ? firstSentence.slice(0, 97) + '…' : firstSentence;
+    };
+
     // Helper: deterministic fallback (the previous behavior — kept as a safety net
     // so the user always gets *something* reviewable even when Claude is down).
     const fallbackCompose = (reason) => {
@@ -1180,8 +1219,9 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         avoid: recentVariants,
         softOptOut: config.softOptOut,
       });
+      const shortReason = summarizeError(reason);
       setDraftEmail({ subject: result.subject, body: result.body });
-      setDraftDiagnostic({ ...result.diagnostic, fallback: true, fallbackReason: reason });
+      setDraftDiagnostic({ ...result.diagnostic, fallback: true, fallbackReason: shortReason, fallbackRawReason: reason });
       setRecentVariants(prev => {
         const ids = [
           result.diagnostic.variantId,
@@ -1191,7 +1231,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         ].filter(Boolean);
         return [...prev, ...ids].slice(-9);
       });
-      showToast(`Draft composed (fallback) · ${reason}`, 'info');
+      showToast(`Fallback draft · ${shortReason}`, 'info');
     };
 
     try {
@@ -1650,14 +1690,38 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         return { found: false, contacts: [], sourceUrl: orgUrl, emailDomain: null, exampleEmails: [] };
       }
 
-      // Strip script/style/noscript blocks to slim the prompt before sending
-      // to Claude — they contribute no useful text and waste tokens.
+      // Aggressively compress HTML before sending to Claude. A typical staff
+      // directory page is ~40KB raw which is ~10k tokens — and we usually
+      // only need the 5KB of actual person/title content. Heavy compression
+      // keeps us well clear of Anthropic's 30k input tokens/minute rate cap
+      // even when chained with other API calls.
       const cleanedHtml = html
+        // Strip <head> entirely (meta tags, links, scripts)
+        .replace(/<head\b[\s\S]*?<\/head>/gi, '')
+        // Strip embedded scripts, styles, SVGs, comments — all token-heavy noise
         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
         .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
         .replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, '')
+        .replace(/<svg\b[\s\S]*?<\/svg>/gi, '')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        // Strip all HTML attributes except href/alt/title (useful for context).
+        // CSS classes, IDs, inline styles, data-* attrs are all dropped.
+        .replace(/<(\/?[a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g, (match, tag) => {
+          const hrefMatch = match.match(/\shref\s*=\s*["']([^"']+)["']/i);
+          const altMatch = match.match(/\salt\s*=\s*["']([^"']+)["']/i);
+          const titleMatch = match.match(/\stitle\s*=\s*["']([^"']+)["']/i);
+          const attrs = [];
+          if (hrefMatch) attrs.push(`href="${hrefMatch[1]}"`);
+          if (altMatch) attrs.push(`alt="${altMatch[1]}"`);
+          if (titleMatch) attrs.push(`title="${titleMatch[1]}"`);
+          return attrs.length > 0 ? `<${tag} ${attrs.join(' ')}>` : `<${tag}>`;
+        })
+        // Collapse whitespace
+        .replace(/>\s+</g, '><')
         .replace(/\s+/g, ' ')
-        .slice(0, 100_000); // additional cap — ~25k tokens worst case
+        .trim()
+        // Hard cap at 30KB (~7-8k tokens). Real staff data is rarely more.
+        .slice(0, 30_000);
 
       const extractPrompt = `You are extracting staff contacts from a fetched HTML page.
 
