@@ -81,6 +81,12 @@ export default function SHPProspectingAgent() {
   const [isSendingM365, setIsSendingM365] = useState(null); // prospect id currently sending
   // Open-tracking events keyed by prospect id: { [prospectId]: [{ trackingId, meta, opens }, ...] }
   const [opensByProspect, setOpensByProspect] = useState({});
+
+  // Per-org directory URLs — when set, the scraper uses web_fetch on the
+  // exact URL instead of trying to discover the page via web_search. Keyed
+  // by normalizeOrgKey so any record of "Lake Mary Prep" / "Lake Mary
+  // Preparatory School" shares the same URL.
+  const [directoryUrls, setDirectoryUrls] = useState({});
   const [hasAttemptedConnect, setHasAttemptedConnect] = useState(false);
 
   // Apollo quota — { creditsUsed, creditsTotal, creditsRemaining, planName }
@@ -304,6 +310,13 @@ export default function SHPProspectingAgent() {
     // clear storage when prospects has no user-added entries.
     window.__shp_hydrated_prospects__ = true;
 
+    // Hydrate per-org directory URLs (used by scrape override)
+    const savedDirectoryUrls = localStorage.getItem('shp_directory_urls_v1');
+    if (savedDirectoryUrls) {
+      try { setDirectoryUrls(JSON.parse(savedDirectoryUrls)); }
+      catch (e) { console.warn('[shp] failed to parse directory URLs:', e); }
+    }
+
     // Hydrate per-prospect drafts so compose state survives reloads.
     const savedDrafts = localStorage.getItem('shp_drafts_v1');
     if (savedDrafts) {
@@ -381,6 +394,40 @@ export default function SHPProspectingAgent() {
       catch (e) { console.warn('[shp] draft cache too large for localStorage:', e); }
     }
   }, [drafts]);
+
+  // Persist directory URL overrides (per-org)
+  useEffect(() => {
+    if (Object.keys(directoryUrls).length > 0) {
+      try { localStorage.setItem('shp_directory_urls_v1', JSON.stringify(directoryUrls)); }
+      catch (e) { console.warn('[shp] failed to persist directory URLs:', e); }
+    }
+  }, [directoryUrls]);
+
+  // Set the directory URL for an org (keyed by normalizeOrgKey so it covers
+  // all spelling variations of the same school/company).
+  const setDirectoryUrlForOrg = (companyName, url) => {
+    const key = normalizeOrgKey(companyName);
+    if (!key) {
+      showToast('Cannot key directory URL — org name is empty', 'error');
+      return;
+    }
+    if (!url) {
+      // Clear the URL
+      setDirectoryUrls(prev => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      showToast(`Cleared directory URL for ${companyName}`);
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      showToast('URL must start with http:// or https://', 'error');
+      return;
+    }
+    setDirectoryUrls(prev => ({ ...prev, [key]: url }));
+    showToast(`Saved directory URL for ${companyName} — next Find Peers will use it`);
+  };
 
   // === Persist user-added prospects (manual, Apollo, peers, cross-thread) ===
   // The seed list is bundled with the app and always reloads on mount. But
@@ -1581,6 +1628,13 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
   // names, titles, emails, phones. Free (no Apollo credits). Returns an array
   // of candidate objects with source: 'website'.
   const scrapeOrgDirectory = async (prospect) => {
+    // If the user has saved an explicit directory URL for this org, use it
+    // directly via web_fetch — far more reliable than searching for the right
+    // page. Lake Mary Prep is the canonical case: their filtered directory
+    // URL returns the 4 facilities staff perfectly, but the unfiltered
+    // directory returns admins via search.
+    const orgUrl = directoryUrls[normalizeOrgKey(prospect.company)] || null;
+
     const segmentHint = prospect.segment === 'K-12'
       ? 'private school — look for: director of facilities, director of plant operations, business manager, CFO, principal, head of school, director of operations, maintenance director'
       : prospect.segment === 'Higher Ed'
@@ -1589,23 +1643,31 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       ? 'local government — look for: city manager, director of public works, facilities director, director of operations, maintenance superintendent'
       : 'look for: director of facilities, director of operations, business manager, maintenance director';
 
+    // Build either a web_fetch-based prompt (when a saved URL exists) or a
+    // web_search-based prompt (when discovering the directory page).
+    const taskBlock = orgUrl
+      ? `Task:
+1. Use the web_fetch tool to fetch this URL: ${orgUrl}
+2. The page is the org's staff directory (or a filtered view of it). Extract every person visible.
+3. Include EVERY contact on the page — don't filter by title. The URL was hand-picked by the sales rep.
+4. ALSO: capture any sample employee email addresses visible on the page (e.g. in contact lists, faculty cards, or generic "email: jsmith@school.org" patterns). These help infer the org's email pattern.`
+      : `Task:
+1. Search for the org's staff directory. Useful queries:
+   - "${prospect.company} staff directory"
+   - "${prospect.company} faculty directory"
+   - "${prospect.company} facilities staff"
+   - "${prospect.company} director of facilities"
+   If the directory page has a search/filter URL parameter, try the filtered view but ALSO check the unfiltered page.
+2. Extract every person whose title is relevant: facilities, maintenance, plant operations, buildings & grounds, custodial, grounds, business manager, CFO, COO, head of school, superintendent, director of operations, principal. Include them all — better to over-include than miss the right contact.
+3. ALSO: capture any sample employee email addresses visible on the page (e.g. in contact lists, faculty cards, or generic "email: jsmith@school.org" patterns). These help infer the org's email pattern.`;
+
     const prompt = `You are helping a sales rep find the right contacts at an organization.
 
 Organization: "${prospect.company}"
 City: ${prospect.city || ''}, ${prospect.state || 'FL'}
 Type: ${segmentHint}
 
-Task:
-1. Search the web for the FACILITIES STAFF specifically. The org likely has many departments; we only care about facilities/maintenance/operations. Use targeted queries like:
-   - "${prospect.company} director of facilities"
-   - "${prospect.company} facilities manager"
-   - "${prospect.company} plant operations"
-   - "${prospect.company} maintenance director"
-   - "${prospect.company} staff directory facilities"
-   If the org's directory has a search/filter URL parameter, prefer that filtered view over the unfiltered directory.
-2. Extract every person whose title matches facilities, maintenance, plant operations, buildings & grounds, custodial, or grounds. ALSO include: business manager, CFO, COO, head of school, superintendent, director of operations — these are decision-makers who sign off on door/hardware purchases.
-3. SKIP everyone else. We do NOT want: admissions staff, communications/marketing, development/fundraising, instructors, coaches, registrars, IT directors, deans of academics. If the page is showing those, find a different page or use a search filter.
-4. ALSO: capture any sample employee email addresses visible on the page (e.g. in contact lists, faculty cards, or generic "email: jsmith@school.org" patterns). These help infer the org's email pattern.
+${taskBlock}
 
 Return ONLY a JSON object (no markdown fences, no explanation) in this exact format:
 {
@@ -1635,10 +1697,21 @@ Other rules:
 - exampleEmails should include ANY full name + email pairs you see (even if not in your contacts list) so we can detect the org's email pattern
 - Maximum 30 contacts`;
 
+    // When the user has saved an explicit directory URL, use Anthropic's
+    // web_fetch tool (Claude fetches the exact URL we tell it). Otherwise
+    // fall back to web_search for discovery. Tool name versions are pinned.
+    const toolConfig = orgUrl
+      ? [
+          { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 2, allowed_domains: [new URL(orgUrl).hostname] },
+        ]
+      : [
+          { type: 'web_search_20250305', name: 'web_search', max_uses: 8 },
+        ];
+
     const data = await postJson('/api/anthropic', {
       model: ANTHROPIC_MODEL,
       max_tokens: 1200,
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }],
+      tools: toolConfig,
       messages: [{ role: 'user', content: prompt }],
     }, { retries: 1, timeoutMs: 50_000 });
 
@@ -3241,6 +3314,9 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           results={findPeersResults}
           onAdd={(picked) => addPeersToPool(findPeersFor, picked)}
           onCancel={() => { setFindPeersFor(null); setFindPeersResults(null); }}
+          savedDirectoryUrl={findPeersFor ? (directoryUrls[normalizeOrgKey(findPeersFor.company)] || '') : ''}
+          onSetDirectoryUrl={(url) => setDirectoryUrlForOrg(findPeersFor.company, url)}
+          onRetry={() => multiThreadAccount(findPeersFor)}
         />
       )}
       {batchEnrichOpen && (
@@ -5519,7 +5595,7 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
 // =================================================================
 // === FIND PEERS MODAL (multi-thread accounts) ===
 // =================================================================
-function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel }) {
+function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel, savedDirectoryUrl, onSetDirectoryUrl, onRetry }) {
   const [picked, setPicked] = useState({});
 
   const togglePick = (candidateId) => {
@@ -5544,10 +5620,56 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel })
   return (
     <div className="shp-modal-overlay" style={styles.modalOverlay} onClick={onCancel}>
       <div style={{ ...styles.modalCard, maxWidth: '720px', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
-        <div style={{ marginBottom: '8px' }}>
+        <div style={{ marginBottom: '12px' }}>
           <div style={{ fontSize: '18px', fontWeight: 700 }}>Find peers at {parent.company}</div>
           <div style={{ fontSize: '12px', color: 'var(--text-3)', marginTop: '4px' }}>
             Multi-threading from <strong>{parent.name || '(unnamed)'}</strong> ({parent.title || 'unknown title'}). Search is free — adding to the pool is free. Apollo contacts without emails cost 1 credit each to enrich later. Website contacts with emails are ready to go.
+          </div>
+        </div>
+
+        {/* Directory URL override — when set, scraper uses web_fetch on the exact URL
+            instead of trying to discover the right directory page via web_search */}
+        <div style={{ marginBottom: '12px', padding: '10px 12px', background: 'var(--bg-sunk)', borderRadius: '6px', border: '1px solid var(--border)', fontSize: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 600, color: 'var(--text-2)' }}>Directory URL:</span>
+            {savedDirectoryUrl ? (
+              <>
+                <a href={savedDirectoryUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--info)', textDecoration: 'underline', maxWidth: '350px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {savedDirectoryUrl}
+                </a>
+                <button
+                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-3)', textDecoration: 'underline dotted', fontSize: '11px' }}
+                  onClick={() => {
+                    const url = window.prompt('Update directory URL (leave blank to clear):', savedDirectoryUrl);
+                    if (url !== null) onSetDirectoryUrl(url.trim());
+                  }}
+                >
+                  edit
+                </button>
+                {onRetry && (
+                  <button
+                    style={{ ...styles.secondaryBtn, fontSize: '11px', padding: '4px 10px' }}
+                    onClick={onRetry}
+                    disabled={isLoading}
+                  >
+                    {isLoading ? 'Searching…' : 'Re-run with this URL'}
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <span style={{ color: 'var(--text-3)' }}>none — using auto search</span>
+                <button
+                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--info)', textDecoration: 'underline dotted', fontSize: '11px' }}
+                  onClick={() => {
+                    const url = window.prompt(`Paste the org's directory URL (the exact page that lists facilities staff). The scraper will use this URL directly instead of searching for it.\n\nExample: https://${(parent.company || 'school').toLowerCase().replace(/[^a-z]+/g, '')}.com/about/directory`);
+                    if (url && url.trim()) onSetDirectoryUrl(url.trim());
+                  }}
+                >
+                  + paste a specific URL (recommended when auto search fails)
+                </button>
+              </>
+            )}
           </div>
         </div>
 

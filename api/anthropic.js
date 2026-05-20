@@ -39,6 +39,9 @@ export default async function handler(req, res) {
   if (Array.isArray(body.tools) && body.tools.some(t => t?.type?.startsWith('web_search'))) {
     betas.push('web-search-2025-03-05');
   }
+  if (Array.isArray(body.tools) && body.tools.some(t => t?.type?.startsWith('web_fetch'))) {
+    betas.push('web-fetch-2025-09-10');
+  }
   if (Array.isArray(body.mcp_servers) && body.mcp_servers.length > 0) {
     betas.push('mcp-client-2025-04-04');
   }
