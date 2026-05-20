@@ -14,7 +14,7 @@ import {
   customerCheck, detectEnrichmentNeeds,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
   buildColdEmailPrompt, buildDealTitle, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
-  composeEmail, stripEmDashes,
+  composeEmail, stripEmDashes, cleanProspectText,
   getMultiThreadTitles, classifyTier, scoreUnenrichedCandidate,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
@@ -244,11 +244,11 @@ export default function SHPProspectingAgent() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        // Migration: replace the old soft opt-out (singular "door & hardware isn't")
-        // with the corrected plural form. Only touches users who never edited it.
-        const OLD_OPT_OUT = `If door & hardware isn't on your radar, just let me know and I'll close the loop on my end.`;
-        if (parsed.softOptOut === OLD_OPT_OUT) {
-          parsed.softOptOut = DEFAULT_SOFT_OPT_OUT;
+        // Migration: normalize the saved opt-out through the grammar cleaner so
+        // any singular drift ("door and hardware isn't") gets rewritten to the
+        // plural form regardless of how it ended up that way.
+        if (typeof parsed.softOptOut === 'string') {
+          parsed.softOptOut = cleanProspectText(parsed.softOptOut);
         }
         setConfig(c => ({ ...c, ...parsed }));
       } catch (e) { console.warn('[shp] failed to parse saved config:', e); }
@@ -276,20 +276,24 @@ export default function SHPProspectingAgent() {
     if (savedDrafts) {
       try {
         const parsedDrafts = JSON.parse(savedDrafts);
-        // Migration: rewrite the old singular soft opt-out wherever it appears
-        // in cached draft bodies / follow-ups so previously generated drafts
-        // don't keep showing the wrong grammar.
-        const OLD = `If door & hardware isn't on your radar, just let me know and I'll close the loop on my end.`;
-        const NEW = `If doors and hardware aren't on your radar, just let me know and I'll close the loop on my end.`;
-        const swap = (s) => typeof s === 'string' ? s.split(OLD).join(NEW) : s;
+        // Migration: pass every cached draft body + subject + linkedinMsg + each
+        // follow-up through cleanProspectText so the singular-form opt-out
+        // (or any other grammar drift Claude introduced) gets rewritten in place.
+        // This way old drafts auto-correct on next page load without regenerating.
+        const fixField = (s) => typeof s === 'string' ? cleanProspectText(s) : s;
         for (const id of Object.keys(parsedDrafts)) {
           const d = parsedDrafts[id];
           if (!d) continue;
-          if (d.body) d.body = swap(d.body);
+          if (d.subject) d.subject = fixField(d.subject);
+          if (d.body) d.body = fixField(d.body);
+          if (d.linkedinMsg) d.linkedinMsg = fixField(d.linkedinMsg);
+          if (Array.isArray(d.subjectAlts)) d.subjectAlts = d.subjectAlts.map(fixField);
           if (d.followUps && typeof d.followUps === 'object') {
             for (const k of Object.keys(d.followUps)) {
               const fu = d.followUps[k];
-              if (fu?.body) fu.body = swap(fu.body);
+              if (!fu) continue;
+              if (fu.subject) fu.subject = fixField(fu.subject);
+              if (fu.body) fu.body = fixField(fu.body);
             }
           }
         }
@@ -1130,19 +1134,19 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           const fu = parsed.followUps[key];
           if (fu && typeof fu === 'object') {
             cleanFollowUps[key] = {
-              subject: stripEmDashes(fu.subject || ''),
-              body: stripEmDashes(fu.body || ''),
+              subject: cleanProspectText(fu.subject || ''),
+              body: cleanProspectText(fu.body || ''),
             };
           }
         }
       }
       setDraftEmail({
-        subject: stripEmDashes(parsed.subject),
-        body: stripEmDashes(parsed.body),
+        subject: cleanProspectText(parsed.subject),
+        body: cleanProspectText(parsed.body),
         subjectAlts: Array.isArray(parsed.subjectAlts)
-          ? parsed.subjectAlts.map(s => stripEmDashes(s))
+          ? parsed.subjectAlts.map(s => cleanProspectText(s))
           : [],
-        linkedinMsg: typeof parsed.linkedinMsg === 'string' ? stripEmDashes(parsed.linkedinMsg) : '',
+        linkedinMsg: typeof parsed.linkedinMsg === 'string' ? cleanProspectText(parsed.linkedinMsg) : '',
         followUps: cleanFollowUps,
       });
       setDraftDiagnostic({
@@ -2687,7 +2691,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           const parsed = JSON.parse(jsonMatch[0]);
           if (parsed?.subject && parsed?.body) {
             // Strip em/en dashes from Claude's output before storing
-            draft = { subject: stripEmDashes(parsed.subject), body: stripEmDashes(parsed.body) };
+            draft = { subject: cleanProspectText(parsed.subject), body: cleanProspectText(parsed.body) };
           }
         }
       } catch { /* fall through to deterministic below */ }

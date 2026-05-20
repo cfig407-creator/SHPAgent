@@ -642,6 +642,32 @@ export function stripEmDashes(text) {
     .replace(/  +/g, ' ');       // collapse runs of spaces
 }
 
+// === GRAMMAR NORMALIZER ===
+// Claude keeps "fixing" plural phrases back to singular in soft opt-outs
+// (e.g., "doors and hardware aren't" → "door and hardware isn't") because
+// the singular reads as a compound noun in some patterns. This applies
+// targeted regex rewrites to lock the plural form everywhere it shows up.
+// Run alongside stripEmDashes on every prospect-facing string.
+export function normalizeGrammar(text) {
+  if (typeof text !== 'string') return text;
+  return text
+    // "If door & hardware isn't" → "If doors and hardware aren't"
+    .replace(/\bdoor\s*&\s*hardware\s+isn'?t\b/gi, "doors and hardware aren't")
+    .replace(/\bdoor\s+and\s+hardware\s+isn'?t\b/gi, "doors and hardware aren't")
+    // Catch the plural noun + singular verb mistake: "doors and hardware isn't"
+    .replace(/\bdoors\s+and\s+hardware\s+isn'?t\b/gi, "doors and hardware aren't")
+    // "If door & hardware is/are" — normalize the "is" form too
+    .replace(/\bdoor\s*&\s*hardware\s+is\b/gi, 'doors and hardware are')
+    .replace(/\bdoor\s+and\s+hardware\s+is\b/gi, 'doors and hardware are')
+    // The "& " → "and " in opt-out context (rare, but Claude sometimes copies it)
+    .replace(/\bdoor\s*&\s*hardware\b/gi, 'doors and hardware');
+}
+
+// Run both cleaners. Convenience wrapper for the call sites that apply both.
+export function cleanProspectText(text) {
+  return normalizeGrammar(stripEmDashes(text));
+}
+
 // === COMPOSER ===
 // Picks pieces from each bank based on prospect context, fills placeholders,
 // returns a complete email. Pure JavaScript — no API calls.
@@ -698,8 +724,8 @@ Best,
 ${signature || DEFAULT_SIGNATURE}`;
 
     return {
-      subject: stripEmDashes(subject),
-      body: stripEmDashes(fullBody),
+      subject: cleanProspectText(subject),
+      body: cleanProspectText(fullBody),
       diagnostic: {
         composer: 'deterministic',
         variantId: fullVariant.id,
@@ -1528,7 +1554,9 @@ Forbidden opener moves (no exceptions):
   × Disclosing research ("I noticed...", "I saw that...", "Your recent...")
 
 REQUIRED — always include regardless of structure:
-  • Soft opt-out on its own paragraph BEFORE sign-off:
+  • Soft opt-out on its own paragraph BEFORE sign-off. Use this line VERBATIM,
+    word-for-word, do not paraphrase, do not change "doors" to "door", do not
+    change "aren't" to "isn't":
     "${softOptOut}"
   • Signature block verbatim (CAN-SPAM — physical address required)
 
