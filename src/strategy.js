@@ -1247,6 +1247,35 @@ export function getFacilitiesSearchTitles() {
   return FACILITIES_KEYWORDS;
 }
 
+// === ORG NAME NORMALIZATION ===
+// Org records come in many flavors of the same name: "Lake Mary Prep",
+// "Lake Mary Preparatory School", "Lake Mary Preparatory School Inc."
+// Lowercase+collapse-whitespace matching treats them as DIFFERENT orgs and
+// breaks any cross-record reasoning (e.g. inferring an email pattern from
+// one record's email when guessing for peers at the same school).
+//
+// normalizeOrgKey strips noise tokens (suffixes, articles, common modifiers
+// like "Preparatory" / "Prep" / "School") and produces a canonical key by
+// sorting the remaining significant tokens. Lake Mary variants all collapse
+// to "lake|mary".
+const ORG_NOISE_WORDS = new Set([
+  'inc', 'llc', 'corp', 'corporation', 'company', 'co', 'ltd', 'the',
+  'school', 'schools', 'preparatory', 'prep', 'academy',
+  'district', 'county', 'city', 'town', 'village',
+  'university', 'college', 'institute', 'center', 'centre',
+  'department', 'dept', 'of', 'and',
+]);
+
+export function normalizeOrgKey(name) {
+  if (!name) return '';
+  return name.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(t => t && !ORG_NOISE_WORDS.has(t))
+    .sort()
+    .join('|');
+}
+
 // === EMAIL PATTERN INFERENCE ===
 // When Apollo gives us a first name only but the website has the full name,
 // and we know at least one verified email at the same org, we can guess
@@ -1326,14 +1355,14 @@ export function applyEmailPattern(name, patternInfo) {
 //   1. Majority vote across the 12 standard patterns (firstlast, flast, etc.)
 //   2. Heuristic detection of unusual patterns where local part starts with
 //      first initial and ends with last name (e.g. "beryden" = b+?+ryden).
-//      Returns 'flast' as the best guess we can offer.
+//      Returns 'flast' as the best guess we can offer at 0.4 confidence.
 //   3. Pure fallback: if at least one example has a valid email, extract its
-//      domain and return 'flast' with low confidence so the user gets SOMETHING
+//      domain and return 'flast' at 0.3 confidence so the user gets SOMETHING
 //      to verify. Better than nothing.
 //
 // Returns null only if no example has a parseable email at all.
 export function inferEmailPatternFromExamples(examples) {
-  if (!Array.isArray(examples) || examples.length === 0) return null;
+  if (!Array.isArray(examples)) examples = [];
 
   // Try standard pattern detection first
   const detected = examples

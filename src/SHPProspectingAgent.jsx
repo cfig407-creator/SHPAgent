@@ -16,7 +16,7 @@ import {
   buildColdEmailPrompt, buildDealTitle, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
   composeEmail, stripEmDashes, cleanProspectText,
   getMultiThreadTitles, getFacilitiesSearchTitles, classifyTier, scoreUnenrichedCandidate,
-  guessEmailForName, inferEmailPatternFromExamples,
+  guessEmailForName, inferEmailPatternFromExamples, normalizeOrgKey,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
 import { apiFetch, postJson } from './api-client.js';
@@ -1517,11 +1517,12 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       // emails, and (b) sample emails the scraper found. Apply to the merged
       // name to generate a guess.
       if (!merged.email && tokenCount(merged.name) >= 2) {
-        const sameOrgNorm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-        const orgKey = sameOrgNorm(prospect.company);
+        // Use normalizeOrgKey so "Lake Mary Prep" matches "Lake Mary
+        // Preparatory School Inc." — same org, different formatting.
+        const orgKey = normalizeOrgKey(prospect.company);
         const knownExamples = [];
         for (const p of prospects) {
-          if (sameOrgNorm(p.company) === orgKey && p.name && p.email && p.id !== prospect.id) {
+          if (normalizeOrgKey(p.company) === orgKey && p.name && p.email && p.id !== prospect.id) {
             knownExamples.push({ name: p.name, email: p.email });
           }
         }
@@ -1885,10 +1886,13 @@ Other rules:
     //   2. Apollo candidates that came back with verified emails
     //   3. Website-scraped exampleEmails block
     // Then infer the dominant pattern and apply to any candidates without emails.
-    const sameOrgNorm = normalize(prospect.company);
+    // Use normalizeOrgKey so "Lake Mary Prep" matches "Lake Mary Preparatory
+    // School Inc." — same org, formal vs. casual naming. Critical: this is how
+    // we pull existing pool members' emails into the pattern guesser.
+    const sameOrgKey = normalizeOrgKey(prospect.company);
     const knownExamples = [];
     for (const p of prospects) {
-      if (normalize(p.company) === sameOrgNorm && p.name && p.email) {
+      if (normalizeOrgKey(p.company) === sameOrgKey && p.name && p.email) {
         knownExamples.push({ name: p.name, email: p.email });
       }
     }
