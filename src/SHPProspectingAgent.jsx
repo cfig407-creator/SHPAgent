@@ -143,6 +143,10 @@ export default function SHPProspectingAgent() {
 
   // Prospect pool — seed data + manually added + Apollo-found
   const [prospects, setProspects] = useState(() => normalizeSeed(seedData));
+  // Snapshot of seed IDs so we can identify which prospects are user-added
+  // (manual, Apollo search, peers, cross-thread, etc.) and need persistence.
+  // The seed data is bundled with the app — only user-added rows need storage.
+  const seedIdSet = useMemo(() => new Set(normalizeSeed(seedData).map(p => p.id)), []);
   const [filterSegment, setFilterSegment] = useState('all');
   const [filterCounty, setFilterCounty] = useState('all');
   const [filterStatus, setFilterStatus] = useState('Ready');
@@ -271,6 +275,26 @@ export default function SHPProspectingAgent() {
       try { setResearchData(JSON.parse(savedResearch)); }
       catch (e) { console.warn('[shp] failed to parse saved research:', e); }
     }
+    // Hydrate user-added prospects (manual, Apollo finds, peers, cross-thread)
+    // so they survive page reloads. The seed pool was already loaded on
+    // useState init; we just prepend any non-seed prospects from storage.
+    const savedAdded = localStorage.getItem('shp_prospects_added_v1');
+    if (savedAdded) {
+      try {
+        const parsed = JSON.parse(savedAdded);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setProspects(prev => {
+            const existingIds = new Set(prev.map(p => p.id));
+            const newOnes = parsed.filter(p => !existingIds.has(p.id));
+            return [...newOnes, ...prev];
+          });
+        }
+      } catch (e) { console.warn('[shp] failed to parse saved adds:', e); }
+    }
+    // Sentinel — tells the persist effect that hydration ran, so it's safe to
+    // clear storage when prospects has no user-added entries.
+    window.__shp_hydrated_prospects__ = true;
+
     // Hydrate per-prospect drafts so compose state survives reloads.
     const savedDrafts = localStorage.getItem('shp_drafts_v1');
     if (savedDrafts) {
@@ -348,6 +372,29 @@ export default function SHPProspectingAgent() {
       catch (e) { console.warn('[shp] draft cache too large for localStorage:', e); }
     }
   }, [drafts]);
+
+  // === Persist user-added prospects (manual, Apollo, peers, cross-thread) ===
+  // The seed list is bundled with the app and always reloads on mount. But
+  // anything the user added during a session was lost on refresh — this
+  // captures everything not in the seed and persists it under a dedicated key.
+  useEffect(() => {
+    if (seedIdSet.size === 0) return; // guard during first render
+    const added = prospects.filter(p => !seedIdSet.has(p.id));
+    try {
+      if (added.length > 0) {
+        localStorage.setItem('shp_prospects_added_v1', JSON.stringify(added));
+      } else {
+        // No user adds — but don't clobber storage on initial render before
+        // hydration has occurred. Only clear when we know hydration ran.
+        // Sentinel set by the hydrate effect tells us it's safe.
+        if (window.__shp_hydrated_prospects__) {
+          localStorage.removeItem('shp_prospects_added_v1');
+        }
+      }
+    } catch (e) {
+      console.warn('[shp] user-added prospect cache write failed:', e);
+    }
+  }, [prospects, seedIdSet]);
 
   // When the active prospect changes, restore their stored draft (or clear the
   // compose area so the previous prospect's copy doesn't bleed through).
