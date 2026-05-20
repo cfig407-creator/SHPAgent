@@ -284,9 +284,17 @@ export default function SHPProspectingAgent() {
       try {
         const parsed = JSON.parse(savedAdded);
         if (Array.isArray(parsed) && parsed.length > 0) {
+          // Migration: strip placeholder text like "(last name not listed)"
+          // from existing names so the merge / enrich pipeline can work cleanly
+          // on legacy records added before the scraper prompt was hardened.
+          const cleaned = parsed.map(p => {
+            if (!p?.name || typeof p.name !== 'string') return p;
+            const newName = p.name.replace(/\s*\([^)]*\)\s*/g, '').trim();
+            return newName !== p.name ? { ...p, name: newName } : p;
+          });
           setProspects(prev => {
             const existingIds = new Set(prev.map(p => p.id));
-            const newOnes = parsed.filter(p => !existingIds.has(p.id));
+            const newOnes = cleaned.filter(p => !existingIds.has(p.id));
             return [...newOnes, ...prev];
           });
         }
@@ -1465,9 +1473,23 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       //   1. Apollo verified email (highest confidence)
       //   2. Website directory email (free, straight from the org)
       //   3. Apollo unverified email (fallback)
+      //   4. Pattern-guessed from existing org emails (final fallback)
+      //
+      // Name selection: prefer whichever source has the FULLEST name. Apollo
+      // often returns first-name-only ("Darren") while the website has the
+      // complete record ("Darren Allgaier"). Take the longer one.
+      const tokenCount = (s) => (s || '').trim().split(/\s+/).filter(Boolean).length;
+      const apolloName = apolloPerson?.name || '';
+      const webName = webPerson?.name || '';
+      const bestName = tokenCount(webName) > tokenCount(apolloName)
+        ? webName
+        : (apolloName || webName || cleanProspectName(prospect.name).name);
+
       const merged = {
-        name: apolloPerson?.name || webPerson?.name || prospect.name,
-        title: apolloPerson?.title || webPerson?.title || prospect.title,
+        name: bestName,
+        title: webPerson?.title && tokenCount(webPerson.title) > tokenCount(apolloPerson?.title || '')
+          ? webPerson.title
+          : (apolloPerson?.title || webPerson?.title || prospect.title),
         email: '',
         emailStatus: '',
         emailSource: '',
@@ -1489,6 +1511,36 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         merged.emailSource = 'apollo';
       }
 
+      // === EMAIL PATTERN GUESSING — final fallback ===
+      // If we have a full name but no email from any source, try to infer the
+      // org's pattern from (a) existing prospects at the same company with
+      // emails, and (b) sample emails the scraper found. Apply to the merged
+      // name to generate a guess.
+      if (!merged.email && tokenCount(merged.name) >= 2) {
+        const sameOrgNorm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const orgKey = sameOrgNorm(prospect.company);
+        const knownExamples = [];
+        for (const p of prospects) {
+          if (sameOrgNorm(p.company) === orgKey && p.name && p.email && p.id !== prospect.id) {
+            knownExamples.push({ name: p.name, email: p.email });
+          }
+        }
+        const scrapedExamples = (webResult.status === 'fulfilled' && webResult.value?.exampleEmails) || [];
+        for (const ex of scrapedExamples) {
+          if (ex?.name && ex?.email) knownExamples.push({ name: ex.name, email: ex.email });
+        }
+        if (knownExamples.length > 0) {
+          const guess = guessEmailForName(merged.name, knownExamples);
+          if (guess) {
+            merged.email = guess.email;
+            merged.emailStatus = 'guessed';
+            merged.emailSource = 'pattern';
+            merged.emailPattern = guess.patternUsed;
+            merged.emailConfidence = guess.confidence;
+          }
+        }
+      }
+
       // Store proposal with source attribution for the review panel
       setProposedEnrichment(prev => ({
         ...prev,
@@ -1499,17 +1551,19 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
             apollo: !!apolloPerson,
             website: !!webPerson,
             websiteUrl: webSourceUrl,
+            patternGuessed: merged.emailSource === 'pattern',
           },
         },
       }));
 
       // Toast reflects which source(s) contributed
+      const guessedNote = merged.emailSource === 'pattern' ? ' · pattern-guessed email (verify before sending)' : '';
       if (apolloPerson && webPerson) {
-        showToast(`Apollo + website both matched ${merged.name} — review and apply`);
+        showToast(`Apollo + website both matched ${merged.name}${guessedNote} — review and apply`);
       } else if (webPerson && !apolloPerson) {
-        showToast(`Website directory matched ${merged.name} (0 Apollo credits used) — review and apply`);
+        showToast(`Website directory matched ${merged.name} (0 Apollo credits used)${guessedNote} — review and apply`);
       } else {
-        showToast(`Apollo found ${merged.name} — review and apply`);
+        showToast(`Apollo found ${merged.name}${guessedNote} — review and apply`);
       }
       // Refresh quota in the background so the warning ticker stays accurate
       fetchApolloQuota();
@@ -1626,25 +1680,63 @@ Other rules:
   };
 
   // Match a named person against scraped directory contacts.
-  // Tries exact name match first, then first+last fallback.
+  // Tries exact match → first+last → first-name-only fallback (key case:
+  // Apollo returns "Darren" and the website has "Darren Allgaier"; this
+  // returns the website record so the merge can promote the full name).
+  // Also strips placeholder parentheticals like "(last name not listed)"
+  // so legacy bad data doesn't break matching.
   const matchPersonInDirectory = (contacts, fullName) => {
     if (!Array.isArray(contacts) || !fullName) return null;
-    const norm = (s) => (s || '').toLowerCase().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
+    const norm = (s) => (s || '')
+      .toLowerCase()
+      .replace(/\([^)]*\)/g, '')         // strip parenthetical placeholders
+      .replace(/[^a-z\s]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
     const target = norm(fullName);
     if (!target) return null;
+    const targetParts = target.split(' ').filter(Boolean);
+    if (targetParts.length === 0) return null;
+
     // Exact normalized match first
     const exact = contacts.find(c => norm(c.name) === target);
     if (exact) return exact;
-    // First + last name match (handles middle initials, suffixes)
-    const targetParts = target.split(' ');
-    if (targetParts.length < 2) return null;
-    const tFirst = targetParts[0];
-    const tLast = targetParts[targetParts.length - 1];
-    return contacts.find(c => {
-      const parts = norm(c.name).split(' ');
-      if (parts.length < 2) return false;
-      return parts[0] === tFirst && parts[parts.length - 1] === tLast;
-    }) || null;
+
+    // First + last match (handles middle initials, suffixes)
+    if (targetParts.length >= 2) {
+      const tFirst = targetParts[0];
+      const tLast = targetParts[targetParts.length - 1];
+      const flMatch = contacts.find(c => {
+        const parts = norm(c.name).split(' ').filter(Boolean);
+        if (parts.length < 2) return false;
+        return parts[0] === tFirst && parts[parts.length - 1] === tLast;
+      });
+      if (flMatch) return flMatch;
+    }
+
+    // First-name-only fallback: target is a single token, find a contact whose
+    // first token matches AND who has a full name. Only return a hit when
+    // exactly one such contact exists — multiple "Darrens" at one org is
+    // ambiguous and we shouldn't guess.
+    if (targetParts.length === 1) {
+      const tFirst = targetParts[0];
+      const candidates = contacts.filter(c => {
+        const parts = norm(c.name).split(' ').filter(Boolean);
+        return parts.length >= 2 && parts[0] === tFirst;
+      });
+      if (candidates.length === 1) return candidates[0];
+    }
+
+    return null;
+  };
+
+  // Strip placeholder text like "(last name not listed)" from a name so it
+  // doesn't propagate through the data layer. Returns the cleaned name plus
+  // a flag indicating whether the original had placeholder text.
+  const cleanProspectName = (name) => {
+    if (!name || typeof name !== 'string') return { name: name || '', wasPlaceholder: false };
+    const cleaned = name.replace(/\s*\([^)]*\)\s*/g, '').trim();
+    return { name: cleaned, wasPlaceholder: cleaned !== name };
   };
 
   // === Multi-thread: find peers at the same org ===
@@ -2444,19 +2536,44 @@ Other rules:
       // Update fields where the proposal has data — but never overwrite a non-empty existing value
       // unless the proposed email is "verified" (Apollo) or "directory" (org website)
       const update = { ...p };
+
+      // NAME: upgrade if the proposal has a fuller name (e.g. "Darren" → "Darren Allgaier")
+      // or if the existing name has placeholder text like "(last name not listed)".
+      const tokenCount = (s) => (s || '').trim().split(/\s+/).filter(Boolean).length;
+      const existingHasPlaceholder = /\([^)]*\)/.test(p.name || '');
+      if (apollo.name && (existingHasPlaceholder || tokenCount(apollo.name) > tokenCount(p.name))) {
+        update.name = apollo.name;
+      }
+
+      // EMAIL: keep all existing rules + accept pattern-guessed emails as a final fallback
       if (apollo.email && (apollo.emailStatus === 'verified' || apollo.emailStatus === 'directory')) {
         // Always prefer a verified Apollo email or a website-directory email
         update.email = apollo.email;
+        update.emailStatus = apollo.emailStatus;
+        update.emailSource = apollo.emailSource;
+      } else if (apollo.email && apollo.emailStatus === 'guessed' && !p.email) {
+        // Pattern-guessed: only fill if the prospect has no email at all
+        update.email = apollo.email;
+        update.emailStatus = 'guessed';
+        update.emailSource = 'pattern';
+        update.emailPattern = apollo.emailPattern;
+        update.emailConfidence = apollo.emailConfidence;
       } else if (apollo.email && (!p.email || /(gmail|yahoo|hotmail|aol|comcast)/i.test(p.email))) {
         // Use Apollo email if existing is personal/missing, even if not "verified"
         update.email = apollo.email;
+        update.emailStatus = apollo.emailStatus || 'apollo';
+        update.emailSource = apollo.emailSource || 'apollo';
       }
       if (apollo.phone && !p.phone) update.phone = apollo.phone;
-      if (apollo.title && (!p.title || p.title.toLowerCase() === 'student')) update.title = apollo.title;
+      if (apollo.title && (!p.title || p.title.toLowerCase() === 'student' || tokenCount(apollo.title) > tokenCount(p.title))) {
+        update.title = apollo.title;
+      }
       if (apollo.linkedinUrl) update.linkedinUrl = apollo.linkedinUrl;
       // linkedinUrl also saved to overrides below so it survives page reloads
       update.enrichedAt = new Date().toISOString();
-      update.enrichedBy = proposal.sources?.website && !proposal.sources?.apollo ? 'website' : 'apollo';
+      update.enrichedBy = proposal.sources?.patternGuessed
+        ? 'pattern-guess'
+        : (proposal.sources?.website && !proposal.sources?.apollo ? 'website' : 'apollo');
       return update;
     }));
 
