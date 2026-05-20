@@ -16,6 +16,7 @@ import {
   buildColdEmailPrompt, buildDealTitle, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
   composeEmail, stripEmDashes, cleanProspectText,
   getMultiThreadTitles, getFacilitiesSearchTitles, classifyTier, scoreUnenrichedCandidate,
+  guessEmailForName, inferEmailPatternFromExamples,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
 import { apiFetch, postJson } from './api-client.js';
@@ -1541,24 +1542,35 @@ Type: ${segmentHint}
 
 Task:
 1. Search the web for "${prospect.company} staff directory" OR "${prospect.company} faculty directory" OR "${prospect.company} employee directory" OR "${prospect.company} administration team"
-2. If you find a directory page, extract every person whose title matches facilities, operations, maintenance, plant, business manager, CFO, principal, superintendent, or director roles.
+2. If you find a directory page, extract every person whose title matches facilities, operations, maintenance, plant, buildings & grounds, business manager, CFO, principal, superintendent, custodial, or director roles.
 3. Also look for a general "Contact Us" or "About" page if no directory exists.
+4. ALSO: capture any sample employee email addresses visible on the page (e.g. in contact lists, faculty cards, or generic "email: jsmith@school.org" patterns). These help infer the org's email pattern.
 
 Return ONLY a JSON object (no markdown fences, no explanation) in this exact format:
 {
   "found": true,
   "sourceUrl": "https://...",
+  "emailDomain": "school.org",
+  "exampleEmails": [
+    { "name": "Jane Smith", "email": "jsmith@school.org" }
+  ],
   "contacts": [
     { "name": "Jane Smith", "title": "Director of Facilities", "email": "jsmith@school.org", "phone": "407-555-1234" }
   ]
 }
 
-If no relevant contacts found, return: { "found": false, "sourceUrl": null, "contacts": [] }
+If no relevant contacts found, return: { "found": false, "sourceUrl": null, "emailDomain": null, "exampleEmails": [], "contacts": [] }
 
-Rules:
+CRITICAL name extraction rules:
+- ALWAYS extract the FULL name: first AND last name together. If a tile shows only a first name, click into the bio/about page or look at adjacent text (bio link, alt text, image filename) to find the last name.
+- If after searching you genuinely cannot find a last name, OMIT that contact entirely. Do NOT include parenthetical annotations like "(last name not listed)" or "(unknown)" in the name field. The name field must be a clean "First Last" string.
+- Do not invent or guess names. Only include people whose names are clearly stated on the page.
+
+Other rules:
 - Only include people whose titles are relevant to facilities, operations, maintenance, or purchasing decisions
-- Email and phone are optional — only include if clearly stated on the page
-- Maximum 12 contacts`;
+- Email and phone are optional, only include if clearly stated on the page
+- exampleEmails should include ANY full name + email pairs you see (even if not in your contacts list) so we can detect the org's email pattern
+- Maximum 30 contacts`;
 
     const data = await postJson('/api/anthropic', {
       model: ANTHROPIC_MODEL,
@@ -1580,14 +1592,26 @@ Rules:
     try {
       const parsed = JSON.parse(jsonMatch[0]);
       const contacts = Array.isArray(parsed.contacts) ? parsed.contacts : [];
+      const exampleEmails = Array.isArray(parsed.exampleEmails) ? parsed.exampleEmails : [];
+      // Skip names that are obvious placeholders or single-token-only — they'd
+      // poison the merge logic. The prompt forbids these but Claude sometimes
+      // sneaks them through anyway.
+      const isUsableName = (name) => {
+        if (typeof name !== 'string') return false;
+        if (/\(.*not\s+listed.*\)|\(.*unknown.*\)/i.test(name)) return false;
+        if (name.trim().split(/\s+/).length < 2) return false;
+        return true;
+      };
       return {
         found: parsed.found && contacts.length > 0,
         sourceUrl: parsed.sourceUrl || null,
+        emailDomain: parsed.emailDomain || null,
+        exampleEmails: exampleEmails.filter(e => e?.name && e?.email && isUsableName(e.name)),
         contacts: contacts
-          .filter(c => c?.name)
+          .filter(c => c?.name && isUsableName(c.name))
           .map((c, i) => ({
             candidateId: `web_${Date.now()}_${i}`,
-            name: c.name,
+            name: c.name.trim(),
             title: c.title || '',
             email: c.email || '',
             phone: c.phone || '',
@@ -1597,7 +1621,7 @@ Rules:
           })),
       };
     } catch {
-      return { found: false, contacts: [], sourceUrl: null };
+      return { found: false, contacts: [], sourceUrl: null, emailDomain: null, exampleEmails: [] };
     }
   };
 
@@ -1695,29 +1719,116 @@ Rules:
       console.warn('[shp] Apollo peer search failed:', apolloResult.reason?.message);
     }
 
-    // Website candidates
+    // Website candidates + provenance data for pattern inference
     let webCandidates = [];
     let webSourceUrl = null;
+    let exampleEmails = [];
+    let scrapedEmailDomain = null;
     if (webResult.status === 'fulfilled' && webResult.value?.found) {
       webCandidates = webResult.value.contacts || [];
       webSourceUrl = webResult.value.sourceUrl;
+      exampleEmails = webResult.value.exampleEmails || [];
+      scrapedEmailDomain = webResult.value.emailDomain || null;
     } else if (webResult.status === 'rejected') {
       console.warn('[shp] Website scrape failed:', webResult.reason?.message);
     }
 
-    // Dedup: if a name appears in both, keep the Apollo record (has apolloId for enrichment)
-    // and annotate it with any email found on the website
-    const apolloNames = new Set(apolloCandidates.map(c => normalize(c.name)));
-    const dedupedWeb = webCandidates.filter(c => !apolloNames.has(normalize(c.name)));
+    // === SMART MERGE: Apollo first-name + website full-name → one record ===
+    // Apollo often returns "Darren" while the website has "Darren Allgaier".
+    // Match them by first-name + same-org and combine: full name from web,
+    // Apollo's id for enrichment, web's email if Apollo lacks one.
+    const firstNameOnly = (name) => normalize(name).split(' ').length === 1;
+    const firstToken = (name) => normalize(name).split(' ')[0];
+    const usedWebIndices = new Set();
+    const mergedRecords = [];
+    for (const apc of apolloCandidates) {
+      if (firstNameOnly(apc.name)) {
+        const target = firstToken(apc.name);
+        const matchIdx = webCandidates.findIndex((wc, idx) => {
+          if (usedWebIndices.has(idx)) return false;
+          return firstToken(wc.name) === target && !firstNameOnly(wc.name);
+        });
+        if (matchIdx >= 0) {
+          usedWebIndices.add(matchIdx);
+          const wm = webCandidates[matchIdx];
+          mergedRecords.push({
+            ...apc,
+            name: wm.name,                                    // upgrade to full name
+            title: wm.title || apc.title,                     // prefer richer title
+            email: apc.email || wm.email || '',
+            phone: apc.phone || wm.phone || '',
+            photoUrl: apc.photoUrl || '',
+            sourceUrl: wm.sourceUrl || null,
+            source: 'apollo+website',
+          });
+          continue;
+        }
+      }
+      // Otherwise: try exact-name dedup with web records
+      const exactIdx = webCandidates.findIndex((wc, idx) =>
+        !usedWebIndices.has(idx) && normalize(wc.name) === normalize(apc.name)
+      );
+      if (exactIdx >= 0) {
+        usedWebIndices.add(exactIdx);
+        const wm = webCandidates[exactIdx];
+        mergedRecords.push({
+          ...apc,
+          email: apc.email || wm.email || '',
+          phone: apc.phone || wm.phone || '',
+          sourceUrl: wm.sourceUrl || null,
+          source: 'apollo+website',
+        });
+      } else {
+        mergedRecords.push(apc);
+      }
+    }
+    // Add web-only candidates that didn't match any Apollo record
+    for (let i = 0; i < webCandidates.length; i++) {
+      if (!usedWebIndices.has(i)) mergedRecords.push(webCandidates[i]);
+    }
 
-    // Merge: Apollo first (richer for enrichment), then web-only additions
-    const merged = [...apolloCandidates, ...dedupedWeb];
+    // === EMAIL PATTERN INFERENCE + GUESSING ===
+    // Collect every known (name, email) pair at this org from three sources:
+    //   1. Existing pool members at the same company
+    //   2. Apollo candidates that came back with verified emails
+    //   3. Website-scraped exampleEmails block
+    // Then infer the dominant pattern and apply to any candidates without emails.
+    const sameOrgNorm = normalize(prospect.company);
+    const knownExamples = [];
+    for (const p of prospects) {
+      if (normalize(p.company) === sameOrgNorm && p.name && p.email) {
+        knownExamples.push({ name: p.name, email: p.email });
+      }
+    }
+    for (const c of mergedRecords) {
+      if (c.name && c.email) knownExamples.push({ name: c.name, email: c.email });
+    }
+    for (const ex of exampleEmails) {
+      if (ex.name && ex.email) knownExamples.push({ name: ex.name, email: ex.email });
+    }
+
+    const pattern = knownExamples.length > 0 ? inferEmailPatternFromExamples(knownExamples) : null;
+
+    // Apply pattern to any candidate without an email
+    const finalCandidates = mergedRecords.map(c => {
+      if (c.email || !pattern || firstNameOnly(c.name)) return c;
+      const guess = guessEmailForName(c.name, knownExamples);
+      if (!guess) return c;
+      return {
+        ...c,
+        email: guess.email,
+        emailStatus: 'guessed',
+        emailSource: 'pattern',
+        emailPattern: guess.patternUsed,
+        emailConfidence: guess.confidence,
+      };
+    });
 
     // Mark candidates already in the pool
-    const existingNames = new Set(prospects.map(p => normalize(p.name)).filter(Boolean));
-    const annotated = merged.map(c => ({
+    const existingNamesSet = new Set(prospects.map(p => normalize(p.name)).filter(Boolean));
+    const annotated = finalCandidates.map(c => ({
       ...c,
-      alreadyInPool: existingNames.has(normalize(c.name)),
+      alreadyInPool: existingNamesSet.has(normalize(c.name)),
     }));
 
     setFindPeersResults(annotated);
@@ -1726,11 +1837,13 @@ Rules:
       showToast(`No peers found at ${prospect.company} via Apollo or website`, 'info');
     } else {
       const newCount = annotated.filter(c => !c.alreadyInPool).length;
-      const webCount = dedupedWeb.length;
+      const guessedCount = annotated.filter(c => c.emailStatus === 'guessed').length;
       const apolloCount = apolloCandidates.length;
+      const webCount = webCandidates.length - usedWebIndices.size;
       const parts = [];
       if (apolloCount > 0) parts.push(`${apolloCount} from Apollo`);
       if (webCount > 0) parts.push(`${webCount} from website${webSourceUrl ? ` (${new URL(webSourceUrl).hostname})` : ''}`);
+      if (guessedCount > 0) parts.push(`${guessedCount} pattern-guessed email${guessedCount === 1 ? '' : 's'}`);
       showToast(`Found ${annotated.length} peer${annotated.length === 1 ? '' : 's'} at ${prospect.company} · ${parts.join(' + ')}${newCount < annotated.length ? ` · ${annotated.length - newCount} already in pool` : ''}`);
     }
 
@@ -1756,6 +1869,12 @@ Rules:
         company: parent.company,
         // Web-scraped contacts may already have an email; Apollo search never does
         email: c.email || '',
+        // Carry over email provenance so the prospect card can show whether
+        // the email is verified / scraped from a directory / pattern-guessed
+        emailStatus: c.emailStatus || (c.email ? (isWebSource ? 'directory' : 'apollo') : ''),
+        emailSource: c.emailSource || (c.email ? (isWebSource ? 'website' : 'apollo') : ''),
+        emailPattern: c.emailPattern || null,
+        emailConfidence: c.emailConfidence || null,
         phone: c.phone || '',
         city: parent.city || c.city || '',
         county: parent.county || '',
@@ -1774,7 +1893,9 @@ Rules:
       };
     });
     setProspects(prev => [...newProspects, ...prev]);
-    showToast(`Added ${newProspects.length} peer${newProspects.length === 1 ? '' : 's'} to the pool — enrich them when you have credits`);
+    const guessedCount = newProspects.filter(p => p.emailStatus === 'guessed').length;
+    const guessedNote = guessedCount > 0 ? ` · ${guessedCount} pattern-guessed (verify before sending)` : '';
+    showToast(`Added ${newProspects.length} peer${newProspects.length === 1 ? '' : 's'} to the pool${guessedNote}`);
     setFindPeersFor(null);
     setFindPeersResults(null);
   };
@@ -4018,7 +4139,28 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
           </div>
           <div style={{ fontSize: '11px', color: 'var(--text-3)', display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
             <span><MapPin size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {prospect.city || '?'}, {prospect.county || '?'}</span>
-            {prospect.email && <span><Mail size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {prospect.email}</span>}
+            {prospect.email && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <Mail size={10} style={{ display: 'inline', verticalAlign: 'middle' }} />
+                <span>{prospect.email}</span>
+                {prospect.emailStatus === 'guessed' && (
+                  <span
+                    title={`Pattern-guessed (${prospect.emailPattern || 'unknown'}) · ${prospect.emailConfidence ? Math.round(prospect.emailConfidence * 100) + '% confidence' : 'unverified'} · verify before sending`}
+                    style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '4px', background: 'color-mix(in oklch, var(--warn) 25%, transparent)', color: 'var(--warn)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.03em' }}
+                  >
+                    guessed
+                  </span>
+                )}
+                {prospect.emailStatus === 'directory' && (
+                  <span
+                    title="Pulled from the org's public directory"
+                    style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '4px', background: 'color-mix(in oklch, var(--ok) 20%, transparent)', color: 'var(--ok)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.03em' }}
+                  >
+                    directory
+                  </span>
+                )}
+              </span>
+            )}
             {prospect.linkedinUrl ? (
               <a
                 href={prospect.linkedinUrl}

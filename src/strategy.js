@@ -1247,6 +1247,129 @@ export function getFacilitiesSearchTitles() {
   return FACILITIES_KEYWORDS;
 }
 
+// === EMAIL PATTERN INFERENCE ===
+// When Apollo gives us a first name only but the website has the full name,
+// and we know at least one verified email at the same org, we can guess
+// the missing person's email by reverse-engineering the org's pattern.
+//
+// Supported patterns (the 12 most common):
+//   first, last, firstlast, first.last, flast, f.last, firstl, first.l,
+//   first_last, lastfirst, last.first, lastf
+
+// Normalize a name token: lowercase, strip non-alpha (apostrophes, hyphens).
+function normalizeNameToken(s) {
+  return (s || '').toLowerCase().replace(/[^a-z]/g, '');
+}
+
+// Given a known name + verified email, infer the local-part pattern.
+// Returns { pattern, domain } or null if no recognized pattern matches.
+export function detectEmailPattern(name, email) {
+  if (!name || !email || !email.includes('@')) return null;
+  const [rawLocal, domain] = email.toLowerCase().trim().split('@');
+  const local = rawLocal.split('+')[0]; // strip plus-aliases (jane+work@org → jane)
+  const parts = name.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return null;
+  const first = normalizeNameToken(parts[0]);
+  const last = normalizeNameToken(parts[parts.length - 1]);
+  if (!first || !last) return null;
+  const fi = first[0];
+  const li = last[0];
+
+  if (local === first) return { pattern: 'first', domain };
+  if (local === last) return { pattern: 'last', domain };
+  if (local === first + last) return { pattern: 'firstlast', domain };
+  if (local === first + '.' + last) return { pattern: 'first.last', domain };
+  if (local === fi + last) return { pattern: 'flast', domain };
+  if (local === fi + '.' + last) return { pattern: 'f.last', domain };
+  if (local === first + li) return { pattern: 'firstl', domain };
+  if (local === first + '.' + li) return { pattern: 'first.l', domain };
+  if (local === first + '_' + last) return { pattern: 'first_last', domain };
+  if (local === last + first) return { pattern: 'lastfirst', domain };
+  if (local === last + '.' + first) return { pattern: 'last.first', domain };
+  if (local === last + fi) return { pattern: 'lastf', domain };
+  return null;
+}
+
+// Apply a detected pattern to a new name. Returns the generated email or null
+// if the name can't be parsed into first/last.
+export function applyEmailPattern(name, patternInfo) {
+  if (!name || !patternInfo?.pattern || !patternInfo?.domain) return null;
+  const parts = name.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return null;
+  const first = normalizeNameToken(parts[0]);
+  const last = normalizeNameToken(parts[parts.length - 1]);
+  if (!first || !last) return null;
+  const fi = first[0];
+  const li = last[0];
+  const builders = {
+    'first': () => first,
+    'last': () => last,
+    'firstlast': () => first + last,
+    'first.last': () => first + '.' + last,
+    'flast': () => fi + last,
+    'f.last': () => fi + '.' + last,
+    'firstl': () => first + li,
+    'first.l': () => first + '.' + li,
+    'first_last': () => first + '_' + last,
+    'lastfirst': () => last + first,
+    'last.first': () => last + '.' + first,
+    'lastf': () => last + fi,
+  };
+  const local = builders[patternInfo.pattern]?.();
+  return local ? `${local}@${patternInfo.domain}` : null;
+}
+
+// Given a list of (name, email) examples at the same org, find the dominant
+// pattern by majority vote. Returns { pattern, domain, confidence } where
+// confidence is the fraction of examples that agree on the pattern.
+// Returns null if no usable pattern can be inferred.
+export function inferEmailPatternFromExamples(examples) {
+  if (!Array.isArray(examples) || examples.length === 0) return null;
+  const detected = examples
+    .map(e => detectEmailPattern(e.name, e.email))
+    .filter(Boolean);
+  if (detected.length === 0) return null;
+
+  // Count occurrences keyed by `pattern@domain`
+  const counts = new Map();
+  for (const d of detected) {
+    const key = `${d.pattern}@${d.domain}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  // Pick the most common
+  let bestKey = null;
+  let bestCount = 0;
+  for (const [key, count] of counts.entries()) {
+    if (count > bestCount) { bestKey = key; bestCount = count; }
+  }
+  if (!bestKey) return null;
+  const [pattern, domain] = bestKey.split('@');
+  return {
+    pattern,
+    domain,
+    confidence: bestCount / detected.length,
+    sampleCount: detected.length,
+  };
+}
+
+// High-level helper: given a target name + known emails at the same org,
+// return a guessed email (or null if the org's pattern can't be inferred).
+// The returned object includes provenance so the UI can show confidence.
+export function guessEmailForName(targetName, knownEmailsAtOrg) {
+  const pattern = inferEmailPatternFromExamples(knownEmailsAtOrg);
+  if (!pattern) return null;
+  const email = applyEmailPattern(targetName, pattern);
+  if (!email) return null;
+  return {
+    email,
+    emailStatus: 'guessed',
+    emailSource: 'pattern',
+    confidence: pattern.confidence,
+    patternUsed: pattern.pattern,
+    basedOnSampleCount: pattern.sampleCount,
+  };
+}
+
 // Classify a title into a tier (1-4). Returns 0 for unknown / non-facilities.
 export function classifyTier(title) {
   if (!title) return 0;
