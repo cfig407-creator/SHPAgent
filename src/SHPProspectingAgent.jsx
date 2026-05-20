@@ -1643,23 +1643,37 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       ? 'local government — look for: city manager, director of public works, facilities director, director of operations, maintenance superintendent'
       : 'look for: director of facilities, director of operations, business manager, maintenance director';
 
-    // Build either a web_fetch-based prompt (when a saved URL exists) or a
-    // web_search-based prompt (when discovering the directory page).
+    // Build the task block. Two modes:
+    //   - URL saved: skip discovery, web_fetch the URL directly
+    //   - No URL saved: web_search to discover, then web_fetch the discovered
+    //     URL to get the full page (search snippets alone are too thin to
+    //     reliably extract staff names). Auto-saves the URL after the run.
     const taskBlock = orgUrl
       ? `Task:
 1. Use the web_fetch tool to fetch this URL: ${orgUrl}
 2. The page is the org's staff directory (or a filtered view of it). Extract every person visible.
 3. Include EVERY contact on the page — don't filter by title. The URL was hand-picked by the sales rep.
-4. ALSO: capture any sample employee email addresses visible on the page (e.g. in contact lists, faculty cards, or generic "email: jsmith@school.org" patterns). These help infer the org's email pattern.`
-      : `Task:
-1. Search for the org's staff directory. Useful queries:
-   - "${prospect.company} staff directory"
-   - "${prospect.company} faculty directory"
-   - "${prospect.company} facilities staff"
-   - "${prospect.company} director of facilities"
-   If the directory page has a search/filter URL parameter, try the filtered view but ALSO check the unfiltered page.
-2. Extract every person whose title is relevant: facilities, maintenance, plant operations, buildings & grounds, custodial, grounds, business manager, CFO, COO, head of school, superintendent, director of operations, principal. Include them all — better to over-include than miss the right contact.
-3. ALSO: capture any sample employee email addresses visible on the page (e.g. in contact lists, faculty cards, or generic "email: jsmith@school.org" patterns). These help infer the org's email pattern.`;
+4. ALSO: capture any sample employee email addresses visible on the page (e.g. in contact lists, faculty cards, or generic "email: jsmith@school.org" patterns). These help infer the org's email pattern.
+
+Set "sourceUrl" in the response to: ${orgUrl}`
+      : `Task (two-step):
+STEP 1 — DISCOVER THE DIRECTORY URL via web_search.
+  Use the web_search tool with queries like:
+    - "${prospect.company} staff directory"
+    - "${prospect.company} faculty directory"
+    - "${prospect.company} facilities staff site:${(prospect.company || '').toLowerCase().replace(/[^a-z]+/g, '')}.com"
+    - "${prospect.company} director of facilities"
+    - "${prospect.company} plant operations contact"
+  Identify the URL of the page that lists facilities/maintenance/operations staff. If the directory has a search/filter URL parameter (?keyword=facilities or similar), use the filtered URL. Otherwise the unfiltered directory page is fine.
+
+STEP 2 — FETCH THE DIRECTORY PAGE via web_fetch.
+  Once you have the URL, call web_fetch on it to get the FULL page content. Search snippets are unreliable for extracting names — you MUST fetch the page itself.
+
+STEP 3 — EXTRACT every person on the fetched page whose title is relevant: facilities, maintenance, plant operations, buildings & grounds, custodial, grounds, business manager, CFO, COO, head of school, superintendent, director of operations, principal. Include them all — better to over-include than miss the right contact.
+
+STEP 4 — capture any sample employee email addresses visible on the page (e.g. in contact lists, faculty cards, or generic "email: jsmith@school.org" patterns). These help infer the org's email pattern.
+
+CRITICAL: Set "sourceUrl" in your response to the EXACT URL you fetched. This URL gets saved so future runs skip the search step.`;
 
     const prompt = `You are helping a sales rep find the right contacts at an organization.
 
@@ -1697,23 +1711,25 @@ Other rules:
 - exampleEmails should include ANY full name + email pairs you see (even if not in your contacts list) so we can detect the org's email pattern
 - Maximum 30 contacts`;
 
-    // When the user has saved an explicit directory URL, use Anthropic's
-    // web_fetch tool (Claude fetches the exact URL we tell it). Otherwise
-    // fall back to web_search for discovery. Tool name versions are pinned.
+    // Tool config:
+    //   - URL saved: just web_fetch, restricted to that domain (faster + cheaper)
+    //   - No URL: both web_search (to discover) AND web_fetch (to extract from
+    //     the discovered URL). Claude chains them in one call.
     const toolConfig = orgUrl
       ? [
           { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 2, allowed_domains: [new URL(orgUrl).hostname] },
         ]
       : [
-          { type: 'web_search_20250305', name: 'web_search', max_uses: 8 },
+          { type: 'web_search_20250305', name: 'web_search', max_uses: 6 },
+          { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 3 },
         ];
 
     const data = await postJson('/api/anthropic', {
       model: ANTHROPIC_MODEL,
-      max_tokens: 1200,
+      max_tokens: 1500,
       tools: toolConfig,
       messages: [{ role: 'user', content: prompt }],
-    }, { retries: 1, timeoutMs: 50_000 });
+    }, { retries: 1, timeoutMs: 75_000 });
 
     const blocks = Array.isArray(data?.content) ? data.content : [];
     const text = blocks
@@ -1729,6 +1745,16 @@ Other rules:
       const parsed = JSON.parse(jsonMatch[0]);
       const contacts = Array.isArray(parsed.contacts) ? parsed.contacts : [];
       const exampleEmails = Array.isArray(parsed.exampleEmails) ? parsed.exampleEmails : [];
+
+      // AUTO-SAVE the discovered URL so subsequent runs skip the search step
+      // and go straight to web_fetch. Only saves on first discovery — never
+      // overwrites an existing user-set URL.
+      if (!orgUrl && parsed.sourceUrl && typeof parsed.sourceUrl === 'string' && /^https?:\/\//i.test(parsed.sourceUrl)) {
+        const key = normalizeOrgKey(prospect.company);
+        if (key) {
+          setDirectoryUrls(prev => prev[key] ? prev : { ...prev, [key]: parsed.sourceUrl });
+        }
+      }
       // Skip names that are obvious placeholders, single-token-only, OR just
       // initials (e.g. "C. T." or "J. D."). Each first/last token must have
       // at least 2 alphabetic characters — single-letter "names" can't be
@@ -5658,15 +5684,15 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel, s
               </>
             ) : (
               <>
-                <span style={{ color: 'var(--text-3)' }}>none — using auto search</span>
+                <span style={{ color: 'var(--text-3)' }}>auto-discovering on first run</span>
                 <button
                   style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--info)', textDecoration: 'underline dotted', fontSize: '11px' }}
                   onClick={() => {
-                    const url = window.prompt(`Paste the org's directory URL (the exact page that lists facilities staff). The scraper will use this URL directly instead of searching for it.\n\nExample: https://${(parent.company || 'school').toLowerCase().replace(/[^a-z]+/g, '')}.com/about/directory`);
+                    const url = window.prompt(`Override the auto-discovered URL with a specific one (e.g. a filtered staff directory):\n\nExample: https://${(parent.company || 'school').toLowerCase().replace(/[^a-z]+/g, '')}.com/about/directory`);
                     if (url && url.trim()) onSetDirectoryUrl(url.trim());
                   }}
                 >
-                  + paste a specific URL (recommended when auto search fails)
+                  + paste a specific URL (override auto-discovery)
                 </button>
               </>
             )}
@@ -5677,7 +5703,11 @@ function FindPeersModal({ styles, parent, isLoading, results, onAdd, onCancel, s
           <div style={{ textAlign: 'center', padding: '60px 0' }}>
             <Loader2 size={28} className="spin" style={{ color: 'var(--danger)' }} />
             <div style={{ fontSize: '14px', marginTop: '12px' }}>Searching Apollo + org website for contacts…</div>
-            <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '6px' }}>This may take 15–30 seconds while the website is scanned.</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '6px' }}>
+              {savedDirectoryUrl
+                ? 'Fetching saved directory URL directly — should be fast.'
+                : 'Auto-discovering the directory page, then fetching it. ~30–45 seconds the first time; faster on subsequent runs.'}
+            </div>
           </div>
         ) : candidates.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-3)' }}>
