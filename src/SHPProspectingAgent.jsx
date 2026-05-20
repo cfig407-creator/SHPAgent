@@ -2897,6 +2897,39 @@ Other rules:
     showToast('LinkedIn URL saved');
   };
 
+  // Update one or more contact fields on a prospect. Persists via overrides
+  // so changes survive reloads. Passing an empty string clears the override
+  // and reverts to whatever the underlying prospect record has.
+  const editProspect = (prospectId, fields) => {
+    if (!prospectId || !fields || typeof fields !== 'object') return;
+    const allowed = ['name', 'title', 'email', 'phone'];
+    const cleaned = {};
+    for (const k of allowed) {
+      if (k in fields) cleaned[k] = typeof fields[k] === 'string' ? fields[k].trim() : fields[k];
+    }
+    if (Object.keys(cleaned).length === 0) return;
+
+    setOverrides(prev => {
+      const next = { ...prev[prospectId] };
+      for (const [k, v] of Object.entries(cleaned)) {
+        if (v) next[k] = v;
+        else delete next[k]; // empty string clears the override
+      }
+      return { ...prev, [prospectId]: next };
+    });
+    // Also update the in-memory prospect immediately so the card refreshes
+    // without waiting for re-render through the override map.
+    setProspects(prev => prev.map(p => {
+      if (p.id !== prospectId) return p;
+      const updated = { ...p };
+      for (const [k, v] of Object.entries(cleaned)) {
+        if (v) updated[k] = v;
+      }
+      return updated;
+    }));
+    showToast('Prospect updated');
+  };
+
   // Reject Apollo's findings — clears the proposal so the user can decide what to do
   const dismissEnrichment = (prospectId) => {
     setProposedEnrichment(prev => {
@@ -3334,28 +3367,42 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       const o = overrides[p.id];
       const explicitStatus = o?.outreachStatus;
 
+      // Apply user-edited field overrides FIRST (name, title, email, phone) —
+      // these take precedence over whatever Apollo/scrape/seed put on the
+      // record, since the user explicitly typed them.
+      const overridden = {
+        ...p,
+        name: o?.name || p.name,
+        title: o?.title || p.title,
+        email: o?.email || p.email,
+        phone: o?.phone || p.phone,
+      };
+
       // Check customer collision (only if user hasn't explicitly set status)
       let customerMatch = null;
       let computedStatus = explicitStatus || 'Active';
       if (!explicitStatus) {
-        const check = customerCheck(p);
+        const check = customerCheck(overridden);
         if (check.result === 'match') {
           customerMatch = check.matchedCustomer;
           computedStatus = 'Customer'; // auto-promote
         }
       }
 
-      // Detect enrichment needs (always computed — independent of status)
-      const enrichment = detectEnrichmentNeeds(p);
+      // Re-run enrichment detection on the OVERRIDDEN record so that fields
+      // the user just typed (e.g. a manually entered email) clear the
+      // "needs enrichment" flag automatically.
+      const enrichment = detectEnrichmentNeeds(overridden);
 
       return {
-        ...p,
+        ...overridden,
         outreachStatus: computedStatus,
         revisitDate: o?.revisitDate || null,
         linkedinUrl: o?.linkedinUrl || p.linkedinUrl || '',  // override survives reloads
         customerMatch, // present when org auto-matched a customer
         needsEnrichment: enrichment.needsEnrichment,
         enrichmentReasons: enrichment.reasons,
+        userEdited: !!(o?.name || o?.title || o?.email || o?.phone),
       };
     });
   }, [prospects, overrides]);
@@ -3472,9 +3519,9 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         userName={pdMeta.userName}
       />
       <div className="shp-main" style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />}
-        {view === 'find' && <FindView styles={styles} saveLinkedInUrl={saveLinkedInUrl} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} />}
-        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} />}
+        {view === 'find' && <FindView styles={styles} saveLinkedInUrl={saveLinkedInUrl} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} editProspect={editProspect} />}
+        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} reresearch={() => { setResearchData(prev => { const next = {...prev}; delete next[selectedProspect.id]; return next; }); researchProspect(selectedProspect, { force: true }); }} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} msConnection={msConnection} sendViaM365={sendViaM365} isSendingM365={isSendingM365 === selectedProspect.id} opensForProspect={opensByProspect[selectedProspect.id] || []} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
@@ -3730,7 +3777,7 @@ function MoreSheet({ styles, view, setView, onClose }) {
 // =================================================================
 // === DASHBOARD ===
 // =================================================================
-function DashboardView({ styles, stats, saveLinkedInUrl, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, crossThreadPool, bulkCrossThreadRunning, findNewAccounts, newAccountsRunning, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
+function DashboardView({ styles, stats, saveLinkedInUrl, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, crossThreadPool, bulkCrossThreadRunning, findNewAccounts, newAccountsRunning, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, editProspect }) {
   const topClusters = clusters.slice(0, 5);
   const firstName = (fromName || 'Anthony').split(' ')[0];
 
@@ -3822,7 +3869,7 @@ function DashboardView({ styles, stats, saveLinkedInUrl, pdConnected, pdConnectE
             {pursueLaterDue.length} prospect{pursueLaterDue.length === 1 ? '' : 's'} {pursueLaterDue.length === 1 ? 'is' : 'are'} ready to revisit. Review and decide: re-activate, push the date, or mark dead.
           </div>
           {pursueLaterDue.slice(0, 5).map(p => (
-            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />
+            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} />
           ))}
           {pursueLaterDue.length > 5 && (
             <button style={{ ...styles.secondaryBtn, marginTop: '8px' }} onClick={() => setView('find')}>
@@ -4027,7 +4074,7 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
 // =================================================================
 // === FIND VIEW ===
 // =================================================================
-function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount, selectedProspectIds, onToggleSelect, onSelectAll, onClearSelection, onBatchDraft }) {
+function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount, selectedProspectIds, onToggleSelect, onSelectAll, onClearSelection, onBatchDraft, editProspect }) {
   const [findTab, setFindTab] = useState('pool');
 
   return (
@@ -4256,7 +4303,7 @@ function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, 
             )}
 
             {prospects.slice(0, 50).map(p => (
-              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} selected={selectedProspectIds.has(p.id)} onToggleSelect={() => onToggleSelect && onToggleSelect(p.id)} saveLinkedInUrl={saveLinkedInUrl} />
+              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} selected={selectedProspectIds.has(p.id)} onToggleSelect={() => onToggleSelect && onToggleSelect(p.id)} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} />
             ))}
             {prospects.length > 50 && (
               <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic' }}>
@@ -4477,7 +4524,26 @@ function CSVImportTab({ styles, importCsvRows, showToast }) {
   );
 }
 
-function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, selected, onToggleSelect, saveLinkedInUrl }) {
+function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, selected, onToggleSelect, saveLinkedInUrl, editProspect }) {
+  // Inline edit state: when isEditing, render the prospect's core fields as
+  // editable inputs. Drafts live in editDraft until Save commits to overrides.
+  const [isEditing, setIsEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState({});
+  const startEdit = () => {
+    setEditDraft({
+      name: prospect.name || '',
+      title: prospect.title || '',
+      email: prospect.email || '',
+      phone: prospect.phone || '',
+    });
+    setIsEditing(true);
+  };
+  const cancelEdit = () => { setIsEditing(false); setEditDraft({}); };
+  const saveEdit = () => {
+    if (!editProspect) return;
+    editProspect(prospect.id, editDraft);
+    setIsEditing(false);
+  };
   const [menuOpen, setMenuOpen] = useState(false);
   const research = researchData[prospect.id];
   const rec = pdRecords[prospect.id];
@@ -4615,11 +4681,78 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             )}
             <span style={{ color: 'var(--text-3)' }}>· source: {prospect.source}</span>
           </div>
-          {prospect.needsEnrichment && (prospect.enrichmentReasons || []).length > 0 && (
+          {prospect.needsEnrichment && (prospect.enrichmentReasons || []).length > 0 && !isEditing && (
             <div style={{ fontSize: '11px', color: 'var(--warn)', marginTop: '6px', fontStyle: 'italic' }}>
               ⚠ {prospect.enrichmentReasons.join(' · ')}
             </div>
           )}
+
+          {/* Inline edit panel — shown when the pencil icon is clicked. */}
+          {isEditing && editProspect && (
+            <div style={{ marginTop: '14px', padding: '12px 14px', background: 'var(--bg-sunk)', border: '1px solid var(--border)', borderRadius: '8px' }}>
+              <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600, color: 'var(--text-3)', marginBottom: '10px' }}>
+                Edit prospect
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                <div>
+                  <label style={{ fontSize: '11px', color: 'var(--text-3)', display: 'block', marginBottom: '3px' }}>Name</label>
+                  <input
+                    type="text"
+                    value={editDraft.name || ''}
+                    onChange={e => setEditDraft(d => ({ ...d, name: e.target.value }))}
+                    style={{ ...styles.input, padding: '6px 10px', fontSize: '13px' }}
+                    placeholder="First Last"
+                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: '11px', color: 'var(--text-3)', display: 'block', marginBottom: '3px' }}>Title</label>
+                  <input
+                    type="text"
+                    value={editDraft.title || ''}
+                    onChange={e => setEditDraft(d => ({ ...d, title: e.target.value }))}
+                    style={{ ...styles.input, padding: '6px 10px', fontSize: '13px' }}
+                    placeholder="Director of Facilities"
+                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: '11px', color: 'var(--text-3)', display: 'block', marginBottom: '3px' }}>Email</label>
+                  <input
+                    type="email"
+                    value={editDraft.email || ''}
+                    onChange={e => setEditDraft(d => ({ ...d, email: e.target.value }))}
+                    style={{ ...styles.input, padding: '6px 10px', fontSize: '13px' }}
+                    placeholder="name@org.com"
+                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: '11px', color: 'var(--text-3)', display: 'block', marginBottom: '3px' }}>Phone</label>
+                  <input
+                    type="tel"
+                    value={editDraft.phone || ''}
+                    onChange={e => setEditDraft(d => ({ ...d, phone: e.target.value }))}
+                    style={{ ...styles.input, padding: '6px 10px', fontSize: '13px' }}
+                    placeholder="407-555-1234"
+                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
+                  />
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                <button style={{ ...styles.secondaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={cancelEdit}>
+                  Cancel
+                </button>
+                <button style={{ ...styles.primaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={saveEdit}>
+                  <CheckCircle2 size={12} /> Save
+                </button>
+              </div>
+              <div style={{ fontSize: '10px', color: 'var(--text-3)', marginTop: '8px', fontStyle: 'italic' }}>
+                Tip: Enter to save · Esc to cancel · Leave a field blank to revert to the original (Apollo/seed) value
+              </div>
+            </div>
+          )}
+
           {/* Enrichment proposal — shown when Apollo and/or the org website returned data awaiting user approval */}
           {proposedEnrichment?.[prospect.id]?.matched && (() => {
             const proposal = proposedEnrichment[prospect.id];
@@ -4696,6 +4829,15 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
               {isEnriching === prospect.id ? <><Loader2 size={13} className="spin" /> Enriching…</> : <><Sparkles size={13} /> Enrich</>}
             </button>
           )}
+          {editProspect && (
+            <button
+              style={{ ...styles.secondaryBtn, padding: '8px 10px' }}
+              onClick={() => isEditing ? cancelEdit() : startEdit()}
+              title={isEditing ? 'Cancel edit' : 'Edit name / title / email / phone'}
+            >
+              {isEditing ? <X size={13} /> : <Edit3 size={13} />}
+            </button>
+          )}
           <button
             style={{ ...styles.secondaryBtn, padding: '8px 10px' }}
             onClick={() => setMenuOpen(o => !o)}
@@ -4759,7 +4901,7 @@ function segmentBadgeColor(seg) {
 // =================================================================
 // === CLUSTERS VIEW ===
 // =================================================================
-function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount }) {
+function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, editProspect }) {
   const [expanded, setExpanded] = useState({});
   // Per-cluster "show all" toggle — when true, render every prospect in the
   // cluster instead of just the first 20.
@@ -4800,7 +4942,7 @@ function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, res
               return (
                 <div style={{ marginTop: '16px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', paddingTop: '16px' }}>
                   {visible.map(p => (
-                    <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} />
+                    <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} />
                   ))}
                   {cluster.prospects.length > 20 && (
                     <div style={{ textAlign: 'center', padding: '12px' }}>
