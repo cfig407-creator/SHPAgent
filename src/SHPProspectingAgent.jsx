@@ -15,7 +15,7 @@ import {
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
   buildColdEmailPrompt, buildDealTitle, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
   composeEmail, stripEmDashes, cleanProspectText,
-  getMultiThreadTitles, classifyTier, scoreUnenrichedCandidate,
+  getMultiThreadTitles, getFacilitiesSearchTitles, classifyTier, scoreUnenrichedCandidate,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
 import { apiFetch, postJson } from './api-client.js';
@@ -1636,32 +1636,63 @@ Rules:
     setFindPeersResults(null);
     setIsFindingPeers(true);
 
-    const titles = getMultiThreadTitles(prospect.title, prospect.segment);
+    // Broad facilities-keyword search — captures anyone with facility/facilities/
+    // maintenance/plant operations/plant/buildings & grounds/etc. in their title,
+    // plus adjacent purchasing-decision functions (procurement, safety, security,
+    // capital projects, construction). Pull regardless of the seed prospect's tier.
+    const titles = getFacilitiesSearchTitles();
     const normalize = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
-    // Run Apollo + website scrape in parallel
+    // === Paginated Apollo fetch — pull every page until exhausted ===
+    // Apollo caps per_page at 25, so "unlimited" means looping. Safety cap of
+    // 8 pages = 200 candidates per org; should comfortably cover even large
+    // universities. Stop early when a page returns < 25 (end of results).
+    const APOLLO_MAX_PAGES = 8;
+    const APOLLO_PAGE_SIZE = 25;
+    const fetchAllApolloPages = async () => {
+      const all = [];
+      let pageError = null;
+      for (let page = 1; page <= APOLLO_MAX_PAGES; page++) {
+        try {
+          const data = await postJson('/api/apollo-people-search', {
+            organizationName: prospect.company,
+            titles,
+            limit: APOLLO_PAGE_SIZE,
+            page,
+          }, { retries: 1, timeoutMs: 30_000 });
+          const got = Array.isArray(data?.candidates) ? data.candidates : [];
+          all.push(...got);
+          if (got.length < APOLLO_PAGE_SIZE) break; // last page
+        } catch (err) {
+          pageError = err;
+          break;
+        }
+      }
+      return { all, pageError };
+    };
+
+    // Run paginated Apollo + website scrape in parallel
     const [apolloResult, webResult] = await Promise.allSettled([
-      postJson('/api/apollo-people-search', {
-        organizationName: prospect.company,
-        titles,
-        limit: 15,
-      }, { retries: 1, timeoutMs: 30_000 }),
+      fetchAllApolloPages(),
       scrapeOrgDirectory(prospect),
     ]);
 
     // Apollo candidates
     let apolloCandidates = [];
     if (apolloResult.status === 'fulfilled') {
-      apolloCandidates = (Array.isArray(apolloResult.value?.candidates) ? apolloResult.value.candidates : [])
-        .map(c => ({ ...c, candidateId: c.apolloId || `apollo_${Math.random()}`, source: 'apollo' }));
-    } else {
-      const err = apolloResult.reason;
-      const isPlanLimit = err?.status === 403 || /apollo_plan_required|invalid access credentials/i.test(err?.message || '');
-      if (isPlanLimit) {
-        showToast('"Find peers" Apollo search needs paid plan — showing website results only', 'info');
-      } else {
-        console.warn('[shp] Apollo peer search failed:', err?.message);
+      const { all, pageError } = apolloResult.value;
+      apolloCandidates = all.map(c => ({ ...c, candidateId: c.apolloId || `apollo_${Math.random()}`, source: 'apollo' }));
+      if (pageError) {
+        const isPlanLimit = pageError?.status === 403 || /apollo_plan_required|invalid access credentials/i.test(pageError?.message || '');
+        if (isPlanLimit) {
+          showToast('"Find peers" Apollo search needs paid plan — showing website results only', 'info');
+        } else if (apolloCandidates.length === 0) {
+          console.warn('[shp] Apollo peer search failed:', pageError?.message);
+        }
+        // If we got SOME pages before failure, just use what we have
       }
+    } else {
+      console.warn('[shp] Apollo peer search failed:', apolloResult.reason?.message);
     }
 
     // Website candidates

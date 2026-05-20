@@ -1205,6 +1205,48 @@ export const ADJACENT_FUNCTIONS = [
   'Director of Risk Management',
 ];
 
+// === FACILITIES KEYWORD LIST — for broad multi-thread coverage ===
+// Apollo's person_titles field is a fuzzy/token-based match. Submitting
+// "Facilities" matches "Director of Facilities", "Facilities Manager",
+// "Facilities Coordinator", "Senior Facilities Specialist", etc. — all in
+// one slot. So instead of enumerating every possible title, we pass broad
+// keywords that capture everyone with that token in their title.
+//
+// Coverage spans: core facilities/maintenance roles, plant operations
+// (common at higher ed + manufacturing), physical plant (the term schools
+// use), buildings & grounds (K-12 + universities), and adjacent functions
+// that touch door/hardware purchasing (procurement, safety, security,
+// capital projects, construction).
+//
+// Total: 18 keywords. Apollo's per-query cap is 25, so we have headroom.
+export const FACILITIES_KEYWORDS = [
+  // Core facilities + maintenance
+  'Facilities', 'Facility',
+  'Maintenance',
+  // Plant operations — common in higher ed + manufacturing
+  'Plant Operations', 'Plant Manager', 'Plant Director',
+  'Plant',
+  'Physical Plant',
+  // Buildings & grounds — K-12 and university lexicon
+  'Buildings and Grounds', 'Buildings & Grounds',
+  // Operations & maintenance combo (O&M)
+  'Operations and Maintenance',
+  // Custodial / grounds
+  'Custodial', 'Grounds',
+  // Adjacent purchasing-decision roles
+  'Procurement', 'Purchasing',
+  'Safety',
+  'Security',
+  'Capital Projects', 'Construction',
+];
+
+// Returns the broad facilities-keyword list. Used by Find Peers and bulk
+// cross-thread to capture every facilities-adjacent contact at an org,
+// not just titles matching the curated TITLE_LADDER.
+export function getFacilitiesSearchTitles() {
+  return FACILITIES_KEYWORDS;
+}
+
 // Classify a title into a tier (1-4). Returns 0 for unknown / non-facilities.
 export function classifyTier(title) {
   if (!title) return 0;
