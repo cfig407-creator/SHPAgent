@@ -1628,12 +1628,117 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
   // names, titles, emails, phones. Free (no Apollo credits). Returns an array
   // of candidate objects with source: 'website'.
   const scrapeOrgDirectory = async (prospect) => {
-    // If the user has saved an explicit directory URL for this org, use it
-    // directly via web_fetch — far more reliable than searching for the right
-    // page. Lake Mary Prep is the canonical case: their filtered directory
-    // URL returns the 4 facilities staff perfectly, but the unfiltered
-    // directory returns admins via search.
+    // If the user has saved an explicit directory URL for this org, fetch it
+    // via OUR server-side proxy (/api/scrape-url) and have Claude extract
+    // contacts from the raw HTML. This bypasses Anthropic's beta web_fetch
+    // tool (which proved unreliable in testing) and gives us a deterministic
+    // page fetch we can debug.
     const orgUrl = directoryUrls[normalizeOrgKey(prospect.company)] || null;
+
+    // === FAST PATH: saved URL → server-side fetch + Claude extraction ===
+    if (orgUrl) {
+      let html = '';
+      try {
+        const fetchResp = await postJson('/api/scrape-url', { url: orgUrl }, { retries: 1, timeoutMs: 25_000 });
+        if (!fetchResp?.ok || !fetchResp.html) {
+          console.warn('[shp] scrape-url returned no HTML', fetchResp);
+          return { found: false, contacts: [], sourceUrl: orgUrl, emailDomain: null, exampleEmails: [] };
+        }
+        html = fetchResp.html;
+      } catch (err) {
+        console.warn('[shp] scrape-url fetch failed:', err.message);
+        return { found: false, contacts: [], sourceUrl: orgUrl, emailDomain: null, exampleEmails: [] };
+      }
+
+      // Strip script/style/noscript blocks to slim the prompt before sending
+      // to Claude — they contribute no useful text and waste tokens.
+      const cleanedHtml = html
+        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+        .replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, '')
+        .replace(/\s+/g, ' ')
+        .slice(0, 100_000); // additional cap — ~25k tokens worst case
+
+      const extractPrompt = `You are extracting staff contacts from a fetched HTML page.
+
+Organization: "${prospect.company}"
+Source URL: ${orgUrl}
+
+The HTML below is the org's staff directory page. Extract every person whose role is relevant to facilities, maintenance, operations, plant, buildings & grounds, custodial, business management, or executive decision-making (CFO, COO, head of school, superintendent, principal). Include them all — it's better to over-include than miss the right contact.
+
+Also capture any sample employee emails visible on the page (full name + email pairs in any format) so we can detect the org's email pattern.
+
+Return ONLY a JSON object (no markdown fences, no preamble) in this exact format:
+{
+  "found": true,
+  "sourceUrl": "${orgUrl}",
+  "emailDomain": "school.org",
+  "exampleEmails": [{ "name": "Jane Smith", "email": "jsmith@school.org" }],
+  "contacts": [{ "name": "Jane Smith", "title": "Director of Facilities", "email": "jsmith@school.org", "phone": "" }]
+}
+
+If no relevant contacts found, return: { "found": false, "sourceUrl": "${orgUrl}", "emailDomain": null, "exampleEmails": [], "contacts": [] }
+
+CRITICAL name rules:
+- FULL names only (first AND last). Never include parenthetical placeholders or single-letter initials as names. "C. T." or "J. D." is NOT a name — omit those entries.
+- Do not invent names. Only include people whose names are clearly stated in the HTML.
+
+=== HTML CONTENT ===
+${cleanedHtml}
+=== END HTML ===`;
+
+      const data = await postJson('/api/anthropic', {
+        model: ANTHROPIC_MODEL,
+        max_tokens: 2000,
+        messages: [{ role: 'user', content: extractPrompt }],
+      }, { retries: 1, timeoutMs: 45_000 });
+
+      const blocks = Array.isArray(data?.content) ? data.content : [];
+      const text = blocks.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text).join('');
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.warn('[shp] extractor returned no JSON for', orgUrl);
+        return { found: false, contacts: [], sourceUrl: orgUrl, emailDomain: null, exampleEmails: [] };
+      }
+
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        const contacts = Array.isArray(parsed.contacts) ? parsed.contacts : [];
+        const exampleEmails = Array.isArray(parsed.exampleEmails) ? parsed.exampleEmails : [];
+        const isUsableName = (name) => {
+          if (typeof name !== 'string') return false;
+          if (/\(.*not\s+listed.*\)|\(.*unknown.*\)/i.test(name)) return false;
+          const tokens = name.trim().split(/\s+/).filter(Boolean);
+          if (tokens.length < 2) return false;
+          const realNameToken = (t) => t.replace(/[^a-zA-Z]/g, '').length >= 2;
+          return realNameToken(tokens[0]) && realNameToken(tokens[tokens.length - 1]);
+        };
+        return {
+          found: parsed.found && contacts.length > 0,
+          sourceUrl: orgUrl,
+          emailDomain: parsed.emailDomain || null,
+          exampleEmails: exampleEmails.filter(e => e?.name && e?.email && isUsableName(e.name)),
+          contacts: contacts
+            .filter(c => c?.name && isUsableName(c.name))
+            .map((c, i) => ({
+              candidateId: `web_${Date.now()}_${i}`,
+              name: c.name.trim(),
+              title: c.title || '',
+              email: c.email || '',
+              phone: c.phone || '',
+              linkedinUrl: '',
+              source: 'website',
+              sourceUrl: orgUrl,
+            })),
+        };
+      } catch (err) {
+        console.warn('[shp] extractor JSON parse failed:', err.message);
+        return { found: false, contacts: [], sourceUrl: orgUrl, emailDomain: null, exampleEmails: [] };
+      }
+    }
+
+    // === DISCOVERY PATH: no saved URL → original web_search flow ===
+    // (Auto-saves the discovered URL so the next run uses the fast path above.)
 
     const segmentHint = prospect.segment === 'K-12'
       ? 'private school — look for: director of facilities, director of plant operations, business manager, CFO, principal, head of school, director of operations, maintenance director'
