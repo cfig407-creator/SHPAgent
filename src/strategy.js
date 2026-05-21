@@ -287,7 +287,7 @@ export const VOICE_EXAMPLES = [
     context: 'Short, direct intro — three paragraphs, capability first',
     body: `I'm Anthony with Superior Hardware Products in Longwood. Our team handles everything in your doorways — mechanical hardware, electrified access control integration, closers, panic devices, and service when something fails mid-year.
 
-We're proud to work with multiple [match-segment-or-region peers] across Central Florida. Just wanted to be a name you recognize when something comes up — propped door, broken closer, access control tie-in. If anything's already on your radar, happy to walk it with you.
+We're proud to work with multiple [match-segment-or-region peers] across Central Florida. Wanted to put SHP on your radar in case anything comes up — propped door, broken closer, access control tie-in. If anything's already pending, happy to walk it with you.
 
 I'm often in the area with a few customers, so I can stop by for an in-person intro if you'd prefer.`,
   },
@@ -343,9 +343,10 @@ ANTHONY'S VOICE — characteristics the draft must hit:
    - "Wanted to ask if it was worth the time for an intro to have another arrow in the quiver"
 
 2. RESOURCE-FRAMED, NOT MEETING-DEMANDING. Don't ask for a meeting outright. Position SHP as a resource they can lean on:
-   - "Wanted to be a name you recognize when something comes up"
+   - "Wanted to put SHP on your radar in case anything comes up"
    - "If anything's active, happy to walk it with you"
    - "Let me know if the timing is right for a conversation"
+   - AVOID: "a name to know" / "name you recognize" — flagged as spam by enterprise filters (Barracuda rejected one of our sends for this phrasing).
 
 3. PEER TONE. Conversational, not corporate. Allowed:
    - "I hope email is OK"
@@ -535,7 +536,7 @@ export const CTA_BANK = [
   {
     id: 'CTA3_resource_framing',
     when: 'fires when prospect is unlikely to have an immediate need',
-    text: `Just wanted to be a name you recognize when something comes up — propped door, broken closer, mid-year hardware failure. If anything's already on your radar, happy to walk it with you.`,
+    text: `Wanted to put SHP on your radar in case anything comes up — propped door, broken closer, mid-year hardware failure. If anything's already pending, happy to walk it with you.`,
   },
   {
     id: 'CTA4_low_pressure',
@@ -611,18 +612,27 @@ I'm sure you already have someone for this. Just wanted to be on your list in ca
 ];
 
 // === SUBJECT LINE BANK ===
-// 8-10 variants. Composer picks one. All sentence-case, no clickbait.
+// All sentence-case (filters distrust all-lowercase) and clear of cold-email
+// clichés ("a name to know", "name you recognize") that Barracuda and similar
+// enterprise filters score as bulk-prospecting. Each subject reads like
+// something a real local supplier would actually type.
+//
+// What we explicitly avoided:
+// - All-lowercase ("a name to know..." failed at City of NSB via Barracuda)
+// - "Name to know" / "name you recognize" phrasing
+// - Marketing-style brackets, exclamation points, or ALL CAPS
+// - Question marks (low-stakes but filters score them slightly worse)
 export const SUBJECT_BANK = [
-  'quick intro from SHP — {company}',
-  'a name to know for door work — {company}',
-  'hardware partner for {company}',
-  'door + hardware support for {company}',
-  'another resource for {company}\'s facility team',
-  'wanted to introduce SHP to {company}',
-  'door & hardware coverage for {company}',
-  'introducing Superior Hardware Products',
+  'Quick intro from SHP — {company}',
+  'Door & hardware support for {company}',
+  'Hardware partner for {company}',
+  'SHP — local door & hardware supplier',
+  'Introducing Superior Hardware Products',
   '{firstName} — quick intro from SHP',
-  'SHP — door and hardware support in {county}',
+  'Local door & hardware support in {county}',
+  'Door work at {company} — quick intro',
+  'SHP — door & hardware coverage in Central Florida',
+  'Quick note from Superior Hardware Products',
 ];
 
 // === EM-DASH SCRUBBER ===
@@ -1604,11 +1614,15 @@ export const PAIN_LIBRARY = {
 };
 
 // === SEGMENT-SPECIFIC CTAs (resource-framed, not meeting-asking) ===
+// Note: avoid "a name to know" / "name you recognize" phrasing — both
+// trigger Barracuda + similar enterprise spam filters (City of NSB
+// rejected a send for exactly this in the subject line). Use neutral
+// "put SHP on your radar" framing instead.
 export const RESOURCE_CTAS = {
-  default: "Just wanted to make sure you know we're here as a resource — no need to act on anything. If something on your facility needs attention, happy to take a look anytime.",
-  K12: "Just wanted to be a name you recognize when something comes up — propped door, broken closer, mid-year hardware failure. If anything's already on your radar, happy to walk it with you.",
-  HigherEd: "Just wanted to be a name you recognize when something comes up across the campus — turn-season rekeys, opener failures, code questions. If anything's active, happy to walk it with you.",
-  LocalGov: "Just wanted to be a name you recognize when something comes up across your facilities — public-facing high-traffic doors, audit exposure, capital planning questions. If anything's active, happy to walk it with you.",
+  default: "Wanted to make sure you know we're here as a resource — no need to act on anything. If something on your facility needs attention, happy to take a look anytime.",
+  K12: "Wanted to put SHP on your radar in case anything comes up — propped door, broken closer, mid-year hardware failure. If anything's already pending, happy to walk it with you.",
+  HigherEd: "Wanted to put SHP on your radar across the campus mix — turn-season rekeys, opener failures, code questions. If anything's active, happy to walk it with you.",
+  LocalGov: "Wanted to put SHP on your radar across your facilities — public-facing high-traffic doors, audit exposure, capital planning questions. If anything's active, happy to walk it with you.",
 };
 
 // === SANDLER COACH CONTENT ===
@@ -1819,8 +1833,9 @@ Soft CTA reference: ${cta}
 - 80-180 words in the body. Tight 2-paragraph emails are fine. So are fuller 4-paragraph ones. Match length to how much there is to say.
 - NO exclamation points
 - NO corporate filler ("hope this finds you well", "wanted to reach out", "circle back", "leverage", "synergy")
-- Use sentence case in subject line
-- Subject line should sound human, not marketing-y. Examples that work: "quick intro from SHP", "hardware partner for [their company]", "a name to know for door work"
+- Use SENTENCE CASE in subject line (first word capitalized; not all-lowercase). All-lowercase subjects trigger enterprise spam filters like Barracuda.
+- Subject line should sound human, not marketing-y. Examples that work: "Quick intro from SHP", "Hardware partner for [their company]", "Door & hardware support for [their company]"
+- AVOID in the subject: "name to know", "name you recognize", question marks, exclamation points, ALL CAPS. These are cold-email-cliché patterns that enterprise filters score against.
 - The signature MUST appear verbatim with the physical postal address — required by US CAN-SPAM Act.
 
 ═════ SIGNATURE ═════

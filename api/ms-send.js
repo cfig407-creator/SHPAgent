@@ -113,8 +113,14 @@ export default async function handler(req, res) {
 
     // Generate a unique tracking ID for this send
     const trackingId = `t_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    const appBase = getAppBase(req);
-    const pixelUrl = `${appBase}/api/pixel?id=${trackingId}`;
+    // Pixel base URL: prefer PIXEL_BASE_URL env var (e.g. https://track.superiorhardwareproducts.com)
+    // so the pixel loads from the SAME ROOT DOMAIN as the sender, dramatically
+    // improving deliverability vs. loading from shp-agent.vercel.app.
+    // Cross-domain pixel sources are a classic spam-filter trigger (Barracuda
+    // rejected an LMP send for exactly this reason). Falls back to the app's
+    // base URL when PIXEL_BASE_URL is not set.
+    const pixelBase = (process.env.PIXEL_BASE_URL || getAppBase(req)).replace(/\/$/, '');
+    const pixelUrl = `${pixelBase}/api/pixel?id=${trackingId}`;
 
     // Build HTML body with tracking pixel appended at the very end
     const htmlBody = plainTextToHtml(body) +
