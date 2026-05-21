@@ -60,7 +60,13 @@ async function getValidAccessToken() {
   if (stored.expiresAt && Date.now() + 60_000 < stored.expiresAt) {
     return stored.accessToken;
   }
-  // Otherwise refresh
+  // Otherwise refresh. NOTE: do NOT pass `scope` here — it defaults to the
+  // scopes originally consented at connect time. Asking for new scopes
+  // during refresh fails with invalid_scope when the user hasn't re-
+  // authorized. (This was the immediate cause of send failures after the
+  // Mail.Read scope was added.) Refresh works on whatever was consented;
+  // Mail.Read-only operations (bounce check) get their own scope error
+  // separately and prompt the user to reconnect.
   const tokenResp = await fetch(`https://login.microsoftonline.com/${process.env.MS_TENANT_ID}/oauth2/v2.0/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -69,7 +75,6 @@ async function getValidAccessToken() {
       client_secret: process.env.MS_CLIENT_SECRET,
       refresh_token: stored.refreshToken,
       grant_type: 'refresh_token',
-      scope: SCOPES,
     }).toString(),
   });
   const tokens = await tokenResp.json();
@@ -188,7 +193,13 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ ok: true, trackingId, pixelUrl });
   } catch (err) {
-    return res.status(500).json({ error: 'ms-send failed', message: err.message });
+    // Surface the actual error message as the top-level `error` field so
+    // the frontend (api-client.js reads body.error first) shows the real
+    // cause in toasts, not a generic "ms-send failed".
+    return res.status(500).json({
+      error: err.message || 'ms-send failed',
+      message: err.message,
+    });
   }
 }
 
@@ -346,6 +357,9 @@ async function checkBounces(req, res) {
       recent: allBounces.slice(-20).reverse(),
     });
   } catch (err) {
-    return res.status(500).json({ error: 'check-bounces failed', message: err.message });
+    return res.status(500).json({
+      error: err.message || 'check-bounces failed',
+      message: err.message,
+    });
   }
 }
