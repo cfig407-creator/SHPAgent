@@ -81,6 +81,11 @@ export default function SHPProspectingAgent() {
   const [isSendingM365, setIsSendingM365] = useState(null); // prospect id currently sending
   // Open-tracking events keyed by prospect id: { [prospectId]: [{ trackingId, meta, opens }, ...] }
   const [opensByProspect, setOpensByProspect] = useState({});
+  // Bounce records keyed by lowercased recipient email. Populated by polling
+  // /api/ms-send?action=check-bounces. Shape: { 'a@b.com': { count, lastBouncedAt, lastReason } }
+  const [bouncesByRecipient, setBouncesByRecipient] = useState({});
+  // Set true if Mail.Read scope wasn't granted — surfaces a reconnect prompt
+  const [needsScopeReconnect, setNeedsScopeReconnect] = useState(false);
 
   // Per-org directory URLs — when set, the scraper uses web_fetch on the
   // exact URL instead of trying to discover the page via web_search. Keyed
@@ -544,6 +549,46 @@ export default function SHPProspectingAgent() {
 
     return () => { cancelled = true; clearInterval(interval); };
   }, [msConnection.connected, pdRecords]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Poll for bounce notifications via M365 mailbox scan ──
+  // Hits /api/ms-send?action=check-bounces which queries Graph for NDR
+  // messages (postmaster sender / "Undeliverable" subject) and persists
+  // bounce records to KV. Once every 10 min while the tab is visible.
+  // If the response is 403 with mail_read_scope_required, surface a
+  // reconnect prompt — user needs to re-authorize M365 to grant Mail.Read.
+  useEffect(() => {
+    if (!msConnection.connected) return;
+    let cancelled = false;
+
+    const fetchBounces = async () => {
+      try {
+        const r = await fetch('/api/ms-send?action=check-bounces');
+        if (!r.ok) {
+          if (r.status === 403) {
+            const errBody = await r.json().catch(() => ({}));
+            if (errBody?.error === 'mail_read_scope_required' && !cancelled) {
+              setNeedsScopeReconnect(true);
+            }
+          }
+          return;
+        }
+        const data = await r.json();
+        if (!cancelled && data?.byRecipient) {
+          setBouncesByRecipient(data.byRecipient);
+          setNeedsScopeReconnect(false);
+        }
+      } catch (e) {
+        // Non-fatal — bounce detection is a bonus, not critical path
+      }
+    };
+
+    fetchBounces(); // immediate on connect
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') fetchBounces();
+    }, 600_000); // 10 minutes — bounces accumulate slowly
+
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [msConnection.connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-check cycle every time the tab becomes visible — catches month rollovers on
   // long-open tabs without requiring a full reload.
@@ -3144,6 +3189,24 @@ Other rules:
       return;
     }
 
+    // Bounce guard — if this exact recipient address has bounced before,
+    // warn the user before re-sending. Sending to a known-bad address tanks
+    // domain reputation faster than any other deliverability mistake.
+    const bounce = bouncesByRecipient[selectedProspect.email.toLowerCase()];
+    if (bounce && bounce.count > 0) {
+      const ok = window.confirm(
+        `This email address bounced ${bounce.count > 1 ? bounce.count + ' times' : 'previously'}:\n` +
+        `${selectedProspect.email}\n\n` +
+        `Reason: ${bounce.lastReason || 'delivery failed'}\n\n` +
+        `Sending to a known-bad address hurts your domain reputation. ` +
+        `Edit the email address first (pencil icon on the prospect card), or click OK to send anyway.`
+      );
+      if (!ok) {
+        showToast('Send held back — fix the email address first', 'info');
+        return;
+      }
+    }
+
     // Touch cap guard (same logic as the other send paths)
     const rec = pdRecords[selectedProspect.id] || {};
     const prevHistory = Array.isArray(rec.sentHistory) ? rec.sentHistory : (rec.sentAt ? [rec.sentAt] : []);
@@ -3512,10 +3575,17 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       totalOpens: Object.values(opensByProspect).reduce((sum, sends) =>
         sum + (sends || []).reduce((s2, send) => s2 + (send.opens || []).length, 0)
       , 0),
+      // Bounce stats — count of unique bounced recipient addresses and how
+      // many of our active prospects share those addresses. Bounce rate is
+      // bouncedProspects / sent.
+      bouncedRecipients: Object.keys(bouncesByRecipient).length,
+      bouncedProspects: prospectsWithOverrides.filter(p =>
+        p.email && bouncesByRecipient[p.email.toLowerCase()]
+      ).length,
       openDeals: Object.values(stageDeals).reduce((a, arr) => a + arr.length, 0),
       pursueLaterDueCount: pursueLaterDue.length,
     };
-  }, [prospectsWithOverrides, pdRecords, stageDeals, pursueLaterDue, opensByProspect]);
+  }, [prospectsWithOverrides, pdRecords, stageDeals, pursueLaterDue, opensByProspect, bouncesByRecipient]);
 
   // === STYLES ===
   const styles = makeStyles(pdConnected, pdMeta.stages.length);
@@ -3531,14 +3601,14 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         userName={pdMeta.userName}
       />
       <div className="shp-main" style={styles.main}>
-        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensByProspect={opensByProspect} />}
-        {view === 'find' && <FindView styles={styles} saveLinkedInUrl={saveLinkedInUrl} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} editProspect={editProspect} opensByProspect={opensByProspect} />}
-        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensByProspect={opensByProspect} />}
+        {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensByProspect={opensByProspect} bouncesByRecipient={bouncesByRecipient} />}
+        {view === 'find' && <FindView styles={styles} saveLinkedInUrl={saveLinkedInUrl} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} editProspect={editProspect} opensByProspect={opensByProspect} bouncesByRecipient={bouncesByRecipient} />}
+        {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensByProspect={opensByProspect} bouncesByRecipient={bouncesByRecipient} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} reresearch={() => { setResearchData(prev => { const next = {...prev}; delete next[selectedProspect.id]; return next; }); researchProspect(selectedProspect, { force: true }); }} pdRecord={pdRecords[selectedProspect.id]} opensForProspect={opensByProspect[selectedProspect.id]} pdMeta={pdMeta} stageDeals={stageDeals} config={config} markCustomer={markCustomer} setSelectedProspect={setSelectedProspect} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} msConnection={msConnection} sendViaM365={sendViaM365} isSendingM365={isSendingM365 === selectedProspect.id} opensForProspect={opensByProspect[selectedProspect.id] || []} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
-        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} msConnection={msConnection} connectM365={connectM365} disconnectM365={disconnectM365} />}
+        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} msConnection={msConnection} connectM365={connectM365} disconnectM365={disconnectM365} needsScopeReconnect={needsScopeReconnect} />}
       </div>
       {toast && <Toast styles={styles} toast={toast} />}
       {pursueLaterFor && <PursueLaterModal styles={styles} date={pursueLaterDate} setDate={setPursueLaterDate} onSave={savePursueLater} onCancel={() => setPursueLaterFor(null)} />}
@@ -3789,7 +3859,7 @@ function MoreSheet({ styles, view, setView, onClose }) {
 // =================================================================
 // === DASHBOARD ===
 // =================================================================
-function DashboardView({ styles, stats, saveLinkedInUrl, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, crossThreadPool, bulkCrossThreadRunning, findNewAccounts, newAccountsRunning, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, editProspect, opensByProspect }) {
+function DashboardView({ styles, stats, saveLinkedInUrl, pdConnected, pdConnectError, hasAttemptedConnect, apolloQuota, apolloCycle, openBatchEnrich, crossThreadPool, bulkCrossThreadRunning, findNewAccounts, newAccountsRunning, pdMeta, setView, setFilterOutreach, clusters, fromName, pursueLaterDue, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, editProspect, opensByProspect, bouncesByRecipient }) {
   const topClusters = clusters.slice(0, 5);
   const firstName = (fromName || 'Anthony').split(' ')[0];
 
@@ -3881,7 +3951,7 @@ function DashboardView({ styles, stats, saveLinkedInUrl, pdConnected, pdConnectE
             {pursueLaterDue.length} prospect{pursueLaterDue.length === 1 ? '' : 's'} {pursueLaterDue.length === 1 ? 'is' : 'are'} ready to revisit. Review and decide: re-activate, push the date, or mark dead.
           </div>
           {pursueLaterDue.slice(0, 5).map(p => (
-            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensForProspect={opensByProspect ? opensByProspect[p.id] : null} />
+            <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensForProspect={opensByProspect ? opensByProspect[p.id] : null} bounceRecord={p.email && bouncesByRecipient ? bouncesByRecipient[p.email.toLowerCase()] : null} />
           ))}
           {pursueLaterDue.length > 5 && (
             <button style={{ ...styles.secondaryBtn, marginTop: '8px' }} onClick={() => setView('find')}>
@@ -4029,6 +4099,14 @@ function DashboardView({ styles, stats, saveLinkedInUrl, pdConnected, pdConnectE
               : stats.sent > 0 ? 'awaiting opens' : 'no tracked sends yet'}
             color={stats.totalOpens > 0 ? 'var(--ok)' : undefined}
           />
+          <MiniStat
+            label="Bounces"
+            value={stats.bouncedProspects}
+            sub={stats.sent > 0
+              ? `${Math.round(stats.bouncedProspects / Math.max(stats.sent, 1) * 100)}% bounce rate · ${stats.bouncedRecipients} bad address${stats.bouncedRecipients === 1 ? '' : 'es'}`
+              : 'no bounces detected'}
+            color={stats.bouncedProspects > 0 ? 'var(--warn)' : undefined}
+          />
           <MiniStat label="Open deals (PD)" value={stats.openDeals} sub="Live from pipeline" />
           <MiniStat
             label="Apollo credits"
@@ -4094,7 +4172,7 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
 // =================================================================
 // === FIND VIEW ===
 // =================================================================
-function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount, selectedProspectIds, onToggleSelect, onSelectAll, onClearSelection, onBatchDraft, editProspect, opensByProspect }) {
+function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount, selectedProspectIds, onToggleSelect, onSelectAll, onClearSelection, onBatchDraft, editProspect, opensByProspect, bouncesByRecipient }) {
   const [findTab, setFindTab] = useState('pool');
 
   return (
@@ -4323,7 +4401,7 @@ function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, 
             )}
 
             {prospects.slice(0, 50).map(p => (
-              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} selected={selectedProspectIds.has(p.id)} onToggleSelect={() => onToggleSelect && onToggleSelect(p.id)} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensForProspect={opensByProspect ? opensByProspect[p.id] : null} />
+              <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} selected={selectedProspectIds.has(p.id)} onToggleSelect={() => onToggleSelect && onToggleSelect(p.id)} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensForProspect={opensByProspect ? opensByProspect[p.id] : null} bounceRecord={p.email && bouncesByRecipient ? bouncesByRecipient[p.email.toLowerCase()] : null} />
             ))}
             {prospects.length > 50 && (
               <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic' }}>
@@ -4544,7 +4622,7 @@ function CSVImportTab({ styles, importCsvRows, showToast }) {
   );
 }
 
-function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, selected, onToggleSelect, saveLinkedInUrl, editProspect, opensForProspect }) {
+function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspect, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, selected, onToggleSelect, saveLinkedInUrl, editProspect, opensForProspect, bounceRecord }) {
   // Open-tracking aggregates for the small badge next to "Sent ×N".
   // opensForProspect comes from /api/opens polling: an array of sends, each
   // with its own opens array. Sum across sends for the per-prospect count.
@@ -4641,6 +4719,14 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
                 title={`${openCount} open event${openCount === 1 ? '' : 's'}${lastOpenAt ? ` · last opened ${new Date(lastOpenAt).toLocaleString()}` : ''}\n(Note: Apple/Gmail privacy proxies may inflate counts — treat as "opened at least once")`}
               >
                 <CheckCircle2 size={10} /> Opened {openCount === 1 ? '' : `×${openCount}`}
+              </span>
+            )}
+            {bounceRecord && (
+              <span
+                style={styles.badge('red')}
+                title={`Email to ${prospect.email} bounced ${bounceRecord.count > 1 ? bounceRecord.count + ' times' : ''}\nLast: ${bounceRecord.lastBouncedAt ? new Date(bounceRecord.lastBouncedAt).toLocaleString() : 'recent'}\nReason: ${bounceRecord.lastReason || 'delivery failed'}\nFix the email address before sending again.`}
+              >
+                <AlertCircle size={10} /> Bounced{bounceRecord.count > 1 ? ` ×${bounceRecord.count}` : ''}
               </span>
             )}
             {prospect.parentProspectId && <span style={styles.badge('navy')} title={`Multi-thread peer · added from ${prospect.source || 'a parent prospect'}`}><UserPlus size={10} /> peer</span>}
@@ -4954,7 +5040,7 @@ function segmentBadgeColor(seg) {
 // =================================================================
 // === CLUSTERS VIEW ===
 // =================================================================
-function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, editProspect, opensByProspect }) {
+function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, researchData, pdRecords, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, multiThreadAccount, editProspect, opensByProspect, bouncesByRecipient }) {
   const [expanded, setExpanded] = useState({});
   // Per-cluster "show all" toggle — when true, render every prospect in the
   // cluster instead of just the first 20.
@@ -4995,7 +5081,7 @@ function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, res
               return (
                 <div style={{ marginTop: '16px', borderTop: '1px solid rgba(232, 236, 243, 0.08)', paddingTop: '16px' }}>
                   {visible.map(p => (
-                    <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensForProspect={opensByProspect ? opensByProspect[p.id] : null} />
+                    <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensForProspect={opensByProspect ? opensByProspect[p.id] : null} bounceRecord={p.email && bouncesByRecipient ? bouncesByRecipient[p.email.toLowerCase()] : null} />
                   ))}
                   {cluster.prospects.length > 20 && (
                     <div style={{ textAlign: 'center', padding: '12px' }}>
@@ -5930,7 +6016,7 @@ function CoachView({ styles, coachTab, setCoachTab, coachSelectedSegment, setCoa
 // =================================================================
 // === SETTINGS VIEW ===
 // =================================================================
-function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdConnectError, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing, apolloQuota, fetchApolloQuota, prospects, overrides, pdRecords, researchData, showToast, msConnection, connectM365, disconnectM365 }) {
+function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdConnectError, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing, apolloQuota, fetchApolloQuota, prospects, overrides, pdRecords, researchData, showToast, msConnection, connectM365, disconnectM365, needsScopeReconnect }) {
   const exportAllData = () => {
     const payload = {
       exportedAt: new Date().toISOString(),
@@ -6005,6 +6091,16 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
               <button style={{ ...styles.secondaryBtn, marginTop: '10px', fontSize: '12px' }} onClick={disconnectM365}>
                 Disconnect
               </button>
+              {needsScopeReconnect && (
+                <div style={{ marginTop: '14px', padding: '10px 12px', background: 'var(--warn-soft)', border: '1px solid color-mix(in oklch, var(--warn) 30%, transparent)', borderRadius: '8px', fontSize: '12px', color: 'var(--warn)' }}>
+                  <div style={{ fontWeight: 600, marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <AlertCircle size={13} /> Reconnect required for bounce tracking
+                  </div>
+                  <div style={{ color: 'var(--text-2)' }}>
+                    Bounce detection needs Mail.Read permission. Disconnect and reconnect Microsoft 365 to grant it. Until then, sends still work — only bounce notifications are unavailable.
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <>

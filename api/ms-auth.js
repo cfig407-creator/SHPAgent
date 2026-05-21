@@ -19,7 +19,10 @@
 
 const TOKEN_KEY = 'shp:ms:tokens';
 const STATE_KEY = 'shp:ms:oauth_state';
-const SCOPES = 'Mail.Send User.Read offline_access';
+// Mail.Read added so we can detect NDR (bounce) messages in the user's inbox.
+// We ONLY query Graph for messages matching NDR patterns (postmaster sender,
+// "Undeliverable" subject prefix). Other inbox content is never read or stored.
+const SCOPES = 'Mail.Send Mail.Read User.Read offline_access';
 
 function kvAvailable() {
   return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);

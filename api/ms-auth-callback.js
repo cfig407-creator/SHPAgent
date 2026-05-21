@@ -9,7 +9,7 @@
 
 const TOKEN_KEY = 'shp:ms:tokens';
 const STATE_KEY = 'shp:ms:oauth_state';
-const SCOPES = 'Mail.Send User.Read offline_access';
+const SCOPES = 'Mail.Send Mail.Read User.Read offline_access';
 
 function kvAvailable() {
   return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
