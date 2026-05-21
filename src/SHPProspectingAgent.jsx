@@ -3532,7 +3532,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensByProspect={opensByProspect} />}
         {view === 'find' && <FindView styles={styles} saveLinkedInUrl={saveLinkedInUrl} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} editProspect={editProspect} opensByProspect={opensByProspect} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensByProspect={opensByProspect} />}
-        {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} reresearch={() => { setResearchData(prev => { const next = {...prev}; delete next[selectedProspect.id]; return next; }); researchProspect(selectedProspect, { force: true }); }} />}
+        {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} reresearch={() => { setResearchData(prev => { const next = {...prev}; delete next[selectedProspect.id]; return next; }); researchProspect(selectedProspect, { force: true }); }} pdRecord={pdRecords[selectedProspect.id]} opensForProspect={opensByProspect[selectedProspect.id]} pdMeta={pdMeta} stageDeals={stageDeals} config={config} markCustomer={markCustomer} setSelectedProspect={setSelectedProspect} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} msConnection={msConnection} sendViaM365={sendViaM365} isSendingM365={isSendingM365 === selectedProspect.id} opensForProspect={opensByProspect[selectedProspect.id] || []} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
@@ -5004,7 +5004,217 @@ function ClustersView({ styles, clusters, saveLinkedInUrl, researchProspect, res
 // =================================================================
 // === RESEARCH VIEW ===
 // =================================================================
-function ResearchView({ styles, prospect, research, isResearching, setView, draftOutreach, reresearch }) {
+// === PROSPECT ACTIVITY DASHBOARD ===
+// Per-prospect engagement summary at the top of the research view.
+// Shows: sent count, opens, last opened, follow-ups scheduled, pipeline
+// stage, a rule-based "suggested next action", and a chronological
+// activity timeline. All data is derived from existing state — no new
+// API calls. Follow-up completion state is local-only (see plan doc).
+function ProspectActivityDashboard({ styles, prospect, pdRecord, opensForProspect, pdMeta, stageDeals, config, markCustomer, setView, setSelectedProspect }) {
+  // ── Derived metrics ─────────────────────────────────────────────────
+  const sentHistory = Array.isArray(pdRecord?.sentHistory) ? pdRecord.sentHistory : (pdRecord?.sentAt ? [pdRecord.sentAt] : []);
+  const sentCount = sentHistory.length;
+  const maxTouches = Number.isFinite(config?.maxTouches) ? config.maxTouches : DEFAULT_MAX_TOUCHES;
+
+  const sends = Array.isArray(opensForProspect) ? opensForProspect : [];
+  const openEvents = sends.flatMap(s => Array.isArray(s?.opens) ? s.opens : []);
+  const openCount = openEvents.length;
+  const lastOpenIso = openCount > 0
+    ? openEvents.map(o => o.at).filter(Boolean).sort().slice(-1)[0]
+    : null;
+
+  // Follow-ups scheduled = trackingIds beyond the initial send. Fragile if
+  // user sends outside the M365 path; show "—" when math is suspect.
+  const trackingIds = Array.isArray(pdRecord?.trackingIds) ? pdRecord.trackingIds : [];
+  const followUpsScheduled = trackingIds.length > sentCount ? trackingIds.length - sentCount
+    : (pdRecord?.followUpsScheduled || 0);
+  const followUpDisplay = followUpsScheduled > 0 ? `${followUpsScheduled} scheduled` : 'none yet';
+
+  // Pipeline stage lookup. stageDeals is keyed by stageId → deal[]; find the
+  // stage containing our dealId. Only displayed if a deal exists.
+  let pipelineStageName = null;
+  if (pdRecord?.dealId && stageDeals) {
+    for (const [stageId, dealArr] of Object.entries(stageDeals)) {
+      if (Array.isArray(dealArr) && dealArr.some(d => String(d.id) === String(pdRecord.dealId))) {
+        const stage = (pdMeta?.stages || []).find(s => String(s.id) === String(stageId));
+        pipelineStageName = stage?.name || `Stage ${stageId}`;
+        break;
+      }
+    }
+  }
+
+  // ── Suggested next action (deterministic) ───────────────────────────
+  const now = Date.now();
+  const lastSentMs = pdRecord?.sentAt ? new Date(pdRecord.sentAt).getTime() : 0;
+  const daysSinceLastSent = lastSentMs > 0 ? (now - lastSentMs) / (1000 * 60 * 60 * 24) : null;
+  const lastOpenMs = lastOpenIso ? new Date(lastOpenIso).getTime() : 0;
+  const hoursSinceLastOpen = lastOpenMs > 0 ? (now - lastOpenMs) / (1000 * 60 * 60) : null;
+  const opensInLast24h = openEvents.filter(o => {
+    const t = new Date(o.at).getTime();
+    return now - t < 24 * 60 * 60 * 1000;
+  }).length;
+
+  let suggestion = null;
+  if (sentCount === 0) {
+    suggestion = { label: 'Draft and send first email', tone: 'info' };
+  } else if (sentCount >= maxTouches) {
+    suggestion = { label: 'Touch cap reached — pause or move to Pursue Later', tone: 'warn' };
+  } else if (opensInLast24h >= 3) {
+    suggestion = { label: '🔥 Hot — 3+ opens in 24h, call them now', tone: 'hot' };
+  } else if (openCount === 0 && daysSinceLastSent !== null && daysSinceLastSent < 3) {
+    suggestion = { label: `Wait — sent ${Math.round(daysSinceLastSent)}d ago, give it 5+ business days`, tone: 'info' };
+  } else if (openCount === 0 && daysSinceLastSent !== null && daysSinceLastSent > 7) {
+    suggestion = { label: 'Cold — try a different angle or send break-up email', tone: 'warn' };
+  } else if (openCount >= 1 && openCount <= 2) {
+    suggestion = { label: 'Lukewarm — send Day-7 follow-up', tone: 'ok' };
+  } else if (pdRecord?.dealId && hoursSinceLastOpen !== null && hoursSinceLastOpen < 48) {
+    suggestion = { label: 'Active deal with engagement — advance stage in PD', tone: 'ok' };
+  } else if (openCount > 0 && daysSinceLastSent !== null && daysSinceLastSent > 7) {
+    suggestion = { label: 'Quiet — send Day-14 break-up email', tone: 'info' };
+  }
+
+  // ── Timeline events (merge + sort + dedupe close-opens) ─────────────
+  const events = [];
+  for (const sentIso of sentHistory) {
+    if (sentIso) events.push({ at: sentIso, type: 'sent', label: `Sent (${pdRecord?.lastSendMethod === 'm365' ? 'M365' : 'manual'})` });
+  }
+  for (const o of openEvents) {
+    if (o?.at) events.push({ at: o.at, type: 'open', label: 'Opened', client: detectMailClient(o.ua) });
+  }
+  if (pdRecord?.leadId && pdRecord?.sentAt) {
+    // We don't store a pushed-at timestamp; approximate as the earliest sent if available
+    const earliest = sentHistory[0] || pdRecord.sentAt;
+    if (earliest) events.push({ at: earliest, type: 'pushed', label: pdRecord.dealId ? 'Pushed to Pipedrive (Deal)' : 'Pushed to Pipedrive (Lead)' });
+  }
+  events.sort((a, b) => new Date(b.at) - new Date(a.at));
+  // Dedupe consecutive opens from same client within 60s
+  const deduped = [];
+  for (const e of events) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && prev.type === 'open' && e.type === 'open' && prev.client === e.client) {
+      const gap = Math.abs(new Date(prev.at) - new Date(e.at));
+      if (gap < 60_000) { prev.count = (prev.count || 1) + 1; continue; }
+    }
+    deduped.push(e);
+  }
+  const timeline = deduped.slice(0, 10);
+
+  // ── Tone color helper ───────────────────────────────────────────────
+  const toneStyle = (tone) => {
+    if (tone === 'hot') return { bg: 'color-mix(in oklch, var(--danger) 18%, transparent)', fg: 'var(--danger)', border: 'color-mix(in oklch, var(--danger) 35%, transparent)' };
+    if (tone === 'ok') return { bg: 'var(--ok-soft)', fg: 'var(--ok)', border: 'color-mix(in oklch, var(--ok) 30%, transparent)' };
+    if (tone === 'warn') return { bg: 'var(--warn-soft)', fg: 'var(--warn)', border: 'color-mix(in oklch, var(--warn) 30%, transparent)' };
+    return { bg: 'var(--bg-sunk)', fg: 'var(--info)', border: 'var(--border)' };
+  };
+  const suggestionStyle = suggestion ? toneStyle(suggestion.tone) : null;
+
+  // ── Quick actions ───────────────────────────────────────────────────
+  const goToCompose = () => {
+    setSelectedProspect && setSelectedProspect(prospect);
+    setView('compose');
+  };
+  const leadOrDealUrl = pdRecord?.dealUrl || pdRecord?.leadUrl || null;
+
+  return (
+    <div style={{ ...styles.card, marginBottom: '14px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+        <div style={styles.sectionTitle}><TrendingUp size={14} /> Engagement</div>
+        {leadOrDealUrl && (
+          <a href={leadOrDealUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: '12px', color: 'var(--info)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+            View in Pipedrive <ExternalLink size={11} />
+          </a>
+        )}
+      </div>
+
+      {/* Metric tiles */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', marginBottom: '14px' }}>
+        <MiniStat label="Sent" value={sentCount} sub={sentCount > 0 ? `${sentCount} of ${maxTouches} touches` : 'no sends yet'} />
+        <MiniStat label="Opens" value={openCount} sub={openCount > 0 ? `across ${sends.length} send${sends.length === 1 ? '' : 's'}` : sentCount > 0 ? 'awaiting open' : '—'} color={openCount > 0 ? 'var(--ok)' : undefined} />
+        <MiniStat label="Last opened" value={lastOpenIso ? formatRelative(lastOpenIso) : '—'} sub={lastOpenIso ? new Date(lastOpenIso).toLocaleDateString() : 'no opens yet'} />
+        <MiniStat label="Follow-ups" value={followUpsScheduled || '—'} sub={followUpsScheduled > 0 ? 'scheduled in Pipedrive' : 'none yet'} />
+      </div>
+
+      {/* Pipeline stage row */}
+      {pipelineStageName && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'var(--bg-sunk)', border: '1px solid var(--border)', borderRadius: '8px', marginBottom: '14px', fontSize: '13px' }}>
+          <span style={{ color: 'var(--text-3)', fontWeight: 500 }}>Pipeline stage:</span>
+          <span style={{ fontWeight: 600 }}>{pipelineStageName}</span>
+          {pdRecord?.dealId && <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>· Deal #{pdRecord.dealId}</span>}
+        </div>
+      )}
+
+      {/* Suggested next action */}
+      {suggestion && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: suggestionStyle.bg, border: `1px solid ${suggestionStyle.border}`, borderRadius: '8px', marginBottom: '14px', fontSize: '13px', color: suggestionStyle.fg, fontWeight: 600 }}>
+          <Sparkles size={13} />
+          <span>{suggestion.label}</span>
+        </div>
+      )}
+
+      {/* Quick actions */}
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: timeline.length > 0 ? '14px' : 0 }}>
+        <button style={{ ...styles.secondaryBtn, fontSize: '12px' }} onClick={goToCompose}>
+          <Send size={12} /> {sentCount === 0 ? 'Draft first email' : `Open compose (review follow-ups)`}
+        </button>
+        {prospect.outreachStatus !== 'Customer' && markCustomer && (
+          <button style={{ ...styles.secondaryBtn, fontSize: '12px' }} onClick={() => markCustomer(prospect.id)}>
+            <CheckCircle2 size={12} /> Mark Customer
+          </button>
+        )}
+        {leadOrDealUrl && (
+          <a href={leadOrDealUrl} target="_blank" rel="noopener noreferrer" style={{ ...styles.secondaryBtn, fontSize: '12px', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            <Calendar size={12} /> Schedule in PD
+          </a>
+        )}
+      </div>
+
+      {/* Activity timeline */}
+      {timeline.length > 0 && (
+        <div>
+          <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600, color: 'var(--text-3)', marginBottom: '8px' }}>Activity</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {timeline.map((e, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '12px', color: 'var(--text-2)' }}>
+                <span style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: '11px', color: 'var(--text-3)', minWidth: '110px' }}>
+                  {new Date(e.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                </span>
+                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: e.type === 'open' ? 'var(--ok)' : e.type === 'sent' ? 'var(--warn)' : 'var(--info)', flexShrink: 0 }} />
+                <span>{e.label}{e.client ? ` (${e.client})` : ''}{e.count && e.count > 1 ? ` ×${e.count}` : ''}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Detect the email client from a user-agent string captured by the pixel.
+// Used to label opens in the timeline.
+function detectMailClient(ua) {
+  if (!ua || typeof ua !== 'string') return '';
+  const s = ua.toLowerCase();
+  if (s.includes('appleimagepro') || s.includes('mailprivacyprotection')) return 'Apple Mail';
+  if (s.includes('googleimageproxy') || s.includes('gmailimageproxy') || (s.includes('gmail') && s.includes('proxy'))) return 'Gmail';
+  if (s.includes('outlook') || s.includes('msoffice')) return 'Outlook';
+  if (s.includes('mailchimp')) return 'Mailchimp';
+  if (s.includes('iphone') || s.includes('ipad')) return 'iOS';
+  if (s.includes('android')) return 'Android';
+  return '';
+}
+
+// Short relative time formatter: "2 hours ago", "3 days ago", "just now"
+function formatRelative(iso) {
+  if (!iso) return '—';
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 60_000) return 'just now';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function ResearchView({ styles, prospect, research, isResearching, setView, draftOutreach, reresearch, pdRecord, opensForProspect, pdMeta, stageDeals, config, markCustomer, setSelectedProspect }) {
   const [diagOpen, setDiagOpen] = useState(false);
   const diag = research?._diagnostic;
   const specificity = research?.specificityRating || 'unknown';
@@ -5015,6 +5225,24 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
       <button style={{ ...styles.secondaryBtn, marginBottom: '16px' }} onClick={() => setView('find')}>← Back</button>
       <div className="shp-page-title" style={styles.pageTitle}>{prospect.name || 'Unnamed contact'}</div>
       <div style={styles.pageSubtitle}>{prospect.title} · {prospect.company} · {prospect.city}, {prospect.county}</div>
+
+      {/* Per-prospect engagement dashboard — sent/opens/follow-ups, suggested
+          next action, activity timeline. Renders only when we have any
+          activity data so a brand-new prospect doesn't see an empty card. */}
+      {(pdRecord?.sentAt || (opensForProspect && opensForProspect.length > 0)) && (
+        <ProspectActivityDashboard
+          styles={styles}
+          prospect={prospect}
+          pdRecord={pdRecord}
+          opensForProspect={opensForProspect}
+          pdMeta={pdMeta}
+          stageDeals={stageDeals}
+          config={config}
+          markCustomer={markCustomer}
+          setView={setView}
+          setSelectedProspect={setSelectedProspect}
+        />
+      )}
 
       {isResearching ? (
         <div style={{ ...styles.card, textAlign: 'center', padding: '60px' }}>
