@@ -596,7 +596,7 @@ export default function SHPProspectingAgent() {
   // Fetch Apollo credit usage so we can warn before the user runs out.
   const fetchApolloQuota = async () => {
     try {
-      const r = await apiFetch('/api/apollo-quota', { method: 'GET' }, { retries: 1, timeoutMs: 5000 });
+      const r = await apiFetch('/api/apollo?action=quota', { method: 'GET' }, { retries: 1, timeoutMs: 5000 });
       setApolloQuota({
         used: r.creditsUsed,
         total: r.creditsTotal,
@@ -787,7 +787,7 @@ export default function SHPProspectingAgent() {
     }
 
     try {
-      const data = await postJson('/api/apollo-people-search', {
+      const data = await postJson('/api/apollo?action=people-search', {
         titles,
         // Send each CFL North county as its own location filter so Apollo
         // narrows from "anyone in Florida" to "anyone in these 15 counties".
@@ -1517,7 +1517,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       // If the org's directory has the named person with an email, we may not
       // need Apollo's verified email at all — free, straight from the source.
       const [apolloResult, webResult] = await Promise.allSettled([
-        postJson('/api/apollo-enrich', {
+        postJson('/api/apollo?action=enrich', {
           firstName,
           lastName,
           name: prospect.name,
@@ -2054,7 +2054,7 @@ Other rules:
       let pageError = null;
       for (let page = 1; page <= APOLLO_MAX_PAGES; page++) {
         try {
-          const data = await postJson('/api/apollo-people-search', {
+          const data = await postJson('/api/apollo?action=people-search', {
             organizationName: prospect.company,
             titles,
             limit: APOLLO_PAGE_SIZE,
@@ -2359,7 +2359,7 @@ Other rules:
       try {
         // Run Apollo people-search + org website directory scrape in parallel
         const [apolloRes, webRes] = await Promise.allSettled([
-          postJson('/api/apollo-people-search', {
+          postJson('/api/apollo?action=people-search', {
             organizationName: item.displayName,
             titles,
             limit: 10,
@@ -2572,7 +2572,7 @@ Other rules:
       setNewAccountsProgress({ phase: 'orgs', done: i, total: segmentSearches.length, currentOrg: s.segment });
 
       try {
-        const data = await postJson('/api/apollo-org-search', {
+        const data = await postJson('/api/apollo?action=org-search', {
           keywords: s.keywords,
           locations,
           keywordsExclude: excludeKeywords,
@@ -2650,7 +2650,7 @@ Other rules:
       const titles = getMultiThreadTitles(null, org.segment);
 
       try {
-        const data = await postJson('/api/apollo-people-search', {
+        const data = await postJson('/api/apollo?action=people-search', {
           organizationName: org.name,
           titles,
           limit: 8,
@@ -2752,7 +2752,7 @@ Other rules:
         const webPerson = webData ? matchPersonInDirectory(webData.contacts, target.name) : null;
 
         // Apollo enrich
-        const data = await postJson('/api/apollo-enrich', {
+        const data = await postJson('/api/apollo?action=enrich', {
           firstName,
           lastName,
           name: target.name,
