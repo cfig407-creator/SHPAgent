@@ -163,6 +163,11 @@ export default function SHPProspectingAgent() {
   const [filterCounty, setFilterCounty] = useState('all');
   const [filterStatus, setFilterStatus] = useState('Ready');
   const [filterOutreach, setFilterOutreach] = useState('Active'); // Active/Customer/Dead/PursueLater/all
+  // Sort order for the Find list. 'priority' is default (matches original
+  // behavior — high-priority leads first). 'sent-desc' / 'opens-desc' surface
+  // the most-engaged prospects for follow-up; 'sent-asc' / 'opens-asc' for
+  // catching cold ones. 'name' for alphabetical scrolling.
+  const [sortBy, setSortBy] = useState('priority');
   const [search, setSearch] = useState('');
 
   // Per-prospect overrides — { [prospectId]: { outreachStatus, revisitDate, deletedAt } }
@@ -3496,8 +3501,31 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         if (!`${p.name} ${p.company} ${p.city} ${p.title}`.toLowerCase().includes(q)) return false;
       }
       return true;
-    }).sort((a, b) => (b.priority || 0) - (a.priority || 0));
-  }, [prospectsWithOverrides, filterOutreach, filterStatus, filterSegment, filterCounty, search]);
+    }).sort((a, b) => {
+      // Helpers to derive sent + open counts from existing state maps.
+      const sentCount = (p) => {
+        const rec = pdRecords[p.id];
+        if (!rec) return 0;
+        if (Array.isArray(rec.sentHistory)) return rec.sentHistory.length;
+        return rec.sentAt ? 1 : 0;
+      };
+      const openCount = (p) => {
+        const sends = opensByProspect[p.id];
+        if (!Array.isArray(sends)) return 0;
+        return sends.reduce((sum, s) => sum + (Array.isArray(s.opens) ? s.opens.length : 0), 0);
+      };
+      switch (sortBy) {
+        case 'sent-desc':  return sentCount(b) - sentCount(a) || (b.priority || 0) - (a.priority || 0);
+        case 'sent-asc':   return sentCount(a) - sentCount(b) || (b.priority || 0) - (a.priority || 0);
+        case 'opens-desc': return openCount(b) - openCount(a) || (b.priority || 0) - (a.priority || 0);
+        case 'opens-asc':  return openCount(a) - openCount(b) || (b.priority || 0) - (a.priority || 0);
+        case 'name':       return (a.name || '').localeCompare(b.name || '');
+        case 'company':    return (a.company || '').localeCompare(b.company || '');
+        case 'priority':
+        default:           return (b.priority || 0) - (a.priority || 0);
+      }
+    });
+  }, [prospectsWithOverrides, filterOutreach, filterStatus, filterSegment, filterCounty, search, sortBy, pdRecords, opensByProspect]);
 
   // Clusters: only Ready + Active + clean data (no Customers, Dead, PursueLater, or enrichment-needed)
   const clusters = useMemo(() => buildClusters(
@@ -3602,7 +3630,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       />
       <div className="shp-main" style={styles.main}>
         {view === 'dashboard' && <DashboardView styles={styles} stats={stats} pdConnected={pdConnected} pdConnectError={pdConnectError} hasAttemptedConnect={hasAttemptedConnect} apolloQuota={effectiveQuota} apolloCycle={apolloCycle} openBatchEnrich={() => setBatchEnrichOpen(true)} crossThreadPool={crossThreadPool} bulkCrossThreadRunning={bulkCrossThreadRunning} findNewAccounts={findNewAccounts} newAccountsRunning={newAccountsRunning} pdMeta={pdMeta} setView={setView} setFilterOutreach={setFilterOutreach} clusters={clusters} fromName={config.fromName} pursueLaterDue={pursueLaterDue} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensByProspect={opensByProspect} bouncesByRecipient={bouncesByRecipient} />}
-        {view === 'find' && <FindView styles={styles} saveLinkedInUrl={saveLinkedInUrl} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} editProspect={editProspect} opensByProspect={opensByProspect} bouncesByRecipient={bouncesByRecipient} />}
+        {view === 'find' && <FindView styles={styles} saveLinkedInUrl={saveLinkedInUrl} apolloCriteria={apolloCriteria} setApolloCriteria={setApolloCriteria} runApolloSearch={runApolloSearch} isApolloSearching={isApolloSearching} manualForm={manualForm} setManualForm={setManualForm} addManualProspect={addManualProspect} importCsvRows={importCsvRows} showToast={showToast} prospects={filteredProspects} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} filterSegment={filterSegment} setFilterSegment={setFilterSegment} filterCounty={filterCounty} setFilterCounty={setFilterCounty} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterOutreach={filterOutreach} setFilterOutreach={setFilterOutreach} sortBy={sortBy} setSortBy={setSortBy} search={search} setSearch={setSearch} totalProspects={prospects.length} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} apolloQuota={effectiveQuota} multiThreadAccount={multiThreadAccount} selectedProspectIds={selectedProspectIds} onToggleSelect={(id) => setSelectedProspectIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; })} onSelectAll={(ids) => setSelectedProspectIds(prev => { const next = new Set(prev); ids.forEach(id => next.add(id)); return next; })} onClearSelection={() => setSelectedProspectIds(new Set())} onBatchDraft={(ids) => runBatchDraft(ids)} editProspect={editProspect} opensByProspect={opensByProspect} bouncesByRecipient={bouncesByRecipient} />}
         {view === 'clusters' && <ClustersView styles={styles} clusters={clusters} researchProspect={researchProspect} researchData={researchData} pdRecords={pdRecords} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensByProspect={opensByProspect} bouncesByRecipient={bouncesByRecipient} />}
         {view === 'research' && selectedProspect && <ResearchView styles={styles} prospect={selectedProspect} research={researchData[selectedProspect.id]} isResearching={isResearching} setView={setView} draftOutreach={draftOutreach} reresearch={() => { setResearchData(prev => { const next = {...prev}; delete next[selectedProspect.id]; return next; }); researchProspect(selectedProspect, { force: true }); }} pdRecord={pdRecords[selectedProspect.id]} opensForProspect={opensByProspect[selectedProspect.id]} pdMeta={pdMeta} stageDeals={stageDeals} config={config} markCustomer={markCustomer} setSelectedProspect={setSelectedProspect} />}
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} msConnection={msConnection} sendViaM365={sendViaM365} isSendingM365={isSendingM365 === selectedProspect.id} opensForProspect={opensByProspect[selectedProspect.id] || []} />}
@@ -4172,7 +4200,7 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
 // =================================================================
 // === FIND VIEW ===
 // =================================================================
-function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount, selectedProspectIds, onToggleSelect, onSelectAll, onClearSelection, onBatchDraft, editProspect, opensByProspect, bouncesByRecipient }) {
+function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, sortBy, setSortBy, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount, selectedProspectIds, onToggleSelect, onSelectAll, onClearSelection, onBatchDraft, editProspect, opensByProspect, bouncesByRecipient }) {
   const [findTab, setFindTab] = useState('pool');
 
   return (
@@ -4342,6 +4370,18 @@ function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, 
                 <select style={styles.input} value={filterCounty} onChange={e => setFilterCounty(e.target.value)}>
                   <option value="all">All</option>
                   {TERRITORY.counties.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={styles.label}>Sort by</label>
+                <select style={styles.input} value={sortBy} onChange={e => setSortBy(e.target.value)}>
+                  <option value="priority">Priority (default)</option>
+                  <option value="sent-desc">Most sent</option>
+                  <option value="sent-asc">Least sent</option>
+                  <option value="opens-desc">Most opens</option>
+                  <option value="opens-asc">Least opens</option>
+                  <option value="name">Name (A→Z)</option>
+                  <option value="company">Company (A→Z)</option>
                 </select>
               </div>
             </div>
