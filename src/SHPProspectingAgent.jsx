@@ -5226,23 +5226,21 @@ function ResearchView({ styles, prospect, research, isResearching, setView, draf
       <div className="shp-page-title" style={styles.pageTitle}>{prospect.name || 'Unnamed contact'}</div>
       <div style={styles.pageSubtitle}>{prospect.title} · {prospect.company} · {prospect.city}, {prospect.county}</div>
 
-      {/* Per-prospect engagement dashboard — sent/opens/follow-ups, suggested
-          next action, activity timeline. Renders only when we have any
-          activity data so a brand-new prospect doesn't see an empty card. */}
-      {(pdRecord?.sentAt || (opensForProspect && opensForProspect.length > 0)) && (
-        <ProspectActivityDashboard
-          styles={styles}
-          prospect={prospect}
-          pdRecord={pdRecord}
-          opensForProspect={opensForProspect}
-          pdMeta={pdMeta}
-          stageDeals={stageDeals}
-          config={config}
-          markCustomer={markCustomer}
-          setView={setView}
-          setSelectedProspect={setSelectedProspect}
-        />
-      )}
+      {/* Per-prospect engagement dashboard — always renders. Even with zero
+          activity, it surfaces the "Draft first email" suggestion and quick
+          actions, which is useful from the start. */}
+      <ProspectActivityDashboard
+        styles={styles}
+        prospect={prospect}
+        pdRecord={pdRecord}
+        opensForProspect={opensForProspect}
+        pdMeta={pdMeta}
+        stageDeals={stageDeals}
+        config={config}
+        markCustomer={markCustomer}
+        setView={setView}
+        setSelectedProspect={setSelectedProspect}
+      />
 
       {isResearching ? (
         <div style={{ ...styles.card, textAlign: 'center', padding: '60px' }}>
