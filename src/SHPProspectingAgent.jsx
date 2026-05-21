@@ -2902,7 +2902,7 @@ Other rules:
   // and reverts to whatever the underlying prospect record has.
   const editProspect = (prospectId, fields) => {
     if (!prospectId || !fields || typeof fields !== 'object') return;
-    const allowed = ['name', 'title', 'email', 'phone'];
+    const allowed = ['name', 'title', 'email', 'phone', 'company'];
     const cleaned = {};
     for (const k of allowed) {
       if (k in fields) cleaned[k] = typeof fields[k] === 'string' ? fields[k].trim() : fields[k];
@@ -3367,15 +3367,17 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       const o = overrides[p.id];
       const explicitStatus = o?.outreachStatus;
 
-      // Apply user-edited field overrides FIRST (name, title, email, phone) —
-      // these take precedence over whatever Apollo/scrape/seed put on the
-      // record, since the user explicitly typed them.
+      // Apply user-edited field overrides FIRST (name, title, email, phone,
+      // company) — these take precedence over whatever Apollo/scrape/seed put
+      // on the record, since the user explicitly typed them. Company override
+      // is the key case for prospects who change jobs.
       const overridden = {
         ...p,
         name: o?.name || p.name,
         title: o?.title || p.title,
         email: o?.email || p.email,
         phone: o?.phone || p.phone,
+        company: o?.company || p.company,
       };
 
       // Check customer collision (only if user hasn't explicitly set status)
@@ -3402,7 +3404,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         customerMatch, // present when org auto-matched a customer
         needsEnrichment: enrichment.needsEnrichment,
         enrichmentReasons: enrichment.reasons,
-        userEdited: !!(o?.name || o?.title || o?.email || o?.phone),
+        userEdited: !!(o?.name || o?.title || o?.email || o?.phone || o?.company),
       };
     });
   }, [prospects, overrides]);
@@ -4562,6 +4564,7 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
       title: prospect.title || '',
       email: prospect.email || '',
       phone: prospect.phone || '',
+      company: prospect.company || '',
     });
     setIsEditing(true);
   };
@@ -4773,6 +4776,21 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
                     onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
                   />
                 </div>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <label style={{ fontSize: '11px', color: 'var(--text-3)', display: 'block', marginBottom: '3px' }}>
+                    Company {prospect.company && editDraft.company !== prospect.company && (
+                      <span style={{ color: 'var(--warn)', fontWeight: 600 }}>· changing org — verify the new employer</span>
+                    )}
+                  </label>
+                  <input
+                    type="text"
+                    value={editDraft.company || ''}
+                    onChange={e => setEditDraft(d => ({ ...d, company: e.target.value }))}
+                    style={{ ...styles.input, padding: '6px 10px', fontSize: '13px' }}
+                    placeholder="The Geneva School Inc."
+                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
+                  />
+                </div>
               </div>
               <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
                 <button style={{ ...styles.secondaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={cancelEdit}>
@@ -4868,7 +4886,7 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
             <button
               style={{ ...styles.secondaryBtn, padding: '8px 10px' }}
               onClick={() => isEditing ? cancelEdit() : startEdit()}
-              title={isEditing ? 'Cancel edit' : 'Edit name / title / email / phone'}
+              title={isEditing ? 'Cancel edit' : 'Edit name / title / email / phone / company'}
             >
               {isEditing ? <X size={13} /> : <Edit3 size={13} />}
             </button>
