@@ -43,6 +43,106 @@ async function kvSet(key, value) {
   if (!r.ok) throw new Error(`KV set ${r.status}`);
 }
 
+// Atomic Redis ops to avoid read-modify-write races on shared state.
+// Used by trackindex (per-prospect send list) and bounce records (cross-
+// tab polling could otherwise clobber each other's writes).
+async function kvRPushRaw(key, ...values) {
+  const body = JSON.stringify(values.map(v => typeof v === 'string' ? v : JSON.stringify(v)));
+  const r = await fetch(`${process.env.KV_REST_API_URL}/rpush/${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body,
+  });
+  if (!r.ok) {
+    const text = await r.text();
+    return { ok: false, wrongType: /wrongtype/i.test(text), error: text };
+  }
+  return { ok: true };
+}
+
+async function kvDel(key) {
+  await fetch(`${process.env.KV_REST_API_URL}/del/${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
+  });
+}
+
+// Append a value to a Redis list, with one-time migration support: if the
+// key holds a legacy JSON-array string (from before the atomic-write fix),
+// parse + DEL it, RPUSH all existing items, then RPUSH the new value.
+// Subsequent writes are pure RPUSH with no overhead.
+async function kvSafeAppendList(key, value) {
+  const first = await kvRPushRaw(key, value);
+  if (first.ok) return;
+  if (!first.wrongType) {
+    console.warn('[kv] RPUSH failed for', key, '—', first.error?.slice(0, 200));
+    return;
+  }
+  // Legacy format detected. Migrate.
+  const oldData = await kvGet(key);
+  await kvDel(key);
+  if (Array.isArray(oldData) && oldData.length > 0) {
+    await kvRPushRaw(key, ...oldData.map(v => (typeof v === 'string' ? v : JSON.stringify(v))));
+  }
+  // Retry the new push on the now-empty key
+  await kvRPushRaw(key, value);
+}
+
+async function kvLRange(key) {
+  const r = await fetch(`${process.env.KV_REST_API_URL}/lrange/${encodeURIComponent(key)}/0/-1`, {
+    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
+  });
+  if (!r.ok) return [];
+  const json = await r.json();
+  const items = Array.isArray(json?.result) ? json.result : [];
+  return items.map(s => { try { return JSON.parse(s); } catch { return s; } });
+}
+
+// HSET on a Redis hash — atomic per-field write, no race when multiple
+// concurrent writers update different fields of the same hash.
+async function kvHSet(key, field, value) {
+  const url = `${process.env.KV_REST_API_URL}/hset/${encodeURIComponent(key)}/${encodeURIComponent(field)}`;
+  await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(typeof value === 'string' ? value : JSON.stringify(value)),
+  });
+}
+
+async function kvHGetField(key, field) {
+  const url = `${process.env.KV_REST_API_URL}/hget/${encodeURIComponent(key)}/${encodeURIComponent(field)}`;
+  const r = await fetch(url, {
+    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
+  });
+  if (!r.ok) return null;
+  const json = await r.json();
+  if (!json?.result) return null;
+  try { return JSON.parse(json.result); } catch { return null; }
+}
+
+async function kvHGetAll(key) {
+  const r = await fetch(`${process.env.KV_REST_API_URL}/hgetall/${encodeURIComponent(key)}`, {
+    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
+  });
+  if (!r.ok) return {};
+  const json = await r.json();
+  // Upstash returns hash as an array of alternating field/value strings
+  const arr = Array.isArray(json?.result) ? json.result : [];
+  const out = {};
+  for (let i = 0; i < arr.length; i += 2) {
+    const k = arr[i];
+    const v = arr[i + 1];
+    try { out[k] = JSON.parse(v); } catch { out[k] = v; }
+  }
+  return out;
+}
+
 function getAppBase(req) {
   if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, '');
   const host = req.headers['x-forwarded-host'] || req.headers.host;
@@ -183,12 +283,13 @@ export default async function handler(req, res) {
       sentAt: new Date().toISOString(),
     });
 
-    // Append to per-prospect tracking index
+    // Append to per-prospect tracking index via atomic RPUSH.
+    // Prevents lost trackingIds when two sends to the same prospect race
+    // (rapid double-click, batch send, or multi-tab — all real cases).
+    // kvSafeAppendList handles migration from the legacy JSON-array format
+    // if this prospect's trackindex was written before the atomic fix.
     if (prospectId) {
-      const indexKey = `shp:trackindex:${prospectId}`;
-      const existing = (await kvGet(indexKey)) || [];
-      existing.push(trackingId);
-      await kvSet(indexKey, existing);
+      await kvSafeAppendList(`shp:trackindex:${prospectId}`, trackingId);
     }
 
     return res.status(200).json({ ok: true, trackingId, pixelUrl });
@@ -274,8 +375,14 @@ async function checkBounces(req, res) {
       return isPostmaster || isNdrSubject;
     });
 
-    // Load existing bounce records to dedupe (by Graph message id)
-    const existingBounces = (await kvGet('shp:bounces:all')) || [];
+    // Load existing bounce records to dedupe (by Graph message id).
+    // Try list format first (atomic RPUSH writes); fall back to legacy
+    // JSON-string-array format for any data from before the migration.
+    let existingBounces = await kvLRange('shp:bounces:all');
+    if (existingBounces.length === 0) {
+      const legacy = await kvGet('shp:bounces:all');
+      if (Array.isArray(legacy)) existingBounces = legacy;
+    }
     const existingIds = new Set(existingBounces.map(b => b.graphMessageId));
 
     // Parse each NDR body to extract recipient + original subject + reason
@@ -325,28 +432,49 @@ async function checkBounces(req, res) {
       newRecords.push(record);
     }
 
-    // Persist updated bounce list
+    // Persist new bounce records atomically.
+    // - shp:bounces:all is a Redis list (RPUSH each new record + LTRIM to 500).
+    //   Multi-tab polling won't clobber concurrent writes the way kvSet did.
+    // - shp:bounces:byrecipient is a Redis hash (HSET per recipient field).
+    //   Two tabs updating different recipients can't lose each other's data.
     if (newRecords.length > 0) {
-      const merged = [...existingBounces, ...newRecords];
-      // Cap at 500 records to keep KV value small
-      if (merged.length > 500) merged.splice(0, merged.length - 500);
-      await kvSet('shp:bounces:all', merged);
+      for (const rec of newRecords) {
+        await kvSafeAppendList('shp:bounces:all', rec);
+      }
+      // Trim the all-bounces list to last 500
+      await fetch(`${process.env.KV_REST_API_URL}/ltrim/${encodeURIComponent('shp:bounces:all')}/-500/-1`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
+      });
 
-      // Also build a recipient → bounce index for fast lookup from the UI
-      const byRecipient = (await kvGet('shp:bounces:byrecipient')) || {};
+      // Update recipient hash. For each new bounce, HGET the field, increment
+      // count + update last fields, HSET. Per-field atomic write — even if
+      // two recipients race, they target different fields.
       for (const r of newRecords) {
         if (!r.recipient) continue;
-        const existing = byRecipient[r.recipient] || { count: 0, lastBouncedAt: null, lastReason: '' };
-        existing.count = (existing.count || 0) + 1;
-        existing.lastBouncedAt = r.bouncedAt;
-        existing.lastReason = r.reason;
-        byRecipient[r.recipient] = existing;
+        const field = r.recipient;
+        const existing = await kvHGetField('shp:bounces:byrecipient', field);
+        const updated = {
+          count: (existing?.count || 0) + 1,
+          lastBouncedAt: r.bouncedAt,
+          lastReason: r.reason,
+        };
+        await kvHSet('shp:bounces:byrecipient', field, updated);
       }
-      await kvSet('shp:bounces:byrecipient', byRecipient);
     }
 
-    const allBounces = newRecords.length > 0 ? [...existingBounces, ...newRecords] : existingBounces;
-    const byRecipient = (await kvGet('shp:bounces:byrecipient')) || {};
+    // Read merged set back for the response
+    let allBounces = await kvLRange('shp:bounces:all');
+    if (allBounces.length === 0) {
+      const legacy = await kvGet('shp:bounces:all');
+      if (Array.isArray(legacy)) allBounces = legacy;
+    }
+    let byRecipient = await kvHGetAll('shp:bounces:byrecipient');
+    if (Object.keys(byRecipient).length === 0) {
+      // Legacy fallback — old JSON-object format
+      const legacy = await kvGet('shp:bounces:byrecipient');
+      if (legacy && typeof legacy === 'object') byRecipient = legacy;
+    }
 
     return res.status(200).json({
       ok: true,

@@ -19,24 +19,24 @@ function kvAvailable() {
   return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
 }
 
-async function kvGet(key) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/get/${encodeURIComponent(key)}`, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) return null;
-  const json = await r.json();
-  if (!json?.result) return null;
-  try { return JSON.parse(json.result); } catch { return null; }
-}
-
-async function kvSet(key, value) {
-  await fetch(`${process.env.KV_REST_API_URL}/set/${encodeURIComponent(key)}`, {
+// Atomic RPUSH for the opens list. Avoids the read-modify-write race that
+// pixel writes have when multiple opens fire concurrently (Apple Mail
+// Privacy Protection and Gmail's image proxy both preload pixels, so
+// parallel hits are common).
+async function kvRPushAndTrim(key, value, keepLast) {
+  const url = `${process.env.KV_REST_API_URL}/pipeline`;
+  // Upstash pipeline format: array of command arrays. Atomic-ish in practice.
+  const body = JSON.stringify([
+    ['RPUSH', key, JSON.stringify(value)],
+    ['LTRIM', key, `-${keepLast}`, '-1'],
+  ]);
+  await fetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(value),
+    body,
   });
 }
 
@@ -58,17 +58,23 @@ export default async function handler(req, res) {
     return sendPixel(res);
   }
 
+  // Validate the tracking ID shape — we generate `t_<timestamp>_<random>`
+  // and don't want arbitrary client-controlled strings polluting KV keys.
+  if (!/^t_\d{10,16}_[a-z0-9]{4,16}$/.test(id)) {
+    return sendPixel(res);
+  }
+
   try {
     const key = `shp:opens:${id}`;
-    const existing = (await kvGet(key)) || [];
-    existing.push({
+    const event = {
       at: new Date().toISOString(),
       ua: (req.headers['user-agent'] || '').toString().slice(0, 300),
       ip: (req.headers['x-forwarded-for'] || req.connection?.remoteAddress || '').toString().split(',')[0].trim(),
-    });
-    // Cap at 50 entries per tracking ID — protects against runaway pixel caches
-    if (existing.length > 50) existing.splice(0, existing.length - 50);
-    await kvSet(key, existing);
+    };
+    // Atomic RPUSH + LTRIM keeps the last 50 events. Concurrent pixel hits
+    // can't lose data this way (previous read-modify-write pattern silently
+    // dropped opens when two pixels resolved on the same tracking ID).
+    await kvRPushAndTrim(key, event, 50);
   } catch (err) {
     // Swallow — pixel must still load
     console.warn('[pixel] log open failed:', err.message);

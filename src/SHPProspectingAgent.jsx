@@ -480,6 +480,40 @@ export default function SHPProspectingAgent() {
   // Persist Apollo cycle on every update (including auto-rotate at month boundary)
   useEffect(() => { saveApolloCycle(apolloCycle); }, [apolloCycle]);
 
+  // ── Cross-tab state sync via localStorage 'storage' event ──
+  // Browser fires this event in OTHER tabs (not the writer) when localStorage
+  // changes. Without it, two tabs maintain divergent state and the last one
+  // to write to localStorage wins on next reload — silently losing updates
+  // from the other tab. With it, each tab re-hydrates the changed key so
+  // their views stay in sync.
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (!e?.key || !e.newValue) return;
+      try {
+        const parsed = JSON.parse(e.newValue);
+        if (e.key === 'shp_pd_records_v1') setPdRecords(parsed);
+        else if (e.key === 'shp_prospect_overrides_v3') setOverrides(parsed);
+        else if (e.key === 'shp_research_v1') setResearchData(parsed);
+        else if (e.key === 'shp_drafts_v1') setDrafts(parsed);
+        else if (e.key === 'shp_prospects_added_v1' && Array.isArray(parsed)) {
+          // Merge with existing prospects, deduping by id (other tab may have
+          // added prospects this tab doesn't know about).
+          setProspects(prev => {
+            const existingIds = new Set(prev.map(p => p.id));
+            const newOnes = parsed.filter(p => !existingIds.has(p.id));
+            return newOnes.length > 0 ? [...newOnes, ...prev] : prev;
+          });
+        }
+        else if (e.key === 'shp_directory_urls_v1') setDirectoryUrls(parsed);
+      } catch (err) {
+        // Bad JSON from a malformed localStorage write — non-fatal
+        console.warn('[shp] storage-event re-hydrate failed for', e.key, err.message);
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Rate-limit retry notifications ──
   // api-client.js fires "shp:rate-limit-retry" events when it hits a 429 and
   // schedules a backoff retry. Surface a single short toast so the user knows
@@ -1470,9 +1504,15 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       // We use a generic format that works regardless of subdomain
       const leadUrl = `https://app.pipedrive.com/leads/inbox/${leadId}`;
 
+      // Preserve any prior PD record fields (e.g. sentHistory if the user
+      // already sent via Outlook before pushing). Without the spread, the
+      // initial push would wipe send history.
       setPdRecords(prev => ({
         ...prev,
-        [selectedProspect.id]: { orgId, personId, leadId, leadUrl },
+        [selectedProspect.id]: {
+          ...(prev[selectedProspect.id] || {}),
+          orgId, personId, leadId, leadUrl,
+        },
       }));
       showToast(`Created lead in Pipedrive — convert to deal when site walk scheduled`);
       // Don't sync the deal pipeline since we didn't create a deal
@@ -3034,18 +3074,29 @@ Other rules:
     const url = `https://outlook.office.com/mail/deeplink/compose?${parts.join('&')}`;
     window.open(url, '_blank', 'noopener,noreferrer');
 
+    // Derive new history INSIDE the updater to avoid closure-race with rapid
+    // double-clicks or multi-tab concurrent updates. prevHistory above is
+    // only used for the pre-flight touch-cap warning.
     const now = new Date().toISOString();
-    const nextHistory = [...prevHistory, now];
-    setPdRecords(prev => ({
-      ...prev,
-      [selectedProspect.id]: {
-        ...prev[selectedProspect.id],
-        sentAt: now,                  // kept for backward compatibility
-        sentHistory: nextHistory,     // full timeline of touches
-        touchCount: nextHistory.length,
-      },
-    }));
-    showToast(`Opened in Outlook · touch #${nextHistory.length} of ${cap}`);
+    let touchNumber = 0; // captured for the toast after setState commits
+    setPdRecords(prev => {
+      const existing = prev[selectedProspect.id] || {};
+      const histRaw = Array.isArray(existing.sentHistory)
+        ? existing.sentHistory
+        : (existing.sentAt ? [existing.sentAt] : []);
+      const newHist = [...histRaw, now];
+      touchNumber = newHist.length;
+      return {
+        ...prev,
+        [selectedProspect.id]: {
+          ...existing,
+          sentAt: now,                  // kept for backward compatibility
+          sentHistory: newHist,         // full timeline of touches
+          touchCount: newHist.length,
+        },
+      };
+    });
+    showToast(`Opened in Outlook · touch #${touchNumber} of ${cap}`);
   };
 
   // === Open the lead/deal in Pipedrive's web UI to compose there ===
@@ -3121,19 +3172,29 @@ Other rules:
         : `https://app.pipedrive.com/deal/${rec.dealId}`;
       window.open(url, '_blank', 'noopener,noreferrer');
 
-      // Record the touch optimistically (user is committing to send)
+      // Record the touch optimistically (user is committing to send).
+      // Derive history INSIDE updater to avoid closure-race with rapid clicks
+      // or concurrent updates from multi-tab.
       const now = new Date().toISOString();
-      const nextHistory = [...prevHistory, now];
-      setPdRecords(prev => ({
-        ...prev,
-        [selectedProspect.id]: {
-          ...prev[selectedProspect.id],
-          sentAt: now,
-          sentHistory: nextHistory,
-          touchCount: nextHistory.length,
-        },
-      }));
-      showToast(`Opened in Pipedrive · subject + body copied to clipboard · touch #${nextHistory.length} of ${cap}`);
+      let touchNumber = 0;
+      setPdRecords(prev => {
+        const existing = prev[selectedProspect.id] || {};
+        const histRaw = Array.isArray(existing.sentHistory)
+          ? existing.sentHistory
+          : (existing.sentAt ? [existing.sentAt] : []);
+        const newHist = [...histRaw, now];
+        touchNumber = newHist.length;
+        return {
+          ...prev,
+          [selectedProspect.id]: {
+            ...existing,
+            sentAt: now,
+            sentHistory: newHist,
+            touchCount: newHist.length,
+          },
+        };
+      });
+      showToast(`Opened in Pipedrive · subject + body copied to clipboard · touch #${touchNumber} of ${cap}`);
     } catch (err) {
       showToast(`Failed to open Pipedrive: ${err.message}`, 'error');
     } finally {
@@ -3164,18 +3225,25 @@ Other rules:
       : `https://app.pipedrive.com/deal/${rec.dealId}`;
     window.open(url, '_blank', 'noopener,noreferrer');
 
+    // Derive history INSIDE the updater so concurrent batch sends don't race
+    // (e.g. two prospects' send calls overlapping in BatchDraftModal).
     const now = new Date().toISOString();
-    const prevHistory = Array.isArray(rec.sentHistory) ? rec.sentHistory : (rec.sentAt ? [rec.sentAt] : []);
-    const nextHistory = [...prevHistory, now];
-    setPdRecords(prev => ({
-      ...prev,
-      [prospect.id]: {
-        ...prev[prospect.id],
-        sentAt: now,
-        sentHistory: nextHistory,
-        touchCount: nextHistory.length,
-      },
-    }));
+    setPdRecords(prev => {
+      const existing = prev[prospect.id] || {};
+      const histRaw = Array.isArray(existing.sentHistory)
+        ? existing.sentHistory
+        : (existing.sentAt ? [existing.sentAt] : []);
+      const newHist = [...histRaw, now];
+      return {
+        ...prev,
+        [prospect.id]: {
+          ...existing,
+          sentAt: now,
+          sentHistory: newHist,
+          touchCount: newHist.length,
+        },
+      };
+    });
   };
 
   // Backwards-compatible alias for any UI still calling sendViaGmail
@@ -3243,21 +3311,33 @@ Other rules:
         throw new Error(data?.error || data?.message || 'Unknown error');
       }
 
+      // Derive history AND trackingIds INSIDE the updater so two rapid sends
+      // or two tabs sending the same prospect don't clobber each other's
+      // trackingIds (the most common loss — pixel works but we lose the
+      // mapping from prospect → trackingId, so opens never display).
       const now = new Date().toISOString();
-      const nextHistory = [...prevHistory, now];
-      const nextTracking = Array.isArray(rec.trackingIds) ? [...rec.trackingIds, data.trackingId] : [data.trackingId];
-      setPdRecords(prev => ({
-        ...prev,
-        [selectedProspect.id]: {
-          ...prev[selectedProspect.id],
-          sentAt: now,
-          sentHistory: nextHistory,
-          touchCount: nextHistory.length,
-          trackingIds: nextTracking,
-          lastSendMethod: 'm365',
-        },
-      }));
-      showToast(`Sent via M365 with tracking · touch #${nextHistory.length} of ${cap}`);
+      let touchNumber = 0;
+      setPdRecords(prev => {
+        const existing = prev[selectedProspect.id] || {};
+        const histRaw = Array.isArray(existing.sentHistory)
+          ? existing.sentHistory
+          : (existing.sentAt ? [existing.sentAt] : []);
+        const newHist = [...histRaw, now];
+        const tidsRaw = Array.isArray(existing.trackingIds) ? existing.trackingIds : [];
+        touchNumber = newHist.length;
+        return {
+          ...prev,
+          [selectedProspect.id]: {
+            ...existing,
+            sentAt: now,
+            sentHistory: newHist,
+            touchCount: newHist.length,
+            trackingIds: [...tidsRaw, data.trackingId],
+            lastSendMethod: 'm365',
+          },
+        };
+      });
+      showToast(`Sent via M365 with tracking · touch #${touchNumber} of ${cap}`);
     } catch (err) {
       // Common case: token expired and refresh failed → user needs to reconnect
       const msg = err.message || String(err);
