@@ -1,60 +1,35 @@
-// SHP Outbound Agent — Strategy Module v3
-// All ICP, pain, and Sandler content lives here so it can be updated without touching UI
+// Outbound Agent — Strategy Module v3
+// Engine code — vertical-agnostic logic that reads tenant-specific data
+// from the active business profile. Per-tenant content (identity, voice,
+// territory, customers) lives in ./profiles/{tenantId}.js — see
+// ./profiles/index.js for the selector.
+//
+// PR1 scope: identity + defaults are now profile-sourced. Voice, territory,
+// ICP, and customer banks still live inline below and migrate in PR2.
 
-export const SHP_IDENTITY = {
-  rep: 'Anthony Koscielecki',
-  title: 'Regional Sales Consultant',
-  company: 'Superior Hardware Products',
-  directPhone: '407-725-8744',
-  officePhone: '407-339-6800',
-  email: 'anthony@superiorhardwareproducts.com',
-  contactCardUrl: 'https://dot.cards/anthonyshp',
-  founded: 1986,
-  hq: 'Longwood, FL',
-  // Default physical address used in CAN-SPAM-compliant signatures.
-  // User can override via Settings → companyAddress.
-  // CAN-SPAM (15 U.S.C. 7704) requires a valid physical postal address
-  // in every commercial email. Update this to the actual SHP street address.
-  companyAddress: 'Superior Hardware Products · Longwood, FL',
-  pillars: [
-    'One Source for Door Openings',
-    'Built for High-Traffic Environments',
-    'A Partner for Facilities Teams',
-  ],
-  capabilities: [
-    'Access Control Compatible Hardware',
-    'Keying & Master Key Systems',
-    'Wood & Hollow Metal Doors',
-    'Automatic Openers & Sliders',
-    'Fire Door Inspections',
-    'Code & Compliance Support',
-  ],
-};
+import profile from './profiles/index.js';
 
-// Default email signature — multi-line, used in every cold email.
-// Includes the physical address per CAN-SPAM Act (US 15 USC §7704). Anyone
-// editing this MUST keep a physical postal address in the signature.
-export const DEFAULT_SIGNATURE = `Anthony Koscielecki
-Regional Sales Consultant
+// Re-export the tenant identity under the historical SHP_IDENTITY name so
+// the rest of the codebase doesn't need to change. Future PRs can rename
+// to BUSINESS_IDENTITY once we're confident the profile system is stable.
+export const SHP_IDENTITY = profile.identity;
 
-Direct: 407-725-8744
-Office: 407-339-6800
-Email: anthony@superiorhardwareproducts.com
+// Default email signature, CAN-SPAM-compliant (15 U.S.C. 7704 requires a
+// valid physical postal address in every commercial email). The profile
+// is responsible for keeping the address in its signature template.
+export const DEFAULT_SIGNATURE = profile.defaults.signature;
 
-Save my contact card: https://dot.cards/anthonyshp
+// Soft opt-out line — included in cold emails so recipients can decline
+// without filing a spam complaint (which damages domain reputation).
+export const DEFAULT_SOFT_OPT_OUT = profile.defaults.softOptOut;
 
-Superior Hardware Products · Longwood, FL`;
+// Touch-cap — stop emailing after this many sends with no reply unless
+// the user explicitly overrides. Guards against harassment complaints.
+export const DEFAULT_MAX_TOUCHES = profile.defaults.maxTouches;
 
-// Default soft opt-out line — Anthony's voice, not corporate-CYA. Always
-// included in cold emails so recipients have a frictionless way to say "no thanks"
-// instead of marking the email as spam (which damages domain reputation).
-export const DEFAULT_SOFT_OPT_OUT =
-  `If doors and hardware aren't on your radar, just let me know and I'll close the loop on my end.`;
-
-// Touch-cap defaults — guards against "harassment" complaints from
-// over-emailing the same prospect. After this many sends with no reply,
-// the agent surfaces a warning and asks the user to pause.
-export const DEFAULT_MAX_TOUCHES = 3;
+// Brand surface for the UI shell (header text, logo letters, primary color).
+// Read by OutboundAgent.jsx for the top-of-page chrome.
+export const BUSINESS_BRAND = profile.brand;
 
 // === CUSTOMER PROOF POINTS ===
 // Curated from 2025 invoice data. named=true means OK to drop the name in cold email body.

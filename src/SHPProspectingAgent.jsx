@@ -17,6 +17,7 @@ import {
   composeEmail, stripEmDashes, cleanProspectText,
   getMultiThreadTitles, getFacilitiesSearchTitles, classifyTier, scoreUnenrichedCandidate,
   guessEmailForName, inferEmailPatternFromExamples, normalizeOrgKey,
+  BUSINESS_BRAND,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
 import { apiFetch, postJson } from './api-client.js';
@@ -3762,10 +3763,10 @@ function Header({ styles, view, setView, pdConnected, isConnecting, userName }) 
   return (
     <div className="shp-header" style={styles.header}>
       <div style={styles.logo}>
-        <div style={styles.logoMark}>SHP</div>
+        <div style={styles.logoMark}>{BUSINESS_BRAND.logoText}</div>
         <div>
-          <div style={styles.logoText}>Outbound Agent</div>
-          <div style={styles.logoSub}>CFL North · v3</div>
+          <div style={styles.logoText}>{BUSINESS_BRAND.appName}</div>
+          <div style={styles.logoSub}>{BUSINESS_BRAND.appSubtitle}</div>
         </div>
       </div>
 
