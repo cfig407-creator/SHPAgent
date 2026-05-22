@@ -9,21 +9,23 @@ at the project level.
 
 ## What's tenant-specific
 
-| Category | Lives in profile | Notes |
+| Category | Profile path | Notes |
 |---|---|---|
-| Identity (rep name, phones, address) | ✅ | Used in signatures and `From:` headers |
-| Brand (app name, logo letters, color) | ✅ | UI shell — header, primary color |
-| Default signature + soft opt-out + touch cap | ✅ | Seed values for fresh users |
-| Customer proof points | ⏳ PR2 | Will move from `strategy.js` into profile |
-| Voice guide + email banks + subject bank | ⏳ PR2 | Will move from `strategy.js` into profile |
-| Territory (counties, city/zip maps) | ⏳ PR2 | Will move from `strategy.js` into profile |
-| ICP rules (segments, title ladder, keywords) | ⏳ PR2 | Will move from `strategy.js` into profile |
-| Pain library + resource CTAs | ⏳ PR2 | Will move from `strategy.js` into profile |
-| Follow-up cadence (days) | ⏳ PR2 | Will move from `strategy.js` into profile |
+| Identity (rep name, phones, address) | `identity` | Used in signatures and `From:` headers |
+| Brand (app name, logo letters, color) | `brand` | UI shell — header, primary color |
+| Default signature + soft opt-out + touch cap | `defaults` | Seed values for fresh users |
+| Customer proof points | `customers` | Drives `pickProofPoints` for body insertions |
+| Voice guide + email banks + subject bank | `voice` | Fed into composer + AI prompt |
+| Territory (counties, city/zip maps) | `territory`, `zipToCounty`, `cityToCounty` | CSV import + Apollo location strings |
+| ICP rules (title ladder, keywords) | `icp` | Multi-thread coverage + Apollo title search |
+| Pain library | `painLibrary` | Surfaces relevant pain by segment |
+| Segment-specific resource CTAs | `resourceCtas` | Drop-in soft-CTA per segment |
+| Sandler Coach (Pain Funnel, UFC, Reversing) | `sandler` | Post-reply warm-conversation content |
+| Follow-up cadence (days) | `followUpDays` | Day-N break-up email |
 
-PR1 has only the simplest extractions wired up. PR2 will move the bulk
-content. Until PR2 ships, only the SHP profile actually works end-to-end —
-other tenants would need to override the constants in `strategy.js` directly.
+Everything tenant-specific is in `src/profiles/{tenantId}.js`. The engine
+in `strategy.js` and the UI in `OutboundAgent.jsx` are vertical-agnostic
+and read all of the above from the active profile.
 
 ## What's NOT tenant-specific (shared engine)
 
@@ -118,11 +120,14 @@ Big deliverability win — see `superiorhardwareproducts.com` notes elsewhere
 in the repo. Each tenant should configure `track.{their-domain}` as a CNAME
 to their Vercel deployment, and set `PIXEL_BASE_URL` to that subdomain.
 
-## Coming in PR2
+## Future work (not blocking)
 
-- Voice / territory / ICP / customers all move into the profile
-- A `src/profiles/_template.js` skeleton with TODO markers for every required field
-- Validation: the engine throws at startup if a required profile field is missing
-
-Until PR2, creating a new tenant means editing `strategy.js` constants in
-addition to the profile. PR2 makes `src/profiles/acme.js` self-sufficient.
+- `src/profiles/_template.js` skeleton with TODO markers for every required field
+- Startup validation: the engine throws if a required profile field is missing
+- CSS theme tokens driven by `brand.primaryColor` (currently the `--shp-red`
+  CSS variable in `OutboundAgent.jsx` is still hardcoded; the brand color
+  in the profile is informational)
+- Move `pickProofPoints`, `customerCheck`, ICP-classification rules from
+  `strategy.js` into the profile as data-driven rules (currently they're
+  helpers that operate on profile data, which is fine but limits per-tenant
+  ICP customization to the data the helpers know how to read)
