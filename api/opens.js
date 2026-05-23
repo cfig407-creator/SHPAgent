@@ -43,6 +43,15 @@ async function getSendsForProspect(prospectId) {
 }
 
 export default async function handler(req, res) {
+  // Polling endpoint — must never be cached. Vercel's edge auto-attaches
+  // ETags to JSON responses, which causes the browser to issue conditional
+  // GETs and receive 304s with no body. The cached (often empty) response
+  // then gets used as if it were fresh, so the dashboard tile and tracking
+  // poll silently show stale data with no visible error.
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   if (!kvAvailable()) {
     return res.status(200).json({ ok: true, note: 'KV not configured — opens unavailable' });
   }

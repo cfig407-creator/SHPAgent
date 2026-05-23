@@ -215,6 +215,13 @@ export default async function handler(req, res) {
 // Returns: { ok, scanned, newBounces, totalBounces, byRecipient: {...} }
 // ───────────────────────────────────────────────────────────────────────
 async function checkBounces(req, res) {
+  // Polling endpoint — must never be cached. See opens.js for the full
+  // explanation; short version: Vercel auto-ETags JSON responses and the
+  // browser then 304s every subsequent poll, silently serving stale data.
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   if (!kvAvailable()) return res.status(500).json({ error: 'KV not configured' });
   if (!process.env.MS_CLIENT_ID || !process.env.MS_TENANT_ID || !process.env.MS_CLIENT_SECRET) {
     return res.status(500).json({ error: 'Microsoft 365 env vars not set' });
