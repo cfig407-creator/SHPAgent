@@ -7,41 +7,11 @@
 // exchanges the code for tokens, persists them to KV, and redirects back to /
 // with ?ms_connected=1 (success) or ?ms_error=... (failure).
 
+import { kvAvailable, kvDel, kvGet, kvSet } from './_kv.js';
+
 const TOKEN_KEY = 'shp:ms:tokens';
 const STATE_KEY = 'shp:ms:oauth_state';
 const SCOPES = 'Mail.Send Mail.Read User.Read offline_access';
-
-function kvAvailable() {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
-}
-
-async function kvGet(key) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/get/${encodeURIComponent(key)}`, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) return null;
-  const json = await r.json();
-  if (!json?.result) return null;
-  try { return JSON.parse(json.result); } catch { return null; }
-}
-
-async function kvSet(key, value) {
-  await fetch(`${process.env.KV_REST_API_URL}/set/${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(value),
-  });
-}
-
-async function kvDel(key) {
-  await fetch(`${process.env.KV_REST_API_URL}/del/${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-}
 
 function getAppBase(req) {
   if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, '');

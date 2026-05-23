@@ -1,11 +1,12 @@
 // Microsoft Graph OAuth flow for one-click tracked sends.
-// Single-tenant: one rep (Anthony) — tokens stored under a fixed KV key.
+// Tokens stored under a fixed KV key (single-tenant per Vercel deployment).
 //
 // Routes (action via ?action=):
 //   start    → 302 to Microsoft login
-//   callback → exchanges code for tokens, persists, redirects back to /
 //   status   → { connected, account, connectedAt }
 //   logout   → clears tokens
+// (The OAuth callback lives in /api/ms-auth-callback as a dedicated endpoint
+//  — Azure portal accepts it without query-string manifest editing.)
 //
 // Env vars required (set in Vercel project settings):
 //   MS_CLIENT_ID      — Azure App Registration → Application (client) ID
@@ -17,45 +18,15 @@
 //   APP_URL — public base URL (e.g. https://shp-agent.vercel.app).
 //             If unset, derived from request headers.
 
+import crypto from 'crypto';
+import { kvAvailable, kvDel, kvGet, kvSet } from './_kv.js';
+
 const TOKEN_KEY = 'shp:ms:tokens';
 const STATE_KEY = 'shp:ms:oauth_state';
 // Mail.Read added so we can detect NDR (bounce) messages in the user's inbox.
 // We ONLY query Graph for messages matching NDR patterns (postmaster sender,
 // "Undeliverable" subject prefix). Other inbox content is never read or stored.
 const SCOPES = 'Mail.Send Mail.Read User.Read offline_access';
-
-function kvAvailable() {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
-}
-
-async function kvGet(key) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/get/${encodeURIComponent(key)}`, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) return null;
-  const json = await r.json();
-  if (!json?.result) return null;
-  try { return JSON.parse(json.result); } catch { return null; }
-}
-
-async function kvSet(key, value) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/set/${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(value),
-  });
-  if (!r.ok) throw new Error(`KV set ${r.status}`);
-}
-
-async function kvDel(key) {
-  await fetch(`${process.env.KV_REST_API_URL}/del/${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-}
 
 function getAppBase(req) {
   if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, '');
@@ -87,7 +58,9 @@ export default async function handler(req, res) {
   try {
     // ─── START: redirect to Microsoft login ──────────────────────
     if (action === 'start') {
-      const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      // CSRF state: cryptographic random instead of Math.random for proper
+      // unguessability. Length stays generous to make brute force pointless.
+      const state = crypto.randomUUID().replace(/-/g, '');
       await kvSet(STATE_KEY, { state, at: Date.now() });
       const url = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize?` + new URLSearchParams({
         client_id: clientId,
@@ -99,64 +72,6 @@ export default async function handler(req, res) {
         prompt: 'select_account',
       }).toString();
       return res.redirect(302, url);
-    }
-
-    // ─── CALLBACK: exchange code for tokens ──────────────────────
-    if (action === 'callback') {
-      const appBase = getAppBase(req);
-      const { code, state, error: oauthError, error_description } = req.query || {};
-
-      if (oauthError) {
-        return res.redirect(302, `${appBase}/?ms_error=${encodeURIComponent(oauthError + (error_description ? ': ' + error_description : ''))}`);
-      }
-      if (!code) {
-        return res.status(400).send('Missing authorization code');
-      }
-
-      // Verify state to prevent CSRF
-      const savedState = await kvGet(STATE_KEY);
-      if (!savedState?.state || savedState.state !== state) {
-        return res.redirect(302, `${appBase}/?ms_error=${encodeURIComponent('OAuth state mismatch — try connecting again')}`);
-      }
-      await kvDel(STATE_KEY);
-
-      // Exchange code for access + refresh tokens
-      const tokenResp = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: clientId,
-          client_secret: clientSecret,
-          code: code.toString(),
-          redirect_uri: redirectUri,
-          grant_type: 'authorization_code',
-          scope: SCOPES,
-        }).toString(),
-      });
-      const tokens = await tokenResp.json();
-      if (!tokenResp.ok || !tokens.access_token) {
-        return res.redirect(302, `${appBase}/?ms_error=${encodeURIComponent('Token exchange failed: ' + (tokens.error_description || tokens.error || 'unknown'))}`);
-      }
-
-      // Fetch account info so the UI can show "connected as anthony@..."
-      const meResp = await fetch('https://graph.microsoft.com/v1.0/me', {
-        headers: { Authorization: `Bearer ${tokens.access_token}` },
-      });
-      const me = meResp.ok ? await meResp.json() : null;
-
-      await kvSet(TOKEN_KEY, {
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token,
-        expiresAt: Date.now() + (tokens.expires_in * 1000),
-        account: me ? {
-          email: me.userPrincipalName || me.mail || null,
-          name: me.displayName || null,
-          id: me.id || null,
-        } : null,
-        connectedAt: new Date().toISOString(),
-      });
-
-      return res.redirect(302, `${appBase}/?ms_connected=1`);
     }
 
     // ─── STATUS ──────────────────────────────────────────────────
@@ -178,7 +93,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    return res.status(400).json({ error: 'Unknown action. Use ?action=start|callback|status|logout' });
+    return res.status(400).json({ error: 'Unknown action. Use ?action=start|status|logout' });
   } catch (err) {
     return res.status(500).json({ error: 'ms-auth failed', message: err.message });
   }

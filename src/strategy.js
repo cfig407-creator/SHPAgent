@@ -369,8 +369,11 @@ Best,
 ${signature || DEFAULT_SIGNATURE}`;
 
   return {
-    subject: stripEmDashes(subject),
-    body: stripEmDashes(fullBody),
+    // cleanProspectText runs stripEmDashes + normalizeGrammar so the 3-part
+    // fallback path matches the FULL_EMAIL_BANK path's cleaning (parity fix
+    // — both paths now scrub em-dashes AND apply grammar normalization).
+    subject: cleanProspectText(subject),
+    body: cleanProspectText(fullBody),
     diagnostic: {
       composer: 'deterministic',
       openerId: opener.id,

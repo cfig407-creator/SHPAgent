@@ -13,41 +13,17 @@
 // GET  /api/config       → { config, persisted }
 // POST /api/config { config } → { ok, persisted }
 
+import { kvAvailable, kvGet, kvSet } from './_kv.js';
+
 const KEY = 'shp:config:v1';
 const memory = globalThis.__shpConfigMemory || (globalThis.__shpConfigMemory = { value: null });
-
-function kvAvailable() {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
-}
-
-async function kvGet() {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/get/${KEY}`, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) throw new Error(`KV get ${r.status}`);
-  const json = await r.json();
-  if (!json?.result) return null;
-  try { return JSON.parse(json.result); } catch { return null; }
-}
-
-async function kvSet(value) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/set/${KEY}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(value),
-  });
-  if (!r.ok) throw new Error(`KV set ${r.status}`);
-}
 
 export default async function handler(req, res) {
   const usingKv = kvAvailable();
 
   try {
     if (req.method === 'GET') {
-      const value = usingKv ? await kvGet() : memory.value;
+      const value = usingKv ? await kvGet(KEY) : memory.value;
       return res.status(200).json({ config: value, persisted: usingKv });
     }
 
@@ -57,7 +33,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Missing or invalid `config` body' });
       }
       if (usingKv) {
-        await kvSet(incoming);
+        await kvSet(KEY, incoming);
       } else {
         memory.value = incoming;
       }

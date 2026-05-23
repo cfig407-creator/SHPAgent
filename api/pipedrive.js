@@ -25,15 +25,33 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing "path" parameter' });
   }
 
+  // Path allowlist — restricts which Pipedrive endpoints the proxy will
+  // forward to. Without this, a compromised client could call any PD API
+  // (e.g. /users/me/permissions, /companies, etc.) as the configured
+  // user. We only need a small set of endpoints from the frontend.
+  const ALLOWED_PATH = /^\/(leads|deals|persons|organizations|activities|mailbox|stages|pipelines|users|dealFields|leadFields|currencies|callLogs|notes|files|recents)(\/|\?|$)/;
+  if (!ALLOWED_PATH.test(path.startsWith('/') ? path : '/' + path)) {
+    return res.status(400).json({ error: 'Pipedrive path not allowed', path });
+  }
+
+  // Method allowlist — Pipedrive uses GET/POST/PUT/PATCH/DELETE in normal
+  // CRUD. Reject anything else so a request can't smuggle in OPTIONS/HEAD
+  // probes or unexpected verbs.
+  const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+  const upperMethod = String(method).toUpperCase();
+  if (!ALLOWED_METHODS.has(upperMethod)) {
+    return res.status(405).json({ error: 'Method not allowed', method: upperMethod });
+  }
+
   const sep = path.includes('?') ? '&' : '?';
   const url = `${baseUrl}${path}${sep}api_token=${encodeURIComponent(token)}`;
 
   try {
     const fetchOpts = {
-      method,
+      method: upperMethod,
       headers: { 'Content-Type': 'application/json' },
     };
-    if (body && method !== 'GET') {
+    if (body && upperMethod !== 'GET') {
       fetchOpts.body = typeof body === 'string' ? body : JSON.stringify(body);
     }
 

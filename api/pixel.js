@@ -10,35 +10,17 @@
 // this as a "was it loaded at least once" signal, not a reliable counter.
 
 // 1×1 transparent PNG (43 bytes), base64-encoded so we don't need a file asset
+import { kvAvailable, kvRPushAndTrim } from './_kv.js';
+
 const PIXEL = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQYV2NgAAIAAAUAAeImBZsAAAAASUVORK5CYII=',
   'base64'
 );
 
-function kvAvailable() {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
-}
-
 // Atomic RPUSH for the opens list. Avoids the read-modify-write race that
 // pixel writes have when multiple opens fire concurrently (Apple Mail
 // Privacy Protection and Gmail's image proxy both preload pixels, so
 // parallel hits are common).
-async function kvRPushAndTrim(key, value, keepLast) {
-  const url = `${process.env.KV_REST_API_URL}/pipeline`;
-  // Upstash pipeline format: array of command arrays. Atomic-ish in practice.
-  const body = JSON.stringify([
-    ['RPUSH', key, JSON.stringify(value)],
-    ['LTRIM', key, `-${keepLast}`, '-1'],
-  ]);
-  await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body,
-  });
-}
 
 function sendPixel(res) {
   res.setHeader('Content-Type', 'image/png');

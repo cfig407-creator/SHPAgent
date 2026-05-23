@@ -6,37 +6,15 @@
 //
 // The batch form is what the frontend uses to refresh the dashboard.
 
-function kvAvailable() {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
-}
-
-async function kvGet(key) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/get/${encodeURIComponent(key)}`, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) return null;
-  const json = await r.json();
-  if (!json?.result) return null;
-  try { return JSON.parse(json.result); } catch { return null; }
-}
-
 // LRANGE for Redis lists (used for opens which are now stored as a list
 // for atomic appends — see pixel.js). Returns each list entry parsed as
 // JSON.
-async function kvLRange(key) {
-  const url = `${process.env.KV_REST_API_URL}/lrange/${encodeURIComponent(key)}/0/-1`;
-  const r = await fetch(url, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) return [];
-  const json = await r.json();
-  const items = Array.isArray(json?.result) ? json.result : [];
-  return items.map(s => { try { return JSON.parse(s); } catch { return null; } }).filter(Boolean);
-}
 
 // Read trackindex with backward compat. Newer entries are Redis lists
 // (atomic RPUSH writes); older entries are JSON-string arrays. Try LRANGE
 // first, fall back to legacy GET-parse-array.
+import { kvAvailable, kvGet, kvLRange } from './_kv.js';
+
 async function readTrackIndex(prospectId) {
   const key = `shp:trackindex:${prospectId}`;
   const fromList = await kvLRange(key);

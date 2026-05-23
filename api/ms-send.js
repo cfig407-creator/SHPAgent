@@ -14,134 +14,23 @@
 //
 // Refreshes the access token via refresh_token when expired (60s buffer).
 
+import crypto from 'crypto';
+import { kvAvailable, kvDel, kvGet, kvHGet, kvHGetAll, kvHSet, kvLRange, kvRPushRaw, kvSafeAppendList, kvSet } from './_kv.js';
+
 const TOKEN_KEY = 'shp:ms:tokens';
 const SCOPES = 'Mail.Send Mail.Read User.Read offline_access';
-
-function kvAvailable() {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
-}
-
-async function kvGet(key) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/get/${encodeURIComponent(key)}`, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) return null;
-  const json = await r.json();
-  if (!json?.result) return null;
-  try { return JSON.parse(json.result); } catch { return null; }
-}
-
-async function kvSet(key, value) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/set/${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(value),
-  });
-  if (!r.ok) throw new Error(`KV set ${r.status}`);
-}
 
 // Atomic Redis ops to avoid read-modify-write races on shared state.
 // Used by trackindex (per-prospect send list) and bounce records (cross-
 // tab polling could otherwise clobber each other's writes).
-async function kvRPushRaw(key, ...values) {
-  const body = JSON.stringify(values.map(v => typeof v === 'string' ? v : JSON.stringify(v)));
-  const r = await fetch(`${process.env.KV_REST_API_URL}/rpush/${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body,
-  });
-  if (!r.ok) {
-    const text = await r.text();
-    return { ok: false, wrongType: /wrongtype/i.test(text), error: text };
-  }
-  return { ok: true };
-}
-
-async function kvDel(key) {
-  await fetch(`${process.env.KV_REST_API_URL}/del/${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-}
 
 // Append a value to a Redis list, with one-time migration support: if the
 // key holds a legacy JSON-array string (from before the atomic-write fix),
 // parse + DEL it, RPUSH all existing items, then RPUSH the new value.
 // Subsequent writes are pure RPUSH with no overhead.
-async function kvSafeAppendList(key, value) {
-  const first = await kvRPushRaw(key, value);
-  if (first.ok) return;
-  if (!first.wrongType) {
-    console.warn('[kv] RPUSH failed for', key, '—', first.error?.slice(0, 200));
-    return;
-  }
-  // Legacy format detected. Migrate.
-  const oldData = await kvGet(key);
-  await kvDel(key);
-  if (Array.isArray(oldData) && oldData.length > 0) {
-    await kvRPushRaw(key, ...oldData.map(v => (typeof v === 'string' ? v : JSON.stringify(v))));
-  }
-  // Retry the new push on the now-empty key
-  await kvRPushRaw(key, value);
-}
-
-async function kvLRange(key) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/lrange/${encodeURIComponent(key)}/0/-1`, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) return [];
-  const json = await r.json();
-  const items = Array.isArray(json?.result) ? json.result : [];
-  return items.map(s => { try { return JSON.parse(s); } catch { return s; } });
-}
 
 // HSET on a Redis hash — atomic per-field write, no race when multiple
 // concurrent writers update different fields of the same hash.
-async function kvHSet(key, field, value) {
-  const url = `${process.env.KV_REST_API_URL}/hset/${encodeURIComponent(key)}/${encodeURIComponent(field)}`;
-  await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(typeof value === 'string' ? value : JSON.stringify(value)),
-  });
-}
-
-async function kvHGetField(key, field) {
-  const url = `${process.env.KV_REST_API_URL}/hget/${encodeURIComponent(key)}/${encodeURIComponent(field)}`;
-  const r = await fetch(url, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) return null;
-  const json = await r.json();
-  if (!json?.result) return null;
-  try { return JSON.parse(json.result); } catch { return null; }
-}
-
-async function kvHGetAll(key) {
-  const r = await fetch(`${process.env.KV_REST_API_URL}/hgetall/${encodeURIComponent(key)}`, {
-    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
-  });
-  if (!r.ok) return {};
-  const json = await r.json();
-  // Upstash returns hash as an array of alternating field/value strings
-  const arr = Array.isArray(json?.result) ? json.result : [];
-  const out = {};
-  for (let i = 0; i < arr.length; i += 2) {
-    const k = arr[i];
-    const v = arr[i + 1];
-    try { out[k] = JSON.parse(v); } catch { out[k] = v; }
-  }
-  return out;
-}
 
 function getAppBase(req) {
   if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, '');
@@ -223,7 +112,10 @@ export default async function handler(req, res) {
     const accessToken = await getValidAccessToken();
 
     // Generate a unique tracking ID for this send
-    const trackingId = `t_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    // crypto.randomUUID() gives 128 bits of entropy → collision-free even
+    // under heavy concurrent volume. Shape stays t_<ts>_<rand> so the
+    // pixel handler's regex validation continues to pass.
+    const trackingId = `t_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
     // Pixel base URL: prefer PIXEL_BASE_URL env var (e.g. https://track.superiorhardwareproducts.com)
     // so the pixel loads from the SAME ROOT DOMAIN as the sender, dramatically
     // improving deliverability vs. loading from shp-agent.vercel.app.
@@ -326,6 +218,13 @@ async function checkBounces(req, res) {
   if (!kvAvailable()) return res.status(500).json({ error: 'KV not configured' });
   if (!process.env.MS_CLIENT_ID || !process.env.MS_TENANT_ID || !process.env.MS_CLIENT_SECRET) {
     return res.status(500).json({ error: 'Microsoft 365 env vars not set' });
+  }
+  // Optional shared-secret check. When BOUNCE_CHECK_SECRET is set, require
+  // the matching X-Shp-Secret header. Without this, anyone hitting this URL
+  // could trigger a Graph API call against the connected mailbox (which
+  // costs nothing per call but does count against Graph quota).
+  if (process.env.BOUNCE_CHECK_SECRET && req.headers['x-shp-secret'] !== process.env.BOUNCE_CHECK_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
   try {
@@ -453,7 +352,7 @@ async function checkBounces(req, res) {
       for (const r of newRecords) {
         if (!r.recipient) continue;
         const field = r.recipient;
-        const existing = await kvHGetField('shp:bounces:byrecipient', field);
+        const existing = await kvHGet('shp:bounces:byrecipient', field);
         const updated = {
           count: (existing?.count || 0) + 1,
           lastBouncedAt: r.bouncedAt,
