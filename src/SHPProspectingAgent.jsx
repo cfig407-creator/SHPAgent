@@ -564,8 +564,13 @@ export default function SHPProspectingAgent() {
   // ── Poll opens for prospects that have been sent to via M365 ──
   // Fetches every 2 min while the tab is visible. Only queries prospects with
   // at least one recorded touch — saves KV round-trips on the cold pool.
+  //
+  // NOTE: This poll deliberately does NOT gate on msConnection.connected.
+  // /api/opens reads from KV (where /api/pixel writes open events), so it
+  // works fine while M365 is disconnected — historical sends keep
+  // accruing opens server-side regardless. Gating on M365 status would
+  // hide that data during outages or admin-consent waits.
   useEffect(() => {
-    if (!msConnection.connected) return;
     let cancelled = false;
 
     const fetchOpens = async () => {
@@ -582,13 +587,13 @@ export default function SHPProspectingAgent() {
       }
     };
 
-    fetchOpens(); // immediate on connect
+    fetchOpens(); // immediate on mount / pdRecords change
     const interval = setInterval(() => {
       if (document.visibilityState === 'visible') fetchOpens();
     }, 120_000);
 
     return () => { cancelled = true; clearInterval(interval); };
-  }, [msConnection.connected, pdRecords]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pdRecords]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Poll for bounce notifications via M365 mailbox scan ──
   // Hits /api/ms-send?action=check-bounces which queries Graph for NDR
