@@ -240,6 +240,10 @@ async function orgSearch(req, res, apiKey) {
 
 // ─── QUOTA (auth/health) ────────────────────────────────────────────────
 async function quota(req, res, apiKey) {
+  // Live quota — never cache. Same Vercel-edge-ETag bug as /api/opens.
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   const r = await fetch('https://api.apollo.io/api/v1/auth/health', {
     method: 'GET',
     headers: { 'Cache-Control': 'no-cache', 'x-api-key': apiKey },

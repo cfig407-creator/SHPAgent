@@ -76,6 +76,13 @@ export default async function handler(req, res) {
 
     // ─── STATUS ──────────────────────────────────────────────────
     if (action === 'status') {
+      // Critical: do NOT cache. The UI polls this on every load to decide
+      // whether to start the opens/bounces pollers. A cached "connected:
+      // false" response (from before the user reconnected) silently
+      // disables every M365-dependent feature with no visible error.
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
       const stored = await kvGet(TOKEN_KEY);
       if (!stored?.refreshToken) {
         return res.status(200).json({ connected: false });
