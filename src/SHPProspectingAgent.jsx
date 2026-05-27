@@ -1609,9 +1609,21 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       const [firstName, ...rest] = (prospect.name || '').trim().split(/\s+/);
       const lastName = rest.join(' ');
 
-      // Run Apollo enrich + website directory scrape in parallel.
-      // If the org's directory has the named person with an email, we may not
-      // need Apollo's verified email at all — free, straight from the source.
+      // Run Apollo enrich + website directory scrape in parallel — but cap the
+      // scrape at 12 seconds so it can't hold the UI hostage. Apollo typically
+      // returns in 1-3 seconds; the scrape can legitimately take 30-75 seconds
+      // when it's discovering and fetching a directory page. Previously we
+      // awaited Promise.allSettled on both, so the user waited the full scrape
+      // duration before any proposal appeared. Result: "Enrich never returns."
+      // Now: whatever the scrape has by t=12s gets merged. If scrape isn't done,
+      // we proceed with Apollo only — better partial result fast than full
+      // result eventually.
+      const SCRAPE_RACE_MS = 12_000;
+      const scrapeRaced = Promise.race([
+        scrapeOrgDirectory(prospect).then(v => ({ ok: true, value: v })),
+        new Promise(resolve => setTimeout(() => resolve({ ok: false, value: null, timeout: true }), SCRAPE_RACE_MS)),
+      ]).catch(err => ({ ok: false, value: null, error: err?.message }));
+
       const [apolloResult, webResult] = await Promise.allSettled([
         postJson('/api/apollo?action=enrich', {
           firstName,
@@ -1619,7 +1631,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           name: prospect.name,
           organizationName: prospect.company,
         }, { retries: 2, timeoutMs: 30_000 }),
-        scrapeOrgDirectory(prospect),
+        scrapeRaced,
       ]);
 
       // Parse Apollo response
@@ -1633,12 +1645,20 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         apolloError = apolloResult.reason?.message || 'Apollo call failed';
       }
 
-      // Parse website scrape — find the named person in the directory
+      // Parse website scrape — find the named person in the directory.
+      // webResult.value is now wrapped by the race ({ ok, value }) so the
+      // actual scrape payload is webResult.value.value when ok=true.
       let webPerson = null;
       let webSourceUrl = null;
-      if (webResult.status === 'fulfilled' && webResult.value?.found) {
-        webPerson = matchPersonInDirectory(webResult.value.contacts, prospect.name);
-        webSourceUrl = webResult.value.sourceUrl;
+      let webTimedOut = false;
+      if (webResult.status === 'fulfilled') {
+        const wrapper = webResult.value;
+        if (wrapper?.timeout) {
+          webTimedOut = true;
+        } else if (wrapper?.ok && wrapper.value?.found) {
+          webPerson = matchPersonInDirectory(wrapper.value.contacts, prospect.name);
+          webSourceUrl = wrapper.value.sourceUrl;
+        }
       }
 
       // No match from either source
@@ -1709,7 +1729,9 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
             knownExamples.push({ name: p.name, email: p.email });
           }
         }
-        const scrapedExamples = (webResult.status === 'fulfilled' && webResult.value?.exampleEmails) || [];
+        // webResult.value is wrapped by the race: { ok, value } where value
+        // is the actual scrape payload. Unwrap before reading exampleEmails.
+        const scrapedExamples = (webResult.status === 'fulfilled' && webResult.value?.ok && webResult.value.value?.exampleEmails) || [];
         for (const ex of scrapedExamples) {
           if (ex?.name && ex?.email) knownExamples.push({ name: ex.name, email: ex.email });
         }
