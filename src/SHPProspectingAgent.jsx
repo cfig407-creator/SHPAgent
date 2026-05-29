@@ -13,7 +13,7 @@ import {
   classifyICP, classifyTitle, PAIN_LIBRARY, RESOURCE_CTAS, CUSTOMERS, pickProofPoints,
   customerCheck, detectEnrichmentNeeds,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
-  buildColdEmailPrompt, buildDealTitle, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
+  buildColdEmailPrompt, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
   composeEmail, stripEmDashes, cleanProspectText,
   getMultiThreadTitles, getFacilitiesSearchTitles, classifyTier, scoreUnenrichedCandidate,
   guessEmailForName, inferEmailPatternFromExamples, normalizeOrgKey,
@@ -462,6 +462,36 @@ export default function SHPProspectingAgent() {
       console.warn('[shp] user-added prospect cache write failed:', e);
     }
   }, [prospects, seedIdSet]);
+
+  // === Drain the ICP Scout import inbox on load ===
+  // ICP Scout hands approved prospects to /api/import-prospect, which queues
+  // them server-side. We pull them in once on mount and prepend any we don't
+  // already have. The persist effect above then writes them to
+  // shp_prospects_added_v1, so they survive reloads even though the server
+  // inbox is drained on read.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch('/api/import-prospect', { method: 'GET' });
+        if (!r.ok) return; // endpoint not deployed / no INTERNAL_API_KEY — silent
+        const data = await r.json();
+        const incoming = Array.isArray(data?.prospects) ? data.prospects : [];
+        if (cancelled || incoming.length === 0) return;
+        setProspects(prev => {
+          const existingIds = new Set(prev.map(p => p.id));
+          const fresh = incoming.filter(p => p?.id && !existingIds.has(p.id));
+          if (fresh.length === 0) return prev;
+          return [...fresh, ...prev];
+        });
+        const n = incoming.length;
+        showToast(`Imported ${n} prospect${n === 1 ? '' : 's'} from ICP Scout`);
+      } catch {
+        // Network error or no endpoint — non-fatal, the rep's pool is unaffected.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // When the active prospect changes, restore their stored draft (or clear the
   // compose area so the previous prospect's copy doesn't bleed through).
