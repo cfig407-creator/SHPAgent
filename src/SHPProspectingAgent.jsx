@@ -463,12 +463,15 @@ export default function SHPProspectingAgent() {
     }
   }, [prospects, seedIdSet]);
 
-  // === Drain the ICP Scout import inbox on load ===
-  // ICP Scout hands approved prospects to /api/import-prospect, which queues
-  // them server-side. We pull them in once on mount and prepend any we don't
-  // already have. The persist effect above then writes them to
-  // shp_prospects_added_v1, so they survive reloads even though the server
-  // inbox is drained on read.
+  // === Pull the ICP Scout import inbox on load ===
+  // ICP Scout hands approved prospects to /api/import-prospect, which keeps
+  // them in a durable (non-destructive) server inbox. We read it on mount and
+  // merge any we haven't already consumed. "Consumed" is tracked in
+  // localStorage (shp_imported_ids_v1) — separate from the pool — so that:
+  //   • a read that doesn't persist never loses a prospect (server keeps it),
+  //   • reloads don't re-toast or re-add the same import,
+  //   • a prospect the rep deletes stays deleted (its id is already consumed
+  //     and won't be re-imported).
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -478,13 +481,30 @@ export default function SHPProspectingAgent() {
         const data = await r.json();
         const incoming = Array.isArray(data?.prospects) ? data.prospects : [];
         if (cancelled || incoming.length === 0) return;
+
+        let consumed;
+        try {
+          consumed = new Set(JSON.parse(localStorage.getItem('shp_imported_ids_v1') || '[]'));
+        } catch { consumed = new Set(); }
+
+        const fresh = incoming.filter(p => p?.id && !consumed.has(p.id));
+        if (fresh.length === 0) return;
+
         setProspects(prev => {
           const existingIds = new Set(prev.map(p => p.id));
-          const fresh = incoming.filter(p => p?.id && !existingIds.has(p.id));
-          if (fresh.length === 0) return prev;
-          return [...fresh, ...prev];
+          const toAdd = fresh.filter(p => !existingIds.has(p.id));
+          if (toAdd.length === 0) return prev;
+          return [...toAdd, ...prev];
         });
-        const n = incoming.length;
+
+        // Mark every incoming id consumed (even ones already in the pool) so
+        // we never reconsider them — the server inbox is the durable record.
+        for (const p of incoming) if (p?.id) consumed.add(p.id);
+        try {
+          localStorage.setItem('shp_imported_ids_v1', JSON.stringify([...consumed]));
+        } catch { /* quota — non-fatal */ }
+
+        const n = fresh.length;
         showToast(`Imported ${n} prospect${n === 1 ? '' : 's'} from ICP Scout`);
       } catch {
         // Network error or no endpoint — non-fatal, the rep's pool is unaffected.
