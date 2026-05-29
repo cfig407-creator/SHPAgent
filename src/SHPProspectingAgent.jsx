@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  Search, Building2, Mail, CheckCircle2, Loader2, Sparkles, Target,
+  Search, Building2, Mail, Phone, CheckCircle2, Loader2, Sparkles, Target,
   ExternalLink, Filter, ArrowRight, Send, Edit3, Zap, TrendingUp,
   MapPin, Users, AlertCircle, Briefcase, Hash, Settings, Key,
   RefreshCw, X, Plus, Compass, BookOpen, MessageCircle, Copy,
@@ -4955,6 +4955,17 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
                   </span>
                 )}
               </span>
+            )}
+            {prospect.phone && (
+              <a
+                href={`tel:${prospect.phone.replace(/[^+\d]/g, '')}`}
+                onClick={e => e.stopPropagation()}
+                style={{ color: 'var(--text-3)', display: 'inline-flex', alignItems: 'center', gap: '4px', textDecoration: 'none' }}
+                title="Tap to call (mobile) — copy on desktop"
+              >
+                <Phone size={10} style={{ display: 'inline', verticalAlign: 'middle' }} />
+                <span>{prospect.phone}</span>
+              </a>
             )}
             {prospect.linkedinUrl ? (
               <a
