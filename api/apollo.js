@@ -14,7 +14,12 @@
 //                            Apollo mixed_companies/search — free, no credits
 //   ?action=quota          → GET   — current credit usage from auth/health
 
+import { requireAppKey } from './_auth.js';
+
 export default async function handler(req, res) {
+  // App-key gate: Apollo enrich costs credits; stop drive-by credit burn.
+  if (!requireAppKey(req, res)) return;
+
   const apiKey = process.env.APOLLO_API_KEY;
   if (!apiKey) {
     return res.status(500).json({

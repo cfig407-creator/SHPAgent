@@ -6,7 +6,12 @@
 // Body: { model, max_tokens, messages, tools?, mcp_servers? }
 // Returns: raw Anthropic response JSON, or { error, status } on failure.
 
+import { requireAppKey } from './_auth.js';
+
 export default async function handler(req, res) {
+  // App-key gate: stops drive-by abuse of this paid LLM proxy.
+  if (!requireAppKey(req, res)) return;
+
   const apiKey = process.env.ANTHROPIC_API_KEY;
 
   if (!apiKey) {

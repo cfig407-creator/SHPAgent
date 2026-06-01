@@ -23,6 +23,7 @@
 //   GET  /api/import-prospect   → { prospects: [...], count }
 
 import { kvAvailable, kvLRange, kvRPushAndTrim } from './_kv.js';
+import { requireAppKey } from './_auth.js';
 
 const INBOX_KEY = 'shp:import:inbox:v2';
 const KEEP_LAST = 200;
@@ -31,16 +32,17 @@ const memory =
   globalThis.__shpImportMemory || (globalThis.__shpImportMemory = { inbox: [] });
 
 export default async function handler(req, res) {
-  const expectedKey = process.env.INTERNAL_API_KEY;
-  if (!expectedKey) {
-    return res.status(500).json({
-      error: 'INTERNAL_API_KEY not set in Vercel environment variables',
-    });
-  }
-
-  // POST (an upstream sourcer writing in) requires the shared secret.
-  // GET (the same-origin frontend reading its inbox) does not.
+  // POST (an upstream sourcer writing in) requires the server-to-server shared
+  // secret INTERNAL_API_KEY. GET (the browser frontend reading its inbox)
+  // returns prospect PII, so it now requires the app key (X-SHP-Key) — it was
+  // previously open, leaking the whole inbox to anyone with the URL.
   if (req.method === 'POST') {
+    const expectedKey = process.env.INTERNAL_API_KEY;
+    if (!expectedKey) {
+      return res.status(500).json({
+        error: 'INTERNAL_API_KEY not set in Vercel environment variables',
+      });
+    }
     const provided = req.headers['x-internal-api-key'];
     if (provided !== expectedKey) {
       return res.status(401).json({ error: 'invalid or missing X-Internal-API-Key' });
@@ -48,6 +50,7 @@ export default async function handler(req, res) {
     return handlePost(req, res);
   }
   if (req.method === 'GET') {
+    if (!requireAppKey(req, res)) return;
     return handleGet(req, res);
   }
   return res.status(405).json({ error: 'Method not allowed' });

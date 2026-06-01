@@ -14,6 +14,7 @@
 // (atomic RPUSH writes); older entries are JSON-string arrays. Try LRANGE
 // first, fall back to legacy GET-parse-array.
 import { kvAvailable, kvGet, kvLRange } from './_kv.js';
+import { requireAppKey } from './_auth.js';
 
 async function readTrackIndex(prospectId) {
   const key = `shp:trackindex:${prospectId}`;
@@ -51,6 +52,10 @@ export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
+
+  // App-key gate: opens data includes recipient emails + opener IPs. Block
+  // anonymous enumeration of prospectIds.
+  if (!requireAppKey(req, res)) return;
 
   if (!kvAvailable()) {
     return res.status(200).json({ ok: true, note: 'KV not configured — opens unavailable' });

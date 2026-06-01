@@ -26,12 +26,33 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// App key attached to every same-origin /api call so the browser-facing
+// endpoints (anthropic, apollo, opens, import-prospect GET) can gate out
+// drive-by abuse. Sourced from VITE_SHP_API_KEY at build time. If unset,
+// no header is sent and the server-side gate stays dormant — see api/_auth.js.
+const APP_KEY = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_SHP_API_KEY) || '';
+
+// Header helper for raw fetch() calls that don't go through apiFetch (e.g.
+// the opens poll and import-prospect inbox read, which do bespoke response
+// handling). Spread into their headers so they carry the app key too.
+export function appKeyHeader() {
+  return APP_KEY ? { 'X-SHP-Key': APP_KEY } : {};
+}
+
 export async function apiFetch(url, options = {}, opts = {}) {
   const {
     retries = DEFAULT_RETRIES,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     parseJson = true,
   } = opts;
+
+  // Inject the app-key header on same-origin /api requests (not absolute URLs
+  // to third parties). Merges with any caller-supplied headers.
+  const isLocalApi = typeof url === 'string' && url.startsWith('/api/');
+  const mergedHeaders = isLocalApi && APP_KEY
+    ? { ...(options.headers || {}), 'X-SHP-Key': APP_KEY }
+    : options.headers;
+  if (mergedHeaders) options = { ...options, headers: mergedHeaders };
 
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {

@@ -20,7 +20,7 @@ import {
   BUSINESS_BRAND,
 } from './strategy.js';
 import seedData from './seed-prospects.js';
-import { apiFetch, postJson } from './api-client.js';
+import { apiFetch, postJson, appKeyHeader } from './api-client.js';
 
 // Anthropic model — promoted to a constant so we change it in one place.
 // Use a stable alias rather than a dated snapshot so we don't break when
@@ -476,7 +476,7 @@ export default function SHPProspectingAgent() {
     let cancelled = false;
     (async () => {
       try {
-        const r = await fetch('/api/import-prospect', { method: 'GET' });
+        const r = await fetch('/api/import-prospect', { method: 'GET', headers: appKeyHeader() });
         if (!r.ok) return; // endpoint not deployed / no INTERNAL_API_KEY — silent
         const data = await r.json();
         const incoming = Array.isArray(data?.prospects) ? data.prospects : [];
@@ -627,7 +627,7 @@ export default function SHPProspectingAgent() {
       const ids = Object.keys(pdRecords).filter(id => pdRecords[id]?.sentAt);
       if (ids.length === 0) return;
       try {
-        const r = await fetch(`/api/opens?prospectIds=${ids.slice(0, 200).join(',')}`);
+        const r = await fetch(`/api/opens?prospectIds=${ids.slice(0, 200).join(',')}`, { headers: appKeyHeader() });
         if (r.ok && !cancelled) {
           const data = await r.json();
           if (data?.byProspect) setOpensByProspect(data.byProspect);
@@ -2933,35 +2933,36 @@ Other rules:
           misses++;
         } else {
           // Apply merged enrichment immediately (no review step in batch mode)
-          setProspects(prev => prev.map(p => {
-            if (p.id !== target.id) return p;
-            const update = { ...p };
-            // Email preference: verified Apollo > directory > unverified Apollo
-            if (apolloPerson?.email && apolloPerson.emailStatus === 'verified') {
-              update.email = apolloPerson.email;
-            } else if (webPerson?.email) {
-              update.email = webPerson.email;
-            } else if (apolloPerson?.email) {
-              update.email = apolloPerson.email;
-            }
-            const phone = apolloPerson?.phone || webPerson?.phone;
-            if (phone && !p.phone) update.phone = phone;
-            const title = apolloPerson?.title || webPerson?.title;
-            if (title && (!p.title || p.title.toLowerCase() === 'student')) update.title = title;
-            if (apolloPerson?.linkedinUrl) update.linkedinUrl = apolloPerson.linkedinUrl;
-            update.enrichedAt = new Date().toISOString();
-            update.enrichedBy = apolloPerson && webPerson ? 'apollo+website-batch'
-              : webPerson ? 'website-batch'
-              : 'apollo-batch';
-            return update;
-          }));
-          // Persist linkedinUrl override so it survives reloads
-          if (apolloPerson?.linkedinUrl) {
-            setOverrides(prev => ({
-              ...prev,
-              [target.id]: { ...prev[target.id], linkedinUrl: apolloPerson.linkedinUrl },
-            }));
+          // Compute the field changes once, then write to BOTH prospects and
+          // overrides so batch enrichment survives a reload (same fix as
+          // applyEnrichment — in-memory-only updates vanish for seed prospects).
+          const changed = {};
+          // Email preference: verified Apollo > directory > unverified Apollo
+          if (apolloPerson?.email && apolloPerson.emailStatus === 'verified') {
+            changed.email = apolloPerson.email;
+            changed.emailStatus = 'verified';
+            changed.emailSource = 'apollo';
+          } else if (webPerson?.email) {
+            changed.email = webPerson.email;
+            changed.emailStatus = webPerson.emailStatus || 'directory';
+            changed.emailSource = 'website';
+          } else if (apolloPerson?.email) {
+            changed.email = apolloPerson.email;
+            changed.emailStatus = apolloPerson.emailStatus || 'apollo';
+            changed.emailSource = 'apollo';
           }
+          const phone = apolloPerson?.phone || webPerson?.phone;
+          if (phone && !target.phone) changed.phone = phone;
+          const title = apolloPerson?.title || webPerson?.title;
+          if (title && (!target.title || target.title.toLowerCase() === 'student')) changed.title = title;
+          if (apolloPerson?.linkedinUrl) changed.linkedinUrl = apolloPerson.linkedinUrl;
+          changed.enrichedAt = new Date().toISOString();
+          changed.enrichedBy = apolloPerson && webPerson ? 'apollo+website-batch'
+            : webPerson ? 'website-batch'
+            : 'apollo-batch';
+
+          setProspects(prev => prev.map(p => (p.id === target.id ? { ...p, ...changed } : p)));
+          setOverrides(prev => ({ ...prev, [target.id]: { ...prev[target.id], ...changed } }));
           if (apolloPerson) success++; else websiteOnly++;
         }
       } catch (e) {
@@ -2986,59 +2987,53 @@ Other rules:
     if (!proposal?.matched || !proposal.person) return;
     const apollo = proposal.person;
 
-    setProspects(prev => prev.map(p => {
-      if (p.id !== prospectId) return p;
-      // Update fields where the proposal has data — but never overwrite a non-empty existing value
-      // unless the proposed email is "verified" (Apollo) or "directory" (org website)
-      const update = { ...p };
+    // Compute the field changes ONCE against the current (effective) prospect, then
+    // write them to BOTH the in-memory prospects array AND the overrides map.
+    // Persisting to overrides is what makes enrichment survive a page reload — the
+    // seed pool (602 records) is re-initialized from bundled data on every mount, so
+    // an in-memory-only update silently vanishes (and wastes the Apollo credit).
+    const base = prospectsWithOverrides.find(p => p.id === prospectId)
+      || prospects.find(p => p.id === prospectId)
+      || {};
+    const tokenCount = (s) => (s || '').trim().split(/\s+/).filter(Boolean).length;
+    const existingHasPlaceholder = /\([^)]*\)/.test(base.name || '');
 
-      // NAME: upgrade if the proposal has a fuller name (e.g. "Darren" → "Darren Allgaier")
-      // or if the existing name has placeholder text like "(last name not listed)".
-      const tokenCount = (s) => (s || '').trim().split(/\s+/).filter(Boolean).length;
-      const existingHasPlaceholder = /\([^)]*\)/.test(p.name || '');
-      if (apollo.name && (existingHasPlaceholder || tokenCount(apollo.name) > tokenCount(p.name))) {
-        update.name = apollo.name;
-      }
-
-      // EMAIL: keep all existing rules + accept pattern-guessed emails as a final fallback
-      if (apollo.email && (apollo.emailStatus === 'verified' || apollo.emailStatus === 'directory')) {
-        // Always prefer a verified Apollo email or a website-directory email
-        update.email = apollo.email;
-        update.emailStatus = apollo.emailStatus;
-        update.emailSource = apollo.emailSource;
-      } else if (apollo.email && apollo.emailStatus === 'guessed' && !p.email) {
-        // Pattern-guessed: only fill if the prospect has no email at all
-        update.email = apollo.email;
-        update.emailStatus = 'guessed';
-        update.emailSource = 'pattern';
-        update.emailPattern = apollo.emailPattern;
-        update.emailConfidence = apollo.emailConfidence;
-      } else if (apollo.email && (!p.email || /(gmail|yahoo|hotmail|aol|comcast)/i.test(p.email))) {
-        // Use Apollo email if existing is personal/missing, even if not "verified"
-        update.email = apollo.email;
-        update.emailStatus = apollo.emailStatus || 'apollo';
-        update.emailSource = apollo.emailSource || 'apollo';
-      }
-      if (apollo.phone && !p.phone) update.phone = apollo.phone;
-      if (apollo.title && (!p.title || p.title.toLowerCase() === 'student' || tokenCount(apollo.title) > tokenCount(p.title))) {
-        update.title = apollo.title;
-      }
-      if (apollo.linkedinUrl) update.linkedinUrl = apollo.linkedinUrl;
-      // linkedinUrl also saved to overrides below so it survives page reloads
-      update.enrichedAt = new Date().toISOString();
-      update.enrichedBy = proposal.sources?.patternGuessed
-        ? 'pattern-guess'
-        : (proposal.sources?.website && !proposal.sources?.apollo ? 'website' : 'apollo');
-      return update;
-    }));
-
-    // Persist linkedinUrl to overrides so it survives page reloads
-    if (apollo.linkedinUrl) {
-      setOverrides(prev => ({
-        ...prev,
-        [prospectId]: { ...prev[prospectId], linkedinUrl: apollo.linkedinUrl },
-      }));
+    // changed = the fields we will persist (only what actually changes)
+    const changed = {};
+    if (apollo.name && (existingHasPlaceholder || tokenCount(apollo.name) > tokenCount(base.name))) {
+      changed.name = apollo.name;
     }
+    if (apollo.email && (apollo.emailStatus === 'verified' || apollo.emailStatus === 'directory')) {
+      changed.email = apollo.email;
+      changed.emailStatus = apollo.emailStatus;
+      changed.emailSource = apollo.emailSource;
+    } else if (apollo.email && apollo.emailStatus === 'guessed' && !base.email) {
+      changed.email = apollo.email;
+      changed.emailStatus = 'guessed';
+      changed.emailSource = 'pattern';
+      changed.emailPattern = apollo.emailPattern;
+      changed.emailConfidence = apollo.emailConfidence;
+    } else if (apollo.email && (!base.email || /(gmail|yahoo|hotmail|aol|comcast)/i.test(base.email))) {
+      changed.email = apollo.email;
+      changed.emailStatus = apollo.emailStatus || 'apollo';
+      changed.emailSource = apollo.emailSource || 'apollo';
+    }
+    if (apollo.phone && !base.phone) changed.phone = apollo.phone;
+    if (apollo.title && (!base.title || base.title.toLowerCase() === 'student' || tokenCount(apollo.title) > tokenCount(base.title))) {
+      changed.title = apollo.title;
+    }
+    if (apollo.linkedinUrl) changed.linkedinUrl = apollo.linkedinUrl;
+    changed.enrichedAt = new Date().toISOString();
+    changed.enrichedBy = proposal.sources?.patternGuessed
+      ? 'pattern-guess'
+      : (proposal.sources?.website && !proposal.sources?.apollo ? 'website' : 'apollo');
+
+    // 1. In-memory update (immediate UI refresh)
+    setProspects(prev => prev.map(p => (p.id === prospectId ? { ...p, ...changed } : p)));
+
+    // 2. Persist to overrides so it survives reload (the actual bug fix).
+    //    prospectsWithOverrides reads o?.email || p.email etc., so these win on reload.
+    setOverrides(prev => ({ ...prev, [prospectId]: { ...prev[prospectId], ...changed } }));
 
     // Clear the proposal
     setProposedEnrichment(prev => {
@@ -3047,7 +3042,7 @@ Other rules:
       return next;
     });
 
-    showToast('Enrichment applied');
+    showToast('Enrichment applied & saved');
   };
 
   // Save a LinkedIn URL directly to overrides — persists across reloads.
@@ -3604,6 +3599,15 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         email: o?.email || p.email,
         phone: o?.phone || p.phone,
         company: o?.company || p.company,
+        // Enrichment metadata persisted by applyEnrichment / runBatchEnrich — read
+        // back from overrides so the email-status badge (verified/directory/guessed)
+        // and enrichment provenance survive a reload, not just the email string.
+        emailStatus: o?.emailStatus || p.emailStatus,
+        emailSource: o?.emailSource || p.emailSource,
+        emailPattern: o?.emailPattern || p.emailPattern,
+        emailConfidence: o?.emailConfidence ?? p.emailConfidence,
+        enrichedAt: o?.enrichedAt || p.enrichedAt,
+        enrichedBy: o?.enrichedBy || p.enrichedBy,
       };
 
       // Check customer collision (only if user hasn't explicitly set status)
