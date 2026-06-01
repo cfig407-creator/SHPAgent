@@ -119,6 +119,29 @@ export async function kvSafeAppendList(key, value) {
   await kvRPushRaw(key, value);
 }
 
+// ── SCAN (enumerate keys by pattern) ────────────────────────────────
+// Cursor-paginates Upstash SCAN until exhausted. Used by the tracking-
+// rebuild recovery to find every shp:trackmeta:* key. Capped at 5000
+// keys as a safety bound for a single-tenant app.
+export async function kvScan(matchPattern, count = 200) {
+  const keys = [];
+  let cursor = '0';
+  do {
+    const r = await fetch(
+      `${process.env.KV_REST_API_URL}/scan/${cursor}?match=${encodeURIComponent(matchPattern)}&count=${count}`,
+      { headers: HEADERS() }
+    );
+    if (!r.ok) break;
+    const json = await r.json();
+    const res = json?.result;
+    if (!Array.isArray(res) || res.length < 2) break;
+    cursor = String(res[0]);
+    const batch = Array.isArray(res[1]) ? res[1] : [];
+    keys.push(...batch);
+  } while (cursor !== '0' && keys.length < 5000);
+  return keys;
+}
+
 // ── Hash operations (HSET-style, atomic per-field) ──────────────────
 export async function kvHGet(key, field) {
   const r = await fetch(

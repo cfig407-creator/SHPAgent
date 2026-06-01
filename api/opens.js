@@ -13,7 +13,7 @@
 // Read trackindex with backward compat. Newer entries are Redis lists
 // (atomic RPUSH writes); older entries are JSON-string arrays. Try LRANGE
 // first, fall back to legacy GET-parse-array.
-import { kvAvailable, kvGet, kvLRange } from './_kv.js';
+import { kvAvailable, kvGet, kvLRange, kvScan } from './_kv.js';
 import { requireAppKey } from './_auth.js';
 
 async function readTrackIndex(prospectId) {
@@ -61,9 +61,32 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, note: 'KV not configured — opens unavailable' });
   }
 
-  const { id, prospectId, prospectIds } = req.query || {};
+  const { id, prospectId, prospectIds, action } = req.query || {};
 
   try {
+    // ── RECOVERY: rebuild the client's sent index from KV ──────────────
+    // The frontend's pdRecords (which prospects were emailed) lives in
+    // browser localStorage and can be lost (cleared cache, device switch,
+    // M365 reconnect flow). The send metadata itself is durable in KV under
+    // shp:trackmeta:{trackingId}. This scans every trackmeta key and returns
+    // the sends grouped by prospectId so the client can reconstruct pdRecords.
+    if (action === 'rebuild') {
+      const keys = await kvScan('shp:trackmeta:*');
+      const byProspect = {}; // prospectId -> { trackingIds[], sentAts[], lastSubject }
+      for (const key of keys) {
+        const trackingId = key.replace(/^shp:trackmeta:/, '');
+        const meta = await kvGet(key);
+        const pid = meta?.prospectId;
+        if (!pid || !meta?.sentAt) continue;
+        if (!byProspect[pid]) byProspect[pid] = { trackingIds: [], sentAts: [], lastSubject: '' };
+        byProspect[pid].trackingIds.push(trackingId);
+        byProspect[pid].sentAts.push(meta.sentAt);
+        byProspect[pid].lastSubject = meta.subject || byProspect[pid].lastSubject;
+      }
+      const totalSends = Object.values(byProspect).reduce((n, p) => n + p.sentAts.length, 0);
+      return res.status(200).json({ ok: true, byProspect, prospectCount: Object.keys(byProspect).length, totalSends });
+    }
+
     if (id) {
       const opens = await kvLRange(`shp:opens:${id}`);
       const meta = await kvGet(`shp:trackmeta:${id}`);

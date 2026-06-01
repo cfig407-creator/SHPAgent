@@ -3489,6 +3489,54 @@ Other rules:
     }
   };
 
+  // Rebuild the client-side sent index (pdRecords) from durable KV tracking
+  // data. Send metadata persists server-side in shp:trackmeta:* even when
+  // the browser loses pdRecords (cleared cache, device switch, M365 reconnect).
+  // This restores the "Emails sent" tile and re-enables the opens poll, which
+  // then repopulates open counts on its own.
+  const [isRebuildingTracking, setIsRebuildingTracking] = useState(false);
+  const rebuildTrackingFromServer = async () => {
+    setIsRebuildingTracking(true);
+    try {
+      const r = await fetch('/api/opens?action=rebuild', { headers: appKeyHeader() });
+      if (!r.ok) { showToast(`Rebuild failed (${r.status})`, 'error'); return; }
+      const data = await r.json();
+      const byProspect = data?.byProspect || {};
+      if (Object.keys(byProspect).length === 0) {
+        showToast('No tracked sends found on the server', 'info');
+        return;
+      }
+      setPdRecords(prev => {
+        const next = { ...prev };
+        for (const [pid, info] of Object.entries(byProspect)) {
+          const sentAts = Array.isArray(info.sentAts) ? info.sentAts.slice().sort() : [];
+          if (sentAts.length === 0) continue;
+          const existing = next[pid] || {};
+          const existingHist = Array.isArray(existing.sentHistory)
+            ? existing.sentHistory
+            : (existing.sentAt ? [existing.sentAt] : []);
+          const mergedHist = Array.from(new Set([...existingHist, ...sentAts])).sort();
+          const existingTids = Array.isArray(existing.trackingIds) ? existing.trackingIds : [];
+          const mergedTids = Array.from(new Set([...existingTids, ...(info.trackingIds || [])]));
+          next[pid] = {
+            ...existing,
+            sentAt: mergedHist[mergedHist.length - 1],
+            sentHistory: mergedHist,
+            touchCount: mergedHist.length,
+            trackingIds: mergedTids,
+            lastSendMethod: existing.lastSendMethod || 'm365',
+          };
+        }
+        return next;
+      });
+      showToast(`Restored ${data.totalSends} send${data.totalSends === 1 ? '' : 's'} across ${data.prospectCount} prospect${data.prospectCount === 1 ? '' : 's'} — opens repopulate within ~2 min`);
+    } catch (e) {
+      showToast(`Rebuild failed: ${e.message}`, 'error');
+    } finally {
+      setIsRebuildingTracking(false);
+    }
+  };
+
   // === Batch Draft Queue ===
   // Research + AI-draft N selected prospects sequentially.
   // Re-uses cached research when available (same research that was already done
@@ -3853,7 +3901,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} msConnection={msConnection} sendViaM365={sendViaM365} isSendingM365={isSendingM365 === selectedProspect.id} opensForProspect={opensByProspect[selectedProspect.id] || []} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
-        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} msConnection={msConnection} connectM365={connectM365} disconnectM365={disconnectM365} needsScopeReconnect={needsScopeReconnect} />}
+        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} msConnection={msConnection} connectM365={connectM365} disconnectM365={disconnectM365} needsScopeReconnect={needsScopeReconnect} rebuildTrackingFromServer={rebuildTrackingFromServer} isRebuildingTracking={isRebuildingTracking} />}
       </div>
       {toast && <Toast styles={styles} toast={toast} />}
       {pursueLaterFor && <PursueLaterModal styles={styles} date={pursueLaterDate} setDate={setPursueLaterDate} onSave={savePursueLater} onCancel={() => setPursueLaterFor(null)} />}
@@ -6315,7 +6363,7 @@ function CoachView({ styles, coachTab, setCoachTab, coachSelectedSegment, setCoa
 // =================================================================
 // === SETTINGS VIEW ===
 // =================================================================
-function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdConnectError, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing, apolloQuota, fetchApolloQuota, prospects, overrides, pdRecords, researchData, showToast, msConnection, connectM365, disconnectM365, needsScopeReconnect }) {
+function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdConnectError, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing, apolloQuota, fetchApolloQuota, prospects, overrides, pdRecords, researchData, showToast, msConnection, connectM365, disconnectM365, needsScopeReconnect, rebuildTrackingFromServer, isRebuildingTracking }) {
   const exportAllData = () => {
     const payload = {
       exportedAt: new Date().toISOString(),
@@ -6416,6 +6464,25 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
             </>
           )}
         </div>
+
+        {/* Tracking recovery — rebuild the sent/opens index from durable KV
+            data when the browser's local copy was lost (cleared cache, device
+            switch, M365 reconnect). The send + open data itself is never lost. */}
+        {rebuildTrackingFromServer && (
+          <div style={{ marginTop: '12px', padding: '12px 14px', background: 'var(--bg-sunk)', border: '1px solid var(--border)', borderRadius: '10px', fontSize: '12px' }}>
+            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Sent / open tracking missing?</div>
+            <div style={{ color: 'var(--text-2)', marginBottom: '10px', lineHeight: '1.5' }}>
+              Your send history lives on this browser; the underlying tracking data is stored safely on the server. If the dashboard shows 0 sent/opens after a cache clear, device switch, or M365 reconnect, rebuild it from the server.
+            </div>
+            <button
+              style={{ ...styles.secondaryBtn, fontSize: '12px' }}
+              onClick={rebuildTrackingFromServer}
+              disabled={isRebuildingTracking}
+            >
+              {isRebuildingTracking ? <><Loader2 size={13} className="spin" /> Rebuilding…</> : <><RefreshCw size={13} /> Rebuild tracking from server</>}
+            </button>
+          </div>
+        )}
       </div>
 
       <div style={styles.card}>
