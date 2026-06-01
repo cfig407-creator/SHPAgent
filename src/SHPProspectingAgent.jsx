@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Search, Building2, Mail, Phone, CheckCircle2, Loader2, Sparkles, Target,
   ExternalLink, Filter, ArrowRight, Send, Edit3, Zap, TrendingUp,
@@ -905,6 +905,117 @@ export default function SHPProspectingAgent() {
   };
 
   const syncPipeline = () => syncPipelineWith(pdMeta.defaultPipelineId, pdMeta.stages);
+
+  // === Reconcile Pipedrive push status from the live CRM ===
+  // Pipedrive is the durable source of truth for lead/deal records; the
+  // client's pdRecords leadId/dealId mapping is just a cache that can be lost
+  // (cleared storage, device switch, M365 reconnect). This bulk-fetches the
+  // rep's persons + leads + deals, matches them to prospects by email, and
+  // heals pdRecords — so the Lead/Deal badges are self-healing and re-pushing
+  // (which would create duplicate CRM records) is avoided. Runs automatically
+  // on connect, and on demand from Settings.
+  const [isReconcilingPD, setIsReconcilingPD] = useState(false);
+  const didReconcilePDRef = useRef(false);
+
+  const reconcilePipedriveStatus = async ({ silent = false } = {}) => {
+    if (!pdConnected) { if (!silent) showToast('Connect Pipedrive first', 'info'); return; }
+    setIsReconcilingPD(true);
+    try {
+      // Paginated bulk fetch (cheap, rep-scale) — not per-prospect search.
+      const fetchAll = async (basePath) => {
+        const out = [];
+        let start = 0;
+        for (let page = 0; page < 8; page++) {
+          const sep = basePath.includes('?') ? '&' : '?';
+          const resp = await pdRequest('GET', `${basePath}${sep}start=${start}&limit=500`);
+          const data = Array.isArray(resp?.data) ? resp.data : [];
+          out.push(...data);
+          const pg = resp?.additional_data?.pagination;
+          if (!pg?.more_items_in_collection || pg.next_start == null) break;
+          start = pg.next_start;
+        }
+        return out;
+      };
+
+      const [persons, leads, deals] = await Promise.all([
+        fetchAll('/persons'),
+        fetchAll('/leads'),
+        fetchAll('/deals?status=all_not_deleted'),
+      ]);
+
+      // personId -> primary email (lowercased). Pipedrive email can be an
+      // array of {value,primary} or (rarely) a plain string.
+      const extractEmail = (p) => {
+        const e = p?.email;
+        if (Array.isArray(e)) return ((e.find(x => x.primary) || e[0])?.value || '').toLowerCase();
+        return (typeof e === 'string' ? e : '').toLowerCase();
+      };
+      const emailByPerson = {};
+      for (const p of persons) { const em = extractEmail(p); if (em) emailByPerson[p.id] = em; }
+
+      // person_id can be an object {value,...} or a bare id
+      const pidOf = (rec) => {
+        const v = rec?.person_id;
+        if (v == null) return null;
+        return (typeof v === 'object') ? v.value : v;
+      };
+
+      // email -> { leadId, leadUrl, dealId, dealUrl }
+      const statusByEmail = {};
+      for (const lead of leads) {
+        const em = emailByPerson[pidOf(lead)];
+        if (!em) continue;
+        statusByEmail[em] = { ...(statusByEmail[em] || {}), leadId: lead.id, leadUrl: `https://app.pipedrive.com/leads/inbox/${lead.id}` };
+      }
+      for (const deal of deals) {
+        const em = emailByPerson[pidOf(deal)];
+        if (!em) continue;
+        statusByEmail[em] = { ...(statusByEmail[em] || {}), dealId: deal.id, dealUrl: `https://app.pipedrive.com/deal/${deal.id}` };
+      }
+
+      // Compute matches OUTSIDE the setState updater (avoid StrictMode double-run)
+      const updates = {};
+      for (const p of prospectsWithOverrides) {
+        const em = (p.email || '').toLowerCase();
+        if (!em) continue;
+        const st = statusByEmail[em];
+        if (st) updates[p.id] = st;
+      }
+      const matchedCount = Object.keys(updates).length;
+
+      if (matchedCount > 0) {
+        setPdRecords(prev => {
+          const next = { ...prev };
+          for (const [id, st] of Object.entries(updates)) {
+            const existing = next[id] || {};
+            next[id] = {
+              ...existing,
+              ...(st.leadId ? { leadId: st.leadId, leadUrl: st.leadUrl } : {}),
+              ...(st.dealId ? { dealId: st.dealId, dealUrl: st.dealUrl } : {}),
+            };
+          }
+          return next;
+        });
+      }
+      if (!silent) {
+        showToast(`Pipedrive reconciled · ${matchedCount} prospect${matchedCount === 1 ? '' : 's'} linked to existing leads/deals`);
+      }
+    } catch (err) {
+      if (!silent) showToast(`Pipedrive reconcile failed: ${err.message}`, 'error');
+      else console.warn('[shp] PD reconcile (auto) failed:', err.message);
+    } finally {
+      setIsReconcilingPD(false);
+    }
+  };
+
+  // Auto-reconcile once per session, the first time Pipedrive connects. Heals
+  // the Lead/Deal badges from the live CRM without any manual action.
+  useEffect(() => {
+    if (pdConnected && !didReconcilePDRef.current) {
+      didReconcilePDRef.current = true;
+      reconcilePipedriveStatus({ silent: true });
+    }
+  }, [pdConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // === Apollo search (criteria-based, direct Apollo people-search) ===
   // Calls /api/apollo-people-search with parsed user criteria. No Anthropic /
@@ -3901,7 +4012,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         {view === 'compose' && selectedProspect && <ComposeView styles={styles} prospect={selectedProspect} setProspect={setSelectedProspect} draftEmail={draftEmail} setDraftEmail={setDraftEmail} isDrafting={isDrafting} draftOutreach={draftOutreach} draftDiagnostic={draftDiagnostic} pushToPipedrive={pushToPipedrive} sendViaPipedrive={sendViaPipedrive} isSendingPD={isSendingPD} sendViaOutlook={sendViaOutlook} openInPipedrive={openInPipedrive} pdRecords={pdRecords} pdConnected={pdConnected} isPushing={isPushing} scheduleFollowUps={scheduleFollowUps} isSchedulingFollowUps={isSchedulingFollowUps} config={config} setView={setView} followUpDays={FOLLOW_UP_DAYS} msConnection={msConnection} sendViaM365={sendViaM365} isSendingM365={isSendingM365 === selectedProspect.id} opensForProspect={opensByProspect[selectedProspect.id] || []} />}
         {view === 'pipeline' && <PipelineView styles={styles} pdConnected={pdConnected} pdMeta={pdMeta} stageDeals={stageDeals} syncPipeline={syncPipeline} isSyncing={isSyncing} setView={setView} />}
         {view === 'coach' && <CoachView styles={styles} coachTab={coachTab} setCoachTab={setCoachTab} coachSelectedSegment={coachSelectedSegment} setCoachSelectedSegment={setCoachSelectedSegment} copyToClipboard={copyToClipboard} />}
-        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} msConnection={msConnection} connectM365={connectM365} disconnectM365={disconnectM365} needsScopeReconnect={needsScopeReconnect} rebuildTrackingFromServer={rebuildTrackingFromServer} isRebuildingTracking={isRebuildingTracking} />}
+        {view === 'settings' && <SettingsView styles={styles} config={config} setConfig={setConfig} saveConfig={saveConfig} pdConnected={pdConnected} pdConnectError={pdConnectError} pdMeta={pdMeta} autoConnect={autoConnect} isConnecting={isConnecting} syncPipeline={syncPipeline} isSyncing={isSyncing} apolloQuota={effectiveQuota} fetchApolloQuota={fetchApolloQuota} prospects={prospects} overrides={overrides} pdRecords={pdRecords} researchData={researchData} showToast={showToast} msConnection={msConnection} connectM365={connectM365} disconnectM365={disconnectM365} needsScopeReconnect={needsScopeReconnect} rebuildTrackingFromServer={rebuildTrackingFromServer} isRebuildingTracking={isRebuildingTracking} reconcilePipedriveStatus={reconcilePipedriveStatus} isReconcilingPD={isReconcilingPD} />}
       </div>
       {toast && <Toast styles={styles} toast={toast} />}
       {pursueLaterFor && <PursueLaterModal styles={styles} date={pursueLaterDate} setDate={setPursueLaterDate} onSave={savePursueLater} onCancel={() => setPursueLaterFor(null)} />}
@@ -6363,7 +6474,7 @@ function CoachView({ styles, coachTab, setCoachTab, coachSelectedSegment, setCoa
 // =================================================================
 // === SETTINGS VIEW ===
 // =================================================================
-function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdConnectError, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing, apolloQuota, fetchApolloQuota, prospects, overrides, pdRecords, researchData, showToast, msConnection, connectM365, disconnectM365, needsScopeReconnect, rebuildTrackingFromServer, isRebuildingTracking }) {
+function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdConnectError, pdMeta, autoConnect, isConnecting, syncPipeline, isSyncing, apolloQuota, fetchApolloQuota, prospects, overrides, pdRecords, researchData, showToast, msConnection, connectM365, disconnectM365, needsScopeReconnect, rebuildTrackingFromServer, isRebuildingTracking, reconcilePipedriveStatus, isReconcilingPD }) {
   const exportAllData = () => {
     const payload = {
       exportedAt: new Date().toISOString(),
@@ -6474,13 +6585,28 @@ function SettingsView({ styles, config, setConfig, saveConfig, pdConnected, pdCo
             <div style={{ color: 'var(--text-2)', marginBottom: '10px', lineHeight: '1.5' }}>
               Your send history lives on this browser; the underlying tracking data is stored safely on the server. If the dashboard shows 0 sent/opens after a cache clear, device switch, or M365 reconnect, rebuild it from the server.
             </div>
-            <button
-              style={{ ...styles.secondaryBtn, fontSize: '12px' }}
-              onClick={rebuildTrackingFromServer}
-              disabled={isRebuildingTracking}
-            >
-              {isRebuildingTracking ? <><Loader2 size={13} className="spin" /> Rebuilding…</> : <><RefreshCw size={13} /> Rebuild tracking from server</>}
-            </button>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                style={{ ...styles.secondaryBtn, fontSize: '12px' }}
+                onClick={rebuildTrackingFromServer}
+                disabled={isRebuildingTracking}
+              >
+                {isRebuildingTracking ? <><Loader2 size={13} className="spin" /> Rebuilding…</> : <><RefreshCw size={13} /> Rebuild tracking from server</>}
+              </button>
+              {reconcilePipedriveStatus && (
+                <button
+                  style={{ ...styles.secondaryBtn, fontSize: '12px' }}
+                  onClick={() => reconcilePipedriveStatus({ silent: false })}
+                  disabled={isReconcilingPD || !pdConnected}
+                  title={!pdConnected ? 'Connect Pipedrive first' : 'Re-link Lead/Deal badges from the live Pipedrive CRM'}
+                >
+                  {isReconcilingPD ? <><Loader2 size={13} className="spin" /> Reconciling…</> : <><RefreshCw size={13} /> Reconcile Pipedrive status</>}
+                </button>
+              )}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '8px' }}>
+              Pipedrive status auto-reconciles on connect. Lead/Deal badges are re-derived from the live CRM, so re-pushing won't create duplicates.
+            </div>
           </div>
         )}
       </div>
