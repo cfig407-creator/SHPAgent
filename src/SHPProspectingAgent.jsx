@@ -4421,6 +4421,20 @@ function ActionTile({ styles, icon: Icon, color, title, sub, onClick }) {
 function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, runApolloSearch, isApolloSearching, manualForm, setManualForm, addManualProspect, importCsvRows, showToast, prospects, researchProspect, researchData, pdRecords, filterSegment, setFilterSegment, filterCounty, setFilterCounty, filterStatus, setFilterStatus, filterOutreach, setFilterOutreach, sortBy, setSortBy, search, setSearch, totalProspects, markCustomer, markDead, markActive, openPursueLater, confirmDelete, enrichProspect, applyEnrichment, dismissEnrichment, isEnriching, proposedEnrichment, apolloQuota, multiThreadAccount, selectedProspectIds, onToggleSelect, onSelectAll, onClearSelection, onBatchDraft, editProspect, opensByProspect, bouncesByRecipient }) {
   const [findTab, setFindTab] = useState('pool');
 
+  // Pagination — 50 per page over the filtered list.
+  const PAGE_SIZE = 50;
+  const [page, setPage] = useState(0);
+  const totalPages = Math.max(1, Math.ceil(prospects.length / PAGE_SIZE));
+  // Clamp if the filtered list shrank below the current page (e.g. after a
+  // filter change) so we never sit on an empty page.
+  const safePage = Math.min(page, totalPages - 1);
+  if (safePage !== page) setPage(safePage);
+  const pageStart = safePage * PAGE_SIZE;
+  const pageProspects = prospects.slice(pageStart, pageStart + PAGE_SIZE);
+  // Reset to page 0 whenever the filter/search/sort inputs change, so a user
+  // who narrows results lands on the first page, not a stale offset.
+  useEffect(() => { setPage(0); }, [filterSegment, filterCounty, filterStatus, filterOutreach, sortBy, search]);
+
   return (
     <>
       <div className="shp-page-title" style={styles.pageTitle}>Find Prospects</div>
@@ -4608,12 +4622,12 @@ function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, 
           <div style={styles.card}>
             {/* Section header with select-all toggle */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-4)' }}>
-              <div style={styles.sectionTitle}><Users size={14} /> Prospects ({prospects.length})</div>
-              {prospects.length > 0 && (
+              <div style={styles.sectionTitle}><Users size={14} /> Prospects ({prospects.length}){totalPages > 1 ? ` · page ${safePage + 1}/${totalPages}` : ''}</div>
+              {pageProspects.length > 0 && (
                 <button
                   style={{ ...styles.secondaryBtn, fontSize: 'var(--fs-12)', padding: '4px 10px' }}
                   onClick={() => {
-                    const visibleIds = prospects.slice(0, 50).map(p => p.id);
+                    const visibleIds = pageProspects.map(p => p.id);
                     const allSelected = visibleIds.every(id => selectedProspectIds.has(id));
                     if (allSelected) {
                       onClearSelection && onClearSelection();
@@ -4622,7 +4636,7 @@ function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, 
                     }
                   }}
                 >
-                  {prospects.slice(0, 50).every(p => selectedProspectIds.has(p.id)) ? 'Deselect all' : 'Select all'}
+                  {pageProspects.every(p => selectedProspectIds.has(p.id)) ? 'Deselect page' : 'Select page'}
                 </button>
               )}
             </div>
@@ -4658,12 +4672,28 @@ function FindView({ styles, saveLinkedInUrl, apolloCriteria, setApolloCriteria, 
               </div>
             )}
 
-            {prospects.slice(0, 50).map(p => (
+            {pageProspects.map(p => (
               <ProspectRow key={p.id} styles={styles} prospect={p} researchData={researchData} pdRecords={pdRecords} researchProspect={researchProspect} markCustomer={markCustomer} markDead={markDead} markActive={markActive} openPursueLater={openPursueLater} confirmDelete={confirmDelete} enrichProspect={enrichProspect} applyEnrichment={applyEnrichment} dismissEnrichment={dismissEnrichment} isEnriching={isEnriching} proposedEnrichment={proposedEnrichment} multiThreadAccount={multiThreadAccount} selected={selectedProspectIds.has(p.id)} onToggleSelect={() => onToggleSelect && onToggleSelect(p.id)} saveLinkedInUrl={saveLinkedInUrl} editProspect={editProspect} opensForProspect={opensByProspect ? opensByProspect[p.id] : null} bounceRecord={p.email && bouncesByRecipient ? bouncesByRecipient[p.email.toLowerCase()] : null} />
             ))}
-            {prospects.length > 50 && (
-              <div style={{ textAlign: 'center', padding: '14px', fontSize: '12px', color: 'var(--text-3)', fontStyle: 'italic' }}>
-                Showing top 50 of {prospects.length}. Refine filters to narrow.
+            {totalPages > 1 && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', padding: '16px 14px', flexWrap: 'wrap' }}>
+                <button
+                  style={{ ...styles.secondaryBtn, fontSize: '12px', opacity: safePage === 0 ? 0.4 : 1 }}
+                  disabled={safePage === 0}
+                  onClick={() => { setPage(safePage - 1); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+                >
+                  ← Prev
+                </button>
+                <span style={{ fontSize: '12px', color: 'var(--text-2)' }}>
+                  {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, prospects.length)} of {prospects.length} · page {safePage + 1}/{totalPages}
+                </span>
+                <button
+                  style={{ ...styles.secondaryBtn, fontSize: '12px', opacity: safePage >= totalPages - 1 ? 0.4 : 1 }}
+                  disabled={safePage >= totalPages - 1}
+                  onClick={() => { setPage(safePage + 1); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+                >
+                  Next →
+                </button>
               </div>
             )}
             {prospects.length === 0 && (
