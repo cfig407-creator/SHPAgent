@@ -10,7 +10,7 @@
 // this as a "was it loaded at least once" signal, not a reliable counter.
 
 // 1×1 transparent PNG (43 bytes), base64-encoded so we don't need a file asset
-import { kvAvailable, kvRPushAndTrim } from './_kv.js';
+import { kvAvailable, kvSafeAppendList, kvLTrim } from './_kv.js';
 
 const PIXEL = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQYV2NgAAIAAAUAAeImBZsAAAAASUVORK5CYII=',
@@ -53,10 +53,12 @@ export default async function handler(req, res) {
       ua: (req.headers['user-agent'] || '').toString().slice(0, 300),
       ip: (req.headers['x-forwarded-for'] || req.connection?.remoteAddress || '').toString().split(',')[0].trim(),
     };
-    // Atomic RPUSH + LTRIM keeps the last 50 events. Concurrent pixel hits
-    // can't lose data this way (previous read-modify-write pattern silently
-    // dropped opens when two pixels resolved on the same tracking ID).
-    await kvRPushAndTrim(key, event, 50);
+    // Append the open event. kvSafeAppendList migrates a legacy JSON-string
+    // opens key (written by the pre-refactor pixel via kvSet) to a Redis list
+    // on first write — without it, RPUSH on a string key fails WRONGTYPE and
+    // the open is silently lost. Trim to the last 50 afterward.
+    await kvSafeAppendList(key, event);
+    await kvLTrim(key, -50, -1);
   } catch (err) {
     // Swallow — pixel must still load
     console.warn('[pixel] log open failed:', err.message);

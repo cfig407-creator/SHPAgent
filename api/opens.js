@@ -30,13 +30,26 @@ async function readTrackIndex(prospectId) {
   return Array.isArray(fromString) ? fromString : [];
 }
 
+// Read open events for a trackingId with backward compatibility. Newer events
+// are a Redis list (atomic RPUSH from pixel.js). Events recorded before the
+// KV refactor (~May 2026) were stored as a JSON-string array via kvSet —
+// LRANGE on those returns WRONGTYPE → []. Fall back to kvGet so historical
+// opens stay visible. (Same legacy-format gap readTrackIndex already handles.)
+async function readOpens(tid) {
+  const key = `shp:opens:${tid}`;
+  const list = await kvLRange(key);
+  if (list.length > 0) return list;
+  const legacy = await kvGet(key);
+  return Array.isArray(legacy) ? legacy : [];
+}
+
 async function getSendsForProspect(prospectId) {
   const trackingIds = await readTrackIndex(prospectId);
   const sends = [];
   for (const tid of trackingIds) {
     const [meta, opens] = await Promise.all([
       kvGet(`shp:trackmeta:${tid}`),
-      kvLRange(`shp:opens:${tid}`),
+      readOpens(tid),
     ]);
     sends.push({ trackingId: tid, meta: meta || null, opens });
   }
@@ -88,7 +101,7 @@ export default async function handler(req, res) {
     }
 
     if (id) {
-      const opens = await kvLRange(`shp:opens:${id}`);
+      const opens = await readOpens(id.toString());
       const meta = await kvGet(`shp:trackmeta:${id}`);
       return res.status(200).json({ trackingId: id, meta, opens });
     }
