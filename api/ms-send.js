@@ -68,6 +68,15 @@ async function getValidAccessToken() {
   });
   const tokens = await tokenResp.json();
   if (!tokenResp.ok || !tokens.access_token) {
+    // Refresh failed. Microsoft rotates refresh tokens and invalidates the old
+    // one, so a concurrent caller (two tabs, a retry) may have ALREADY refreshed
+    // and persisted a fresh token — our refresh_token is just the now-consumed
+    // one. Before surfacing a "reconnect" error, re-read KV once: if another
+    // caller wrote a still-valid access token, use it instead of failing.
+    const fresh = await kvGet(TOKEN_KEY);
+    if (fresh?.accessToken && fresh.expiresAt && Date.now() + 60_000 < fresh.expiresAt) {
+      return fresh.accessToken;
+    }
     throw new Error('Token refresh failed — reconnect Microsoft 365 in Settings (' + (tokens.error_description || tokens.error || 'unknown') + ')');
   }
   const updated = {
@@ -167,24 +176,30 @@ export default async function handler(req, res) {
       });
     }
 
-    // Persist send metadata so /api/opens can return useful info
-    await kvSet(`shp:trackmeta:${trackingId}`, {
-      prospectId: prospectId || null,
-      subject,
-      to: toList,
-      sentAt: new Date().toISOString(),
-    });
-
-    // Append to per-prospect tracking index via atomic RPUSH.
-    // Prevents lost trackingIds when two sends to the same prospect race
-    // (rapid double-click, batch send, or multi-tab — all real cases).
-    // kvSafeAppendList handles migration from the legacy JSON-array format
-    // if this prospect's trackindex was written before the atomic fix.
-    if (prospectId) {
-      await kvSafeAppendList(`shp:trackindex:${prospectId}`, trackingId);
+    // The email is now SENT. Post-send tracking persistence is best-effort and
+    // MUST NOT convert a successful send into a 500 — if it did, the client's
+    // retry would send the email a SECOND time. So we wrap the KV writes in
+    // their own try/catch and always return 200 once Graph accepted the send.
+    let trackingPersisted = true;
+    try {
+      // Persist send metadata so /api/opens can return useful info
+      await kvSet(`shp:trackmeta:${trackingId}`, {
+        prospectId: prospectId || null,
+        subject,
+        to: toList,
+        sentAt: new Date().toISOString(),
+      });
+      // Append to per-prospect tracking index via atomic RPUSH.
+      // Prevents lost trackingIds when two sends to the same prospect race.
+      if (prospectId) {
+        await kvSafeAppendList(`shp:trackindex:${prospectId}`, trackingId);
+      }
+    } catch (persistErr) {
+      trackingPersisted = false;
+      console.warn('[shp] ms-send: email sent but tracking persist failed:', persistErr.message);
     }
 
-    return res.status(200).json({ ok: true, trackingId, pixelUrl });
+    return res.status(200).json({ ok: true, trackingId, pixelUrl, trackingPersisted });
   } catch (err) {
     // Surface the actual error message as the top-level `error` field so
     // the frontend (api-client.js reads body.error first) shows the real

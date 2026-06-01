@@ -128,6 +128,7 @@ export default function SHPProspectingAgent() {
   // Batch-enrich wizard state — "Spend remaining credits" end-of-month workflow
   const [batchEnrichOpen, setBatchEnrichOpen] = useState(false);
   const [batchEnrichRunning, setBatchEnrichRunning] = useState(false);
+  const [batchEnrichCancel, setBatchEnrichCancel] = useState(false); // Stop-button flag; checked each loop iteration
   const [batchEnrichProgress, setBatchEnrichProgress] = useState({ done: 0, total: 0 });
 
   // Settings (browser-saved)
@@ -541,10 +542,28 @@ export default function SHPProspectingAgent() {
       if (!e?.key || !e.newValue) return;
       try {
         const parsed = JSON.parse(e.newValue);
-        if (e.key === 'shp_pd_records_v1') setPdRecords(parsed);
-        else if (e.key === 'shp_prospect_overrides_v3') setOverrides(parsed);
-        else if (e.key === 'shp_research_v1') setResearchData(parsed);
-        else if (e.key === 'shp_drafts_v1') setDrafts(parsed);
+        // MERGE incoming key-by-key instead of wholesale-replacing the map.
+        // A full replace (the old behavior) let another tab's snapshot clobber
+        // this tab's un-flushed edits — silently losing a just-saved email or a
+        // recorded send. Merging keeps this tab's local-only entries and adopts
+        // the other tab's per-key changes.
+        if (e.key === 'shp_pd_records_v1') {
+          setPdRecords(prev => {
+            const merged = { ...prev };
+            for (const [id, rec] of Object.entries(parsed || {})) {
+              const local = prev[id];
+              // Prefer whichever record has more send history (protects touch
+              // counts); otherwise take the incoming copy.
+              const localLen = Array.isArray(local?.sentHistory) ? local.sentHistory.length : (local?.sentAt ? 1 : 0);
+              const incLen = Array.isArray(rec?.sentHistory) ? rec.sentHistory.length : (rec?.sentAt ? 1 : 0);
+              merged[id] = incLen >= localLen ? rec : local;
+            }
+            return merged;
+          });
+        }
+        else if (e.key === 'shp_prospect_overrides_v3') setOverrides(prev => ({ ...prev, ...parsed }));
+        else if (e.key === 'shp_research_v1') setResearchData(prev => ({ ...prev, ...parsed }));
+        else if (e.key === 'shp_drafts_v1') setDrafts(prev => ({ ...prev, ...parsed }));
         else if (e.key === 'shp_prospects_added_v1' && Array.isArray(parsed)) {
           // Merge with existing prospects, deduping by id (other tab may have
           // added prospects this tab doesn't know about).
@@ -1202,7 +1221,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
 }`
           }],
           tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        }, { retries: 1, timeoutMs: 90_000 });
+        }, { retries: 0, timeoutMs: 90_000 }); // retries:0 — never silently re-run an expensive web_search on timeout
         diagnostic.apiCallSucceeded = true;
       } catch (httpErr) {
         diagnostic.apiCallSucceeded = false;
@@ -1387,7 +1406,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
         model: ANTHROPIC_MODEL,
         max_tokens: 2500,
         messages: [{ role: 'user', content: prompt }],
-      }, { retries: 1, timeoutMs: 60_000 });
+      }, { retries: 0, timeoutMs: 60_000 }); // retries:0 — don't re-run an expensive draft generation on timeout
 
       const blocks = Array.isArray(data?.content) ? data.content : [];
       const text = blocks
@@ -1680,7 +1699,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           lastName,
           name: prospect.name,
           organizationName: prospect.company,
-        }, { retries: 2, timeoutMs: 30_000 }),
+        }, { retries: 0, timeoutMs: 30_000 }), // retries:0 — Apollo match bills 1 credit; never auto-retry (would double-charge)
         scrapeRaced,
       ]);
 
@@ -2885,6 +2904,7 @@ Other rules:
   const runBatchEnrich = async (prospectIds) => {
     if (!prospectIds || prospectIds.length === 0) return;
     setBatchEnrichRunning(true);
+    setBatchEnrichCancel(false); // reset Stop flag at the start of each run
     setBatchEnrichProgress({ done: 0, total: prospectIds.length });
 
     let success = 0;
@@ -2897,7 +2917,15 @@ Other rules:
     const scrapeCache = new Map(); // companyKey -> { contacts, sourceUrl } | null
     const companyKey = (c) => (c || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
+    let stopped = false;
     for (let i = 0; i < prospectIds.length; i++) {
+      // Honor the Stop button — read the latest cancel flag via the setter
+      // (can't read state directly mid-loop). Breaks before the NEXT credit
+      // spend, matching runBatchDraft's cancel semantics.
+      let cancelled = false;
+      setBatchEnrichCancel(c => { cancelled = c; return c; });
+      if (cancelled) { stopped = true; break; }
+
       const target = prospects.find(p => p.id === prospectIds[i]);
       if (!target) { errors++; continue; }
 
@@ -2925,7 +2953,7 @@ Other rules:
           lastName,
           name: target.name,
           organizationName: target.company,
-        }, { retries: 1, timeoutMs: 30_000 });
+        }, { retries: 0, timeoutMs: 30_000 }); // retries:0 — bills 1 credit/match; no auto-retry
 
         const apolloPerson = (data?.matched && data.person) ? data.person : null;
 
@@ -2977,8 +3005,9 @@ Other rules:
 
     fetchApolloQuota(); // refresh quota after the batch
     setBatchEnrichRunning(false);
+    setBatchEnrichCancel(false);
     setBatchEnrichOpen(false);
-    showToast(`Batch enrich complete · ${success} Apollo · ${websiteOnly} website-only (no credit) · ${misses} no-match · ${errors} error${errors === 1 ? '' : 's'}`);
+    showToast(`Batch enrich ${stopped ? 'STOPPED' : 'complete'} · ${success} Apollo · ${websiteOnly} website-only (no credit) · ${misses} no-match · ${errors} error${errors === 1 ? '' : 's'}`);
   };
 
   // Apply Apollo's findings to the prospect record (updates email, phone, title in-place)
@@ -3274,6 +3303,17 @@ Other rules:
     }
   };
 
+  // Touch-cap status for a prospect — single source of truth for the
+  // "how many emails have we sent vs the cap" question. Used by the batch
+  // send guard; the interactive send paths compute the same numbers inline.
+  const touchCapStatus = (prospectId) => {
+    const rec = pdRecords[prospectId] || {};
+    const history = Array.isArray(rec.sentHistory) ? rec.sentHistory : (rec.sentAt ? [rec.sentAt] : []);
+    const count = history.length;
+    const cap = Number.isFinite(config.maxTouches) ? config.maxTouches : DEFAULT_MAX_TOUCHES;
+    return { count, cap, over: count >= cap };
+  };
+
   // Batch variant — called by BatchDraftModal.
   // Pipedrive has no send-email API. Copies the draft to clipboard, opens the lead
   // in Pipedrive's UI for the user to paste + send with open tracking, and records
@@ -3283,6 +3323,14 @@ Other rules:
     const rec = pdRecords[prospect.id] || {};
     if (!rec.leadId && !rec.dealId) {
       throw new Error('Push to Pipedrive first');
+    }
+    // Touch-cap guard — the batch path previously bypassed this entirely, so
+    // a "send all" could silently over-mail prospects past the reputation cap.
+    // No window.confirm here (would flood on send-all); instead surface it as a
+    // per-row error the user sees in the batch modal.
+    const tc = touchCapStatus(prospect.id);
+    if (tc.over) {
+      throw new Error(`Over touch cap (${tc.count}/${tc.cap}) — restore to Active or skip`);
     }
 
     const clipboardText = `Subject: ${subject}\n\n${body}`;
@@ -3377,7 +3425,7 @@ Other rules:
         body: draftEmail.body,
         prospectId: selectedProspect.id,
         bcc: config.smartBcc || undefined,
-      }, { retries: 1, timeoutMs: 30_000 });
+      }, { retries: 0, timeoutMs: 30_000 }); // retries:0 — sends a real email; auto-retry on timeout risks a duplicate
 
       if (!data?.ok) {
         throw new Error(data?.error || data?.message || 'Unknown error');
@@ -3504,7 +3552,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
 }`,
             }],
             tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-          }, { retries: 1, timeoutMs: 90_000 });
+          }, { retries: 0, timeoutMs: 90_000 }); // retries:0 — batch research web_search; don't re-run on timeout
 
           const blocks = Array.isArray(data?.content) ? data.content : [];
           const text = blocks.filter(b => b?.type === 'text').map(b => b.text).filter(Boolean).join('\n');
@@ -3545,7 +3593,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           model: ANTHROPIC_MODEL,
           max_tokens: 1500,
           messages: [{ role: 'user', content: prompt }],
-        }, { retries: 1, timeoutMs: 60_000 });
+        }, { retries: 0, timeoutMs: 60_000 }); // retries:0 — batch draft; don't re-run on timeout
 
         const blocks = Array.isArray(data?.content) ? data.content : [];
         const text = blocks.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text).join('\n').trim();
@@ -3584,7 +3632,14 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
   // - customerMatch (computed from CUSTOMERS — auto-overrides Active to Customer if matched)
   // - needsEnrichment + enrichmentReasons (computed from data quality rules)
   const prospectsWithOverrides = useMemo(() => {
-    return prospects.map(p => {
+    return prospects
+      // Honor deletions durably: executeDelete stamps overrides[id].deletedAt.
+      // Seed prospects re-init from bundled data every mount, so without this
+      // filter a deleted seed row silently reappears on reload (the user was
+      // told it was deleted). Filtering here makes deletes stick for seed +
+      // added rows alike, and keeps derived counts/exports consistent.
+      .filter(p => !overrides[p.id]?.deletedAt)
+      .map(p => {
       const o = overrides[p.id];
       const explicitStatus = o?.outreachStatus;
 
@@ -3844,6 +3899,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           isRunning={batchEnrichRunning}
           progress={batchEnrichProgress}
           onConfirm={runBatchEnrich}
+          onStop={() => setBatchEnrichCancel(true)}
           onCancel={() => setBatchEnrichOpen(false)}
         />
       )}
@@ -7524,7 +7580,7 @@ function NewAccountsModal({ styles, isRunning, progress, results, onAdd, onCance
 // =================================================================
 // === BATCH ENRICH MODAL ("Spend remaining credits" wizard) ===
 // =================================================================
-function BatchEnrichModal({ styles, prospects, clusters, pdRecords, apolloQuota, apolloCycle, isRunning, progress, onConfirm, onCancel }) {
+function BatchEnrichModal({ styles, prospects, clusters, pdRecords, apolloQuota, apolloCycle, isRunning, progress, onConfirm, onStop, onCancel }) {
   // Build the high-trip-county set so we can score on cluster relevance.
   const highTripCounties = useMemo(() => {
     const top = clusters.slice(0, 8).map(c => c.county);
@@ -7607,6 +7663,14 @@ function BatchEnrichModal({ styles, prospects, clusters, pdRecords, apolloQuota,
             <div style={{ marginTop: '16px', height: '6px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden' }}>
               <div style={{ width: `${progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%`, height: '100%', background: 'var(--shp-red)', transition: 'width 0.3s' }} />
             </div>
+            {onStop && (
+              <button
+                style={{ ...styles.secondaryBtn, marginTop: '16px', fontSize: '12px' }}
+                onClick={onStop}
+              >
+                Stop — don't spend more credits
+              </button>
+            )}
           </div>
         ) : candidates.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-3)' }}>

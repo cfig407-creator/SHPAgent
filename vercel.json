@@ -3,5 +3,10 @@
   "framework": "vite",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "devCommand": "npm run dev"
+  "devCommand": "npm run dev",
+  "functions": {
+    "api/anthropic.js": { "maxDuration": 60 },
+    "api/ms-send.js": { "maxDuration": 60 },
+    "api/scrape-url.js": { "maxDuration": 30 }
+  }
 }
