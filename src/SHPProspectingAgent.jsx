@@ -5177,6 +5177,14 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
               </span>
             )}
             {prospect.parentProspectId && <span style={styles.badge('navy')} title={`Multi-thread peer · added from ${prospect.source || 'a parent prospect'}`}><UserPlus size={10} /> peer</span>}
+            {(prospect.icpScout || (typeof prospect.id === 'string' && prospect.id.startsWith('icp_'))) && (
+              <span
+                style={styles.badge('purple')}
+                title={`Added via ICP Scout${prospect.importedAt ? ` on ${new Date(prospect.importedAt).toLocaleDateString()}` : ''}${prospect.icpScout?.score != null ? ` · score ${prospect.icpScout.score}` : ''}`}
+              >
+                <Target size={10} /> Scout
+              </span>
+            )}
           </div>
           <div style={{ fontSize: '12px', color: 'var(--text-2)', marginBottom: '4px' }}>
             {prospect.title || <span style={{ fontStyle: 'italic' }}>(no title)</span>} · {prospect.company}
