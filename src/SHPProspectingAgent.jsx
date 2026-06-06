@@ -14,7 +14,7 @@ import {
   customerCheck, detectEnrichmentNeeds,
   PAIN_FUNNEL_TEMPLATES, UFC_TEMPLATES, REVERSING_RESPONSES,
   buildColdEmailPrompt, buildLeadTitle, buildClusters, FOLLOW_UP_DAYS,
-  composeEmail, stripEmDashes, cleanProspectText,
+  composeEmail, stripEmDashes, cleanProspectText, sentenceCaseSubject,
   getMultiThreadTitles, getFacilitiesSearchTitles, classifyTier, scoreUnenrichedCandidate,
   guessEmailForName, inferEmailPatternFromExamples, normalizeOrgKey,
   BUSINESS_BRAND,
@@ -339,18 +339,21 @@ export default function SHPProspectingAgent() {
         // (or any other grammar drift Claude introduced) gets rewritten in place.
         // This way old drafts auto-correct on next page load without regenerating.
         const fixField = (s) => typeof s === 'string' ? cleanProspectText(s) : s;
+        // Subjects additionally get forced to sentence case so old all-lowercase
+        // drafts (which trip enterprise spam filters) self-correct on load.
+        const fixSubject = (s) => typeof s === 'string' ? sentenceCaseSubject(cleanProspectText(s)) : s;
         for (const id of Object.keys(parsedDrafts)) {
           const d = parsedDrafts[id];
           if (!d) continue;
-          if (d.subject) d.subject = fixField(d.subject);
+          if (d.subject) d.subject = fixSubject(d.subject);
           if (d.body) d.body = fixField(d.body);
           if (d.linkedinMsg) d.linkedinMsg = fixField(d.linkedinMsg);
-          if (Array.isArray(d.subjectAlts)) d.subjectAlts = d.subjectAlts.map(fixField);
+          if (Array.isArray(d.subjectAlts)) d.subjectAlts = d.subjectAlts.map(fixSubject);
           if (d.followUps && typeof d.followUps === 'object') {
             for (const k of Object.keys(d.followUps)) {
               const fu = d.followUps[k];
               if (!fu) continue;
-              if (fu.subject) fu.subject = fixField(fu.subject);
+              if (fu.subject) fu.subject = fixSubject(fu.subject);
               if (fu.body) fu.body = fixField(fu.body);
             }
           }
@@ -1554,17 +1557,17 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           const fu = parsed.followUps[key];
           if (fu && typeof fu === 'object') {
             cleanFollowUps[key] = {
-              subject: cleanProspectText(fu.subject || ''),
+              subject: sentenceCaseSubject(cleanProspectText(fu.subject || '')),
               body: cleanProspectText(fu.body || ''),
             };
           }
         }
       }
       setDraftEmail({
-        subject: cleanProspectText(parsed.subject),
+        subject: sentenceCaseSubject(cleanProspectText(parsed.subject)),
         body: cleanProspectText(parsed.body),
         subjectAlts: Array.isArray(parsed.subjectAlts)
-          ? parsed.subjectAlts.map(s => cleanProspectText(s))
+          ? parsed.subjectAlts.map(s => sentenceCaseSubject(cleanProspectText(s)))
           : [],
         linkedinMsg: typeof parsed.linkedinMsg === 'string' ? cleanProspectText(parsed.linkedinMsg) : '',
         followUps: cleanFollowUps,
@@ -3762,7 +3765,7 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
           const parsed = JSON.parse(jsonMatch[0]);
           if (parsed?.subject && parsed?.body) {
             // Strip em/en dashes from Claude's output before storing
-            draft = { subject: cleanProspectText(parsed.subject), body: cleanProspectText(parsed.body) };
+            draft = { subject: sentenceCaseSubject(cleanProspectText(parsed.subject)), body: cleanProspectText(parsed.body) };
           }
         }
       } catch { /* fall through to deterministic below */ }

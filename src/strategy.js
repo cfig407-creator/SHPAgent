@@ -273,6 +273,17 @@ export function cleanProspectText(text) {
   return normalizeGrammar(stripEmDashes(text));
 }
 
+// Force a subject line into sentence case: capitalize the FIRST alphabetic
+// character only, leaving everything else untouched so proper nouns ("Sumter
+// School District") and acronyms ("SHP") are preserved. The cold-email prompt
+// already asks for sentence case, but the model occasionally returns an
+// all-lowercase subject — and all-lowercase subjects trigger enterprise spam
+// filters like Barracuda. This is the deterministic safety net.
+export function sentenceCaseSubject(subject) {
+  if (typeof subject !== 'string') return subject;
+  return subject.replace(/[a-zA-Z]/, c => c.toUpperCase());
+}
+
 // === COMPOSER ===
 // Picks pieces from each bank based on prospect context, fills placeholders,
 // returns a complete email. Pure JavaScript — no API calls.
@@ -329,7 +340,7 @@ Best,
 ${signature || DEFAULT_SIGNATURE}`;
 
     return {
-      subject: cleanProspectText(subject),
+      subject: sentenceCaseSubject(cleanProspectText(subject)),
       body: cleanProspectText(fullBody),
       diagnostic: {
         composer: 'deterministic',
@@ -372,7 +383,7 @@ ${signature || DEFAULT_SIGNATURE}`;
     // cleanProspectText runs stripEmDashes + normalizeGrammar so the 3-part
     // fallback path matches the FULL_EMAIL_BANK path's cleaning (parity fix
     // — both paths now scrub em-dashes AND apply grammar normalization).
-    subject: cleanProspectText(subject),
+    subject: sentenceCaseSubject(cleanProspectText(subject)),
     body: cleanProspectText(fullBody),
     diagnostic: {
       composer: 'deterministic',
