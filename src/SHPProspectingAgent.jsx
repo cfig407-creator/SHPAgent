@@ -1902,7 +1902,12 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
       // org's pattern from (a) existing prospects at the same company with
       // emails, and (b) sample emails the scraper found. Apply to the merged
       // name to generate a guess.
-      if (!merged.email && tokenCount(merged.name) >= 2) {
+      // Only pattern-guess as a TRUE last resort: when the prospect has NO
+      // email from any source AND none already on file. If they already have an
+      // address (even a weak personal one), we must not fabricate a guess on
+      // some other domain — that's exactly how a real jaxsheriff.org email
+      // ended up shadowed by a guessed amermhi.com one in the review panel.
+      if (!merged.email && !prospect.email && tokenCount(merged.name) >= 2) {
         // Use normalizeOrgKey so "Lake Mary Prep" matches "Lake Mary
         // Preparatory School Inc." — same org, different formatting.
         const orgKey = normalizeOrgKey(prospect.company);
@@ -1928,6 +1933,39 @@ Return ONLY a JSON object (no preamble, no markdown). Be honest about specificit
             merged.emailConfidence = guess.confidence;
           }
         }
+      }
+
+      // === DON'T PROPOSE AN EMAIL DOWNGRADE ===
+      // Reconcile the proposed email against the one the prospect already has.
+      // Enrichment should only ever SURFACE an email that's an upgrade; an
+      // unverified Apollo email or a pattern guess must never appear to replace
+      // an existing real org address (what made a solid jaxsheriff.org email
+      // look like it was being swapped for a guessed amermhi.com one). Personal
+      // inboxes (gmail/yahoo/…) rank low, so a real org email can still replace
+      // them — this mirrors applyEnrichment's write rules so the proposal shown
+      // matches what Apply will actually do.
+      const PERSONAL_EMAIL_RE = /@(gmail|yahoo|hotmail|aol|comcast|outlook|icloud|live|me|msn)\./i;
+      const emailRank = (status, addr) => {
+        if (!addr) return 0;
+        if (PERSONAL_EMAIL_RE.test(addr)) return 1;
+        switch (status) {
+          case 'verified':   return 5;
+          case 'directory':  return 4;
+          case 'guessed':    return 1;
+          case 'guess':
+          case 'unverified': return 2;
+          default:           return 3; // existing real org email, provenance unknown
+        }
+      };
+      if (
+        prospect.email &&
+        emailRank(merged.emailStatus, merged.email) <= emailRank(prospect.emailStatus, prospect.email)
+      ) {
+        merged.email = '';
+        merged.emailStatus = '';
+        merged.emailSource = '';
+        delete merged.emailPattern;
+        delete merged.emailConfidence;
       }
 
       // Store proposal with source attribution for the review panel
@@ -5370,6 +5408,34 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
               : srcs.website && !srcs.apollo
               ? 'Website directory match (0 credits)'
               : 'Apollo match';
+            // Build a field-by-field comparison of what's on file vs. what the
+            // enrichment returned, so the rep can visually confirm exactly which
+            // fields are new/changed — and see when nothing new came back.
+            const person = proposal.person || {};
+            const norm = (s) => (s ?? '').toString().trim().toLowerCase().replace(/\s+/g, ' ');
+            const compareRows = [
+              { key: 'name', label: 'Name', current: prospect.name, incoming: person.name },
+              { key: 'title', label: 'Title', current: prospect.title, incoming: person.title },
+              { key: 'email', label: 'Email', current: prospect.email, incoming: person.email, emailStatus: person.emailStatus, emailSource: person.emailSource },
+              { key: 'phone', label: 'Phone', current: prospect.phone, incoming: person.phone },
+              { key: 'linkedin', label: 'LinkedIn', current: prospect.linkedinUrl, incoming: person.linkedinUrl, isLink: true },
+            ].map(r => {
+              const hasIncoming = !!norm(r.incoming);
+              const hasCurrent = !!norm(r.current);
+              let state;
+              if (!hasIncoming) state = 'none';                      // enrichment returned nothing
+              else if (!hasCurrent) state = 'new';                   // fills a blank
+              else if (norm(r.current) === norm(r.incoming)) state = 'match'; // already on file
+              else state = 'update';                                 // differs from what's on file
+              return { ...r, hasIncoming, hasCurrent, state };
+            });
+            const changeCount = compareRows.filter(r => r.state === 'new' || r.state === 'update').length;
+            const stateChip = {
+              new:    { label: 'New',          bg: 'color-mix(in oklch, var(--ok) 22%, transparent)',    fg: 'var(--ok)' },
+              update: { label: 'Update',       bg: 'color-mix(in oklch, var(--warn) 30%, transparent)',  fg: 'var(--warn)' },
+              match:  { label: 'On file',      bg: 'color-mix(in oklch, var(--text-3) 16%, transparent)', fg: 'var(--text-3)' },
+              none:   { label: 'Not returned', bg: 'transparent',                                         fg: 'var(--text-3)' },
+            };
             return (
             <div style={{ marginTop: '12px', padding: '12px 14px', background: 'color-mix(in oklch, var(--info) 30%, transparent)', border: '1px solid rgba(99, 130, 175, 0.3)', borderRadius: '8px' }}>
               <div style={{ fontSize: '11px', color: 'var(--info)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -5380,34 +5446,66 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
                   </a>
                 )}
               </div>
-              <div style={{ fontSize: '12px', color: 'var(--text)', display: 'grid', gap: '4px' }}>
-                <div><strong>Name:</strong> {proposal.person.name}</div>
-                {proposal.person.title && <div><strong>Title:</strong> {proposal.person.title}</div>}
-                {proposal.person.email && (
-                  <div>
-                    <strong>Email:</strong> {proposal.person.email}
-                    {proposal.person.emailStatus && (
-                      <span style={{ marginLeft: '8px', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: proposal.person.emailStatus === 'verified' ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : proposal.person.emailStatus === 'directory' ? 'color-mix(in oklch, var(--ok) 20%, transparent)' : 'color-mix(in oklch, var(--warn) 30%, transparent)', color: proposal.person.emailStatus === 'verified' || proposal.person.emailStatus === 'directory' ? 'var(--ok)' : 'var(--warn)' }}>
-                        {proposal.person.emailStatus}{proposal.person.emailSource ? ` · ${proposal.person.emailSource}` : ''}
-                      </span>
-                    )}
-                  </div>
-                )}
-                {proposal.person.phone && <div><strong>Phone:</strong> {proposal.person.phone}</div>}
-                {proposal.person.linkedinUrl && (
-                  <div><strong>LinkedIn:</strong> <a href={proposal.person.linkedinUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--info)' }}>profile</a></div>
-                )}
-                {proposal.person.organizationName && (
-                  <div style={{ fontSize: '11px', color: 'var(--text-3)' }}>Apollo says they work at: {proposal.person.organizationName}</div>
-                )}
+              {/* Field-by-field comparison: what's on file → what enrichment returned */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'auto auto 1fr', gap: '6px 10px', alignItems: 'baseline', fontSize: '12px', color: 'var(--text)' }}>
+                {compareRows.map(r => {
+                  const chip = stateChip[r.state];
+                  const renderVal = (val) => r.isLink && val
+                    ? <a href={val} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--info)' }}>profile</a>
+                    : (val || <span style={{ color: 'var(--text-3)' }}>—</span>);
+                  return (
+                    <React.Fragment key={r.key}>
+                      <div style={{ color: 'var(--text-3)', fontWeight: 600 }}>{r.label}</div>
+                      <div>
+                        <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', background: chip.bg, color: chip.fg, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.03em', whiteSpace: 'nowrap' }}>
+                          {chip.label}
+                        </span>
+                      </div>
+                      <div style={{ minWidth: 0, wordBreak: 'break-word' }}>
+                        {r.state === 'update' ? (
+                          <span>
+                            <span style={{ color: 'var(--text-3)', textDecoration: 'line-through' }}>{renderVal(r.current)}</span>
+                            <span style={{ color: 'var(--text-3)' }}> → </span>
+                            <span>{renderVal(r.incoming)}</span>
+                          </span>
+                        ) : r.state === 'none' ? (
+                          <span style={{ color: 'var(--text-3)' }}>{r.current ? renderVal(r.current) : '—'}{r.current ? ' (kept)' : ''}</span>
+                        ) : (
+                          renderVal(r.incoming)
+                        )}
+                        {r.key === 'email' && r.hasIncoming && r.emailStatus && (
+                          <span style={{ marginLeft: '8px', fontSize: '10px', padding: '1px 6px', borderRadius: '4px', background: r.emailStatus === 'verified' ? 'color-mix(in oklch, var(--ok) 30%, transparent)' : r.emailStatus === 'directory' ? 'color-mix(in oklch, var(--ok) 20%, transparent)' : 'color-mix(in oklch, var(--warn) 30%, transparent)', color: r.emailStatus === 'verified' || r.emailStatus === 'directory' ? 'var(--ok)' : 'var(--warn)' }}>
+                            {r.emailStatus}{r.emailSource ? ` · ${r.emailSource}` : ''}
+                          </span>
+                        )}
+                      </div>
+                    </React.Fragment>
+                  );
+                })}
               </div>
+              {person.organizationName && (
+                <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '8px' }}>Apollo says they work at: {person.organizationName}</div>
+              )}
+              {changeCount === 0 && (
+                <div style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '10px', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <CheckCircle2 size={12} /> Match confirmed — every field already matches what's on file. Nothing new to apply.
+                </div>
+              )}
               <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                <button style={{ ...styles.primaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={() => applyEnrichment(prospect.id)}>
-                  <CheckCircle2 size={12} /> Apply enrichment
-                </button>
-                <button style={{ ...styles.secondaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={() => dismissEnrichment(prospect.id)}>
-                  Reject — wrong person
-                </button>
+                {changeCount > 0 ? (
+                  <>
+                    <button style={{ ...styles.primaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={() => applyEnrichment(prospect.id)}>
+                      <CheckCircle2 size={12} /> Apply {changeCount} {changeCount === 1 ? 'change' : 'changes'}
+                    </button>
+                    <button style={{ ...styles.secondaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={() => dismissEnrichment(prospect.id)}>
+                      Reject — wrong person
+                    </button>
+                  </>
+                ) : (
+                  <button style={{ ...styles.secondaryBtn, fontSize: '12px', padding: '6px 12px' }} onClick={() => dismissEnrichment(prospect.id)}>
+                    Dismiss
+                  </button>
+                )}
               </div>
             </div>
             );
@@ -5433,6 +5531,20 @@ function ProspectRow({ styles, prospect, researchData, pdRecords, researchProspe
               onClick={() => enrichProspect(prospect)}
               disabled={isEnriching === prospect.id || !!isEnriching}
               title="Look up verified contact info via Apollo (1 credit if found)"
+            >
+              {isEnriching === prospect.id ? <><Loader2 size={13} className="spin" /> Enriching…</> : <><Sparkles size={13} /> Enrich</>}
+            </button>
+          )}
+          {/* Secondary Enrich — available on every prospect that isn't already
+              showing the primary Enrich button above. Lets the rep re-enrich a
+              prospect that has a present-but-weak email (e.g. a personal
+              gmail/yahoo address that wouldn't trip needsEnrichment). */}
+          {!isDead && !proposedEnrichment?.[prospect.id] && !(prospect.needsEnrichment && !isCustomer) && (
+            <button
+              style={styles.secondaryBtn}
+              onClick={() => enrichProspect(prospect)}
+              disabled={isEnriching === prospect.id || !!isEnriching}
+              title="Enrich / refresh contact info via Apollo — email, phone, title, LinkedIn (1 credit if a match is found)"
             >
               {isEnriching === prospect.id ? <><Loader2 size={13} className="spin" /> Enriching…</> : <><Sparkles size={13} /> Enrich</>}
             </button>
